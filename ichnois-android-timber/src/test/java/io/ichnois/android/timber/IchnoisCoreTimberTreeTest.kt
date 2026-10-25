@@ -1,0 +1,429 @@
+package io.ichnois.android.timber
+
+import android.util.Log
+import io.ichnois.Breadcrumb
+import io.ichnois.Scopes
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreLogLevel
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.logger.ILoggerApi
+import io.ichnois.logger.IchnoisCoreLogParameters
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyVararg
+import org.mockito.kotlin.check
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoInteractions
+import org.mockito.kotlin.whenever
+import timber.log.Timber
+
+class IchnoisCoreTimberTreeTest {
+  private class Fixture {
+    lateinit var scopes: Scopes
+    lateinit var logs: ILoggerApi
+
+    fun getSut(
+      minEventLevel: IchnoisCoreLevel = IchnoisCoreLevel.ERROR,
+      minBreadcrumbLevel: IchnoisCoreLevel = IchnoisCoreLevel.INFO,
+      minLogsLevel: IchnoisCoreLogLevel = IchnoisCoreLogLevel.INFO,
+      logsEnabled: Boolean = true,
+    ): IchnoisCoreTimberTree {
+      logs = mock<ILoggerApi>()
+      scopes = mock<Scopes>()
+      val options = IchnoisCoreOptions().apply { logs.isEnabled = logsEnabled }
+      whenever(scopes.options).thenReturn(options)
+      whenever(scopes.logger()).thenReturn(logs)
+      return IchnoisCoreTimberTree(scopes, minEventLevel, minBreadcrumbLevel, minLogsLevel)
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @BeforeTest
+  fun beforeTest() {
+    Timber.uprootAll()
+  }
+
+  @Test
+  fun `Tree captures an event if min level is equal`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable())
+    verify(fixture.scopes).captureEvent(any())
+  }
+
+  @Test
+  fun `Tree captures an event if min level is higher`() {
+    val sut = fixture.getSut()
+    sut.wtf(Throwable())
+    verify(fixture.scopes).captureEvent(any())
+  }
+
+  @Test
+  fun `Tree won't capture an event if min level is lower`() {
+    val sut = fixture.getSut()
+    sut.d(Throwable())
+    verify(fixture.scopes, never()).captureEvent(any())
+  }
+
+  @Test
+  fun `Tree captures debug level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.d(Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.DEBUG, it.level) })
+  }
+
+  @Test
+  fun `Tree captures info level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.i(Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.INFO, it.level) })
+  }
+
+  @Test
+  fun `Tree captures warning level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.w(Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.WARNING, it.level) })
+  }
+
+  @Test
+  fun `Tree captures error level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.e(Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.ERROR, it.level) })
+  }
+
+  @Test
+  fun `Tree captures fatal level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.wtf(Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.FATAL, it.level) })
+  }
+
+  @Test
+  fun `Tree captures unknown as debug level event`() {
+    val sut = fixture.getSut(IchnoisCoreLevel.DEBUG)
+    sut.log(15, Throwable())
+    verify(fixture.scopes).captureEvent(check { assertEquals(IchnoisCoreLevel.DEBUG, it.level) })
+  }
+
+  @Test
+  fun `Tree captures an event with an exception`() {
+    val sut = fixture.getSut()
+    val throwable = Throwable()
+    sut.e(throwable)
+    verify(fixture.scopes).captureEvent(check { assertEquals(throwable, it.throwable) })
+  }
+
+  @Test
+  fun `Tree captures an event without an exception`() {
+    val sut = fixture.getSut()
+    sut.e("message")
+    verify(fixture.scopes).captureEvent(check { assertNull(it.throwable) })
+  }
+
+  @Test
+  fun `Tree captures an event and sets Timber as a logger`() {
+    val sut = fixture.getSut()
+    sut.e("message")
+    verify(fixture.scopes).captureEvent(check { assertEquals("Timber", it.logger) })
+  }
+
+  @Test
+  fun `Tree captures an event with TimberTag tag`() {
+    val sut = fixture.getSut()
+    Timber.plant(sut)
+    // only available thru static class
+    Timber.tag("tag")
+    Timber.e("message")
+    verify(fixture.scopes).captureEvent(check { assertEquals("tag", it.getTag("TimberTag")) })
+  }
+
+  @Test
+  fun `Tree captures an event with TimberTag tag for debug events`() {
+    val sut = fixture.getSut(minEventLevel = IchnoisCoreLevel.INFO)
+    Timber.plant(sut)
+    // only available thru static class
+    Timber.tag("infoTag").i("message")
+    verify(fixture.scopes).captureEvent(check { assertEquals("infoTag", it.getTag("TimberTag")) })
+  }
+
+  @Test
+  fun `Tree captures an event with chained tag usage`() {
+    val sut = fixture.getSut(minEventLevel = IchnoisCoreLevel.INFO)
+    Timber.plant(sut)
+    // only available thru static class
+    Timber.tag("infoTag").log(Log.INFO, "message")
+    verify(fixture.scopes).captureEvent(check { assertEquals("infoTag", it.getTag("TimberTag")) })
+  }
+
+  @Test
+  fun `Tree properly propagates all levels`() {
+    val levels =
+      listOf(
+        Pair(Log.DEBUG, IchnoisCoreLevel.DEBUG),
+        Pair(Log.VERBOSE, IchnoisCoreLevel.DEBUG),
+        Pair(Log.INFO, IchnoisCoreLevel.INFO),
+        Pair(Log.WARN, IchnoisCoreLevel.WARNING),
+        Pair(Log.ERROR, IchnoisCoreLevel.ERROR),
+        Pair(Log.ASSERT, IchnoisCoreLevel.FATAL),
+      )
+
+    for (level in levels) {
+      Timber.uprootAll()
+
+      val logLevel = level.first
+      val ichnoisLevel = level.second
+
+      val sut = fixture.getSut(minEventLevel = ichnoisLevel)
+      Timber.plant(sut)
+      // only available thru static class
+      Timber.tag("tag").log(logLevel, "message")
+      verify(fixture.scopes)
+        .captureEvent(
+          check {
+            assertEquals("tag", it.getTag("TimberTag"))
+            assertEquals(ichnoisLevel, it.level)
+          }
+        )
+    }
+  }
+
+  @Test
+  fun `Tree captures an event without TimberTag tag`() {
+    val sut = fixture.getSut()
+    Timber.plant(sut)
+    Timber.e("message")
+    verify(fixture.scopes).captureEvent(check { assertNull(it.getTag("TimberTag")) })
+  }
+
+  @Test
+  fun `Tree captures an event with given message`() {
+    val sut = fixture.getSut()
+    sut.e("message")
+    verify(fixture.scopes)
+      .captureEvent(
+        check { assertNotNull(it.message) { message -> assertEquals("message", message.message) } }
+      )
+  }
+
+  @Test
+  fun `Tree captures an event with formatted message and arguments, when provided`() {
+    val sut = fixture.getSut()
+    sut.e("test count: %d", 32)
+    verify(fixture.scopes)
+      .captureEvent(
+        check {
+          assertNotNull(it.message) { message ->
+            assertEquals("test count: %d", message.message)
+            assertEquals("test count: 32", message.formatted)
+            assertEquals("32", message.params!!.first())
+          }
+        }
+      )
+  }
+
+  @Test
+  fun `Tree adds a breadcrumb with formatted message and arguments, when provided`() {
+    val sut = fixture.getSut()
+    sut.e("test count: %d", 32)
+
+    verify(fixture.scopes)
+      .addBreadcrumb(check<Breadcrumb> { assertEquals("test count: 32", it.message) })
+  }
+
+  @Test
+  fun `Tree adds a breadcrumb if min level is equal`() {
+    val sut = fixture.getSut()
+    sut.i(Throwable("test"))
+    verify(fixture.scopes).addBreadcrumb(any<Breadcrumb>())
+  }
+
+  @Test
+  fun `Tree adds a breadcrumb if min level is higher`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("test"))
+    verify(fixture.scopes).addBreadcrumb(any<Breadcrumb>())
+  }
+
+  @Test
+  fun `Tree won't add a breadcrumb if min level is lower`() {
+    val sut = fixture.getSut(minBreadcrumbLevel = IchnoisCoreLevel.ERROR)
+    sut.i(Throwable("test"))
+    verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>())
+  }
+
+  @Test
+  fun `Tree adds an info breadcrumb`() {
+    val sut = fixture.getSut()
+    sut.i("message")
+    verify(fixture.scopes)
+      .addBreadcrumb(
+        check<Breadcrumb> {
+          assertEquals("Timber", it.category)
+          assertEquals(IchnoisCoreLevel.INFO, it.level)
+          assertEquals("message", it.message)
+        }
+      )
+  }
+
+  @Test
+  fun `Tree adds an error breadcrumb`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("test"))
+    verify(fixture.scopes)
+      .addBreadcrumb(
+        check<Breadcrumb> {
+          assertEquals("exception", it.category)
+          assertEquals(IchnoisCoreLevel.ERROR, it.level)
+          assertEquals("test", it.message)
+        }
+      )
+  }
+
+  @Test
+  fun `Tree does not add a breadcrumb, if no message provided`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable())
+    verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>())
+  }
+
+  @Test
+  fun `Tree does not throw when using log with args`() {
+    val sut = fixture.getSut()
+    sut.d("test %s, %s", 1, 1)
+  }
+
+  @Test
+  fun `Tree adds a log with message and arguments, when provided`() {
+    val sut = fixture.getSut()
+    sut.e("test count: %d %d", 32, 5)
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.ERROR),
+        check<IchnoisCoreLogParameters> { assertEquals("auto.log.timber", it.origin) },
+        eq("test count: %d %d"),
+        eq(32),
+        eq(5),
+      )
+  }
+
+  @Test
+  fun `Tree adds a log if min level is equal`() {
+    val sut = fixture.getSut()
+    sut.i(Throwable("test"))
+    verify(fixture.logs).log(any(), any<IchnoisCoreLogParameters>(), any<String>())
+  }
+
+  @Test
+  fun `Tree adds a log if min level is higher`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("test"))
+    verify(fixture.logs).log(any(), any<IchnoisCoreLogParameters>(), any<String>(), anyVararg<Any>())
+  }
+
+  @Test
+  fun `Tree won't add a log if min level is lower`() {
+    val sut = fixture.getSut(minLogsLevel = IchnoisCoreLogLevel.ERROR)
+    sut.i(Throwable("test"))
+    verifyNoInteractions(fixture.logs)
+  }
+
+  @Test
+  fun `Tree does not add a log when automatic Logs are disabled`() {
+    val sut = fixture.getSut(logsEnabled = false)
+
+    sut.e("message")
+
+    verifyNoInteractions(fixture.logs)
+    verify(fixture.scopes).captureEvent(any())
+    verify(fixture.scopes).addBreadcrumb(any<Breadcrumb>())
+  }
+
+  @Test
+  fun `Tree adds an info log`() {
+    val sut = fixture.getSut()
+    sut.i("message")
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.INFO),
+        check<IchnoisCoreLogParameters> { assertEquals("auto.log.timber", it.origin) },
+        eq("message"),
+      )
+  }
+
+  @Test
+  fun `Tree adds an error log`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("test"))
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.ERROR),
+        check<IchnoisCoreLogParameters> { assertEquals("auto.log.timber", it.origin) },
+        eq("test"),
+      )
+  }
+
+  @Test
+  fun `Tree does not add a log, if no message or throwable is provided`() {
+    val sut = fixture.getSut()
+    sut.e(null as String?)
+    verifyNoInteractions(fixture.logs)
+  }
+
+  @Test
+  fun `Tree logs throwable`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("throwable message"))
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.ERROR),
+        check<IchnoisCoreLogParameters> { assertEquals("auto.log.timber", it.origin) },
+        eq("throwable message"),
+      )
+  }
+
+  @Test
+  fun `Tree logs throwable and message`() {
+    val sut = fixture.getSut()
+    sut.e(Throwable("throwable message"), "My message")
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.ERROR),
+        check<IchnoisCoreLogParameters> {
+          assertEquals("auto.log.timber", it.origin)
+          assertEquals(null, it.attributes?.attributes?.get("timber.tag"))
+        },
+        eq("My message\nthrowable message"),
+      )
+  }
+
+  @Test
+  fun `Tree logs timber tag`() {
+    val sut = fixture.getSut()
+    Timber.plant(sut)
+    Timber.tag("timberTag").i("message")
+
+    verify(fixture.logs)
+      .log(
+        eq(IchnoisCoreLogLevel.INFO),
+        check<IchnoisCoreLogParameters> {
+          assertEquals("auto.log.timber", it.origin)
+          assertEquals("timberTag", it.attributes?.attributes?.get("timber.tag")?.value)
+        },
+        eq("message"),
+      )
+  }
+}

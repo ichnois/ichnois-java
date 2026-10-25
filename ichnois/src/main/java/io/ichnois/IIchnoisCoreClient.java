@@ -1,0 +1,328 @@
+package io.ichnois;
+
+import io.ichnois.protocol.Feedback;
+import io.ichnois.protocol.Message;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.transport.RateLimiter;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/** IchnoisCore Client interface */
+public interface IIchnoisCoreClient {
+
+  /**
+   * Whether the client is enabled or not
+   *
+   * @return true if its enabled or false otherwise.
+   */
+  boolean isEnabled();
+
+  /**
+   * Capture the event
+   *
+   * @param event the event
+   * @param scope An optional scope to be applied to the event.
+   * @param hint SDK specific but provides high level information about the origin of the event.
+   * @return The Id (IchnoisCoreId object) of the event.
+   */
+  @NotNull
+  IchnoisCoreId captureEvent(@NotNull IchnoisCoreEvent event, @Nullable IScope scope, @Nullable Hint hint);
+
+  /** Flushes out the queue for up to timeout seconds and disable the client. */
+  void close();
+
+  /**
+   * Flushes out the queue for up to timeout seconds and disable the client.
+   *
+   * @param isRestarting if true, avoids locking the main thread when finishing the queue.
+   */
+  void close(boolean isRestarting);
+
+  /**
+   * Flushes events queued up, but keeps the client enabled.
+   *
+   * @param timeoutMillis time in milliseconds
+   */
+  void flush(long timeoutMillis);
+
+  /**
+   * Captures the event.
+   *
+   * @param event the event
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureEvent(@NotNull IchnoisCoreEvent event) {
+    return captureEvent(event, null, null);
+  }
+
+  /**
+   * Captures the event.
+   *
+   * @param event the event
+   * @param scope An optional scope to be applied to the event.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureEvent(@NotNull IchnoisCoreEvent event, @Nullable IScope scope) {
+    return captureEvent(event, scope, null);
+  }
+
+  /**
+   * Capture the event
+   *
+   * @param event the event
+   * @param hint SDK specific but provides high level information about the origin of the event.
+   * @return The Id (IchnoisCoreId object) of the event.
+   */
+  default @NotNull IchnoisCoreId captureEvent(@NotNull IchnoisCoreEvent event, @Nullable Hint hint) {
+    return captureEvent(event, null, hint);
+  }
+
+  /**
+   * Captures the feedback.
+   *
+   * @param feedback The feedback to send.
+   * @param hint An optional hint to be applied to the event.
+   * @param scope An optional scope to be applied to the event.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @NotNull
+  IchnoisCoreId captureFeedback(@NotNull Feedback feedback, @Nullable Hint hint, @NotNull IScope scope);
+
+  /**
+   * Captures the message.
+   *
+   * @param message The message to send.
+   * @param level The message level.
+   * @param scope An optional scope to be applied to the event.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureMessage(
+      @NotNull String message, @NotNull IchnoisCoreLevel level, @Nullable IScope scope) {
+    IchnoisCoreEvent event = new IchnoisCoreEvent();
+    Message ichnoisMessage = new Message();
+    ichnoisMessage.setFormatted(message);
+    event.setMessage(ichnoisMessage);
+    event.setLevel(level);
+
+    return captureEvent(event, scope);
+  }
+
+  /**
+   * Captures the message.
+   *
+   * @param message The message to send.
+   * @param level The message level.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureMessage(@NotNull String message, @NotNull IchnoisCoreLevel level) {
+    return captureMessage(message, level, null);
+  }
+
+  /**
+   * Captures the exception.
+   *
+   * @param throwable The exception.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureException(@NotNull Throwable throwable) {
+    return captureException(throwable, null, null);
+  }
+
+  /**
+   * Captures the exception.
+   *
+   * @param throwable The exception.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @param scope An optional scope to be applied to the event.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureException(
+      @NotNull Throwable throwable, @Nullable IScope scope, @Nullable Hint hint) {
+    IchnoisCoreEvent event = new IchnoisCoreEvent(throwable);
+    return captureEvent(event, scope, hint);
+  }
+
+  /**
+   * Captures the exception.
+   *
+   * @param throwable The exception.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureException(@NotNull Throwable throwable, @Nullable Hint hint) {
+    return captureException(throwable, null, hint);
+  }
+
+  /**
+   * Captures the exception.
+   *
+   * @param throwable The exception.
+   * @param scope An optional scope to be applied to the event.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureException(@NotNull Throwable throwable, @Nullable IScope scope) {
+    return captureException(throwable, scope, null);
+  }
+
+  @NotNull
+  IchnoisCoreId captureReplayEvent(
+      @NotNull IchnoisCoreReplayEvent event, @Nullable IScope scope, @Nullable Hint hint);
+
+  /**
+   * Captures a manually created user feedback and sends it to IchnoisCore.
+   *
+   * @param userFeedback The user feedback to send to IchnoisCore.
+   * @deprecated Use {@link IFeedbackApi#capture(io.ichnois.protocol.Feedback)} with the new {@link
+   *     io.ichnois.protocol.Feedback} type instead.
+   */
+  @Deprecated
+  void captureUserFeedback(@NotNull UserFeedback userFeedback);
+
+  /**
+   * Captures a session. This method transform a session to an envelope and forwards to
+   * captureEnvelope
+   *
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @param session the Session
+   */
+  void captureSession(@NotNull Session session, @Nullable Hint hint);
+
+  /**
+   * Captures a session. This method transform a session to an envelope and forwards to
+   * captureEnvelope
+   *
+   * @param session the Session
+   */
+  default void captureSession(@NotNull Session session) {
+    captureSession(session, null);
+  }
+
+  /**
+   * Captures an envelope.
+   *
+   * @param envelope the IchnoisCoreEnvelope to send.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @Nullable
+  IchnoisCoreId captureEnvelope(@NotNull IchnoisCoreEnvelope envelope, @Nullable Hint hint);
+
+  /**
+   * Captures an envelope.
+   *
+   * @param envelope the IchnoisCoreEnvelope to send.
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @Nullable IchnoisCoreId captureEnvelope(@NotNull IchnoisCoreEnvelope envelope) {
+    return captureEnvelope(envelope, null);
+  }
+
+  /**
+   * Captures a transaction.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @param scope An optional scope to be applied to the event.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @NotNull
+  default IchnoisCoreId captureTransaction(
+      @NotNull IchnoisCoreTransaction transaction, @Nullable IScope scope, @Nullable Hint hint) {
+    return captureTransaction(transaction, null, scope, hint);
+  }
+
+  /**
+   * Captures a transaction.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @param scope An optional scope to be applied to the event.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @NotNull
+  default IchnoisCoreId captureTransaction(
+      @NotNull IchnoisCoreTransaction transaction,
+      @Nullable TraceContext traceContext,
+      @Nullable IScope scope,
+      @Nullable Hint hint) {
+    return captureTransaction(transaction, traceContext, scope, hint, null);
+  }
+
+  /**
+   * Captures a transaction.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @param traceContext the trace context
+   * @param scope An optional scope to be applied to the event.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @param profilingTraceData An optional profiling trace data captured during the transaction
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @NotNull
+  @ApiStatus.Internal
+  IchnoisCoreId captureTransaction(
+      @NotNull IchnoisCoreTransaction transaction,
+      @Nullable TraceContext traceContext,
+      @Nullable IScope scope,
+      @Nullable Hint hint,
+      @Nullable ProfilingTraceData profilingTraceData);
+
+  /**
+   * Captures a transaction without scope nor hint.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @param traceContext the trace context
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  @ApiStatus.Internal
+  default @NotNull IchnoisCoreId captureTransaction(
+      @NotNull IchnoisCoreTransaction transaction, @Nullable TraceContext traceContext) {
+    return captureTransaction(transaction, traceContext, null, null);
+  }
+
+  /**
+   * Captures a transaction without scope nor hint.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @return The Id (IchnoisCoreId object) of the event
+   */
+  default @NotNull IchnoisCoreId captureTransaction(@NotNull IchnoisCoreTransaction transaction) {
+    return captureTransaction(transaction, null, null, null);
+  }
+
+  /**
+   * Captures the profile chunk and enqueues it for sending to IchnoisCore server.
+   *
+   * @param profilingContinuousData the continuous profiling payload
+   * @return the profile chunk id
+   */
+  @ApiStatus.Internal
+  @NotNull
+  IchnoisCoreId captureProfileChunk(
+      final @NotNull ProfileChunk profilingContinuousData, final @Nullable IScope scope);
+
+  @NotNull
+  IchnoisCoreId captureCheckIn(@NotNull CheckIn checkIn, @Nullable IScope scope, @Nullable Hint hint);
+
+  void captureLog(@NotNull IchnoisCoreLogEvent logEvent, @Nullable IScope scope);
+
+  void captureMetric(
+      @NotNull IchnoisCoreMetricsEvent logEvent, @Nullable IScope scope, @Nullable Hint hint);
+
+  @ApiStatus.Internal
+  void captureBatchedLogEvents(@NotNull IchnoisCoreLogEvents logEvents);
+
+  @ApiStatus.Internal
+  void captureBatchedMetricsEvents(@NotNull IchnoisCoreMetricsEvents metricsEvents);
+
+  @ApiStatus.Internal
+  @Nullable
+  RateLimiter getRateLimiter();
+
+  @ApiStatus.Internal
+  default boolean isHealthy() {
+    return true;
+  }
+}

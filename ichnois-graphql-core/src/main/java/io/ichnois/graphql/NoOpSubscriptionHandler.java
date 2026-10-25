@@ -1,0 +1,27 @@
+package io.ichnois.graphql;
+
+import graphql.execution.instrumentation.parameters.InstrumentationFieldFetchParameters;
+import io.ichnois.IScopes;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+
+@ApiStatus.Internal
+public final class NoOpSubscriptionHandler implements IchnoisCoreSubscriptionHandler {
+
+  private static final @NotNull NoOpSubscriptionHandler instance = new NoOpSubscriptionHandler();
+
+  private NoOpSubscriptionHandler() {}
+
+  public static @NotNull NoOpSubscriptionHandler getInstance() {
+    return instance;
+  }
+
+  @Override
+  public @NotNull Object onSubscriptionResult(
+      @NotNull Object result,
+      @NotNull IScopes scopes,
+      @NotNull ExceptionReporter exceptionReporter,
+      @NotNull InstrumentationFieldFetchParameters parameters) {
+    return result;
+  }
+}

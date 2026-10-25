@@ -1,0 +1,248 @@
+package io.ichnois
+
+import io.ichnois.exception.ExceptionMechanismException
+import io.ichnois.protocol.Mechanism
+import io.ichnois.protocol.IchnoisCoreId
+import java.io.StringReader
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.mockito.kotlin.mock
+
+class IchnoisCoreEventTest {
+  @Test
+  fun `constructor creates a non empty event id`() =
+    assertNotEquals(IchnoisCoreId.EMPTY_ID, IchnoisCoreEvent().eventId)
+
+  @Test
+  fun `constructor defines timestamp after now`() =
+    assertTrue(
+      Instant.now()
+        .plus(1, ChronoUnit.HOURS)
+        .isAfter(Instant.parse(DateUtils.getTimestamp(IchnoisCoreEvent().timestamp)))
+    )
+
+  @Test
+  fun `constructor defines timestamp before hour ago`() =
+    assertTrue(
+      Instant.now()
+        .minus(1, ChronoUnit.HOURS)
+        .isBefore(Instant.parse(DateUtils.getTimestamp(IchnoisCoreEvent().timestamp)))
+    )
+
+  @Test
+  fun `if mechanism is not handled, it should return isCrashed=true`() {
+    val mechanism = Mechanism()
+    mechanism.isHandled = false
+    val event = IchnoisCoreEvent()
+    val factory = IchnoisCoreExceptionFactory(mock())
+    val ichnoisExceptions =
+      factory.getIchnoisCoreExceptions(ExceptionMechanismException(mechanism, Throwable(), Thread()))
+    event.exceptions = ichnoisExceptions
+    assertTrue(event.isCrashed)
+  }
+
+  @Test
+  fun `if mechanism is handled, it should return isCrashed=false`() {
+    val mechanism = Mechanism()
+    mechanism.isHandled = true
+    val event = IchnoisCoreEvent()
+    val factory = IchnoisCoreExceptionFactory(mock())
+    val ichnoisExceptions =
+      factory.getIchnoisCoreExceptions(ExceptionMechanismException(mechanism, Throwable(), Thread()))
+    event.exceptions = ichnoisExceptions
+    assertFalse(event.isCrashed)
+  }
+
+  @Test
+  fun `if mechanism handled flag is null, it should return isCrashed=false`() {
+    val mechanism = Mechanism()
+    mechanism.isHandled = null
+    val event = IchnoisCoreEvent()
+    val factory = IchnoisCoreExceptionFactory(mock())
+    val ichnoisExceptions =
+      factory.getIchnoisCoreExceptions(ExceptionMechanismException(mechanism, Throwable(), Thread()))
+    event.exceptions = ichnoisExceptions
+    assertFalse(event.isCrashed)
+  }
+
+  @Test
+  fun `if mechanism is not set, it should return isCrashed=false`() {
+    val event = IchnoisCoreEvent()
+    val factory = IchnoisCoreExceptionFactory(mock())
+    val ichnoisExceptions = factory.getIchnoisCoreExceptions(RuntimeException(Throwable()))
+    event.exceptions = ichnoisExceptions
+    assertFalse(event.isCrashed)
+  }
+
+  @Test
+  fun `adds breadcrumb with string as a parameter`() {
+    val event = IchnoisCoreEvent()
+    event.addBreadcrumb("breadcrumb")
+    assertNotNull(event.breadcrumbs) {
+      assertEquals(1, it.filter { it.message == "breadcrumb" }.size)
+    }
+  }
+
+  @Test
+  fun `when throwable is a ExceptionMechanismException, getThrowable unwraps original throwable`() {
+    val event = IchnoisCoreEvent()
+    val ex = RuntimeException()
+    event.throwable = ExceptionMechanismException(Mechanism(), ex, Thread.currentThread())
+    assertEquals(ex, event.getThrowable())
+  }
+
+  @Test
+  fun `when throwable is not a ExceptionMechanismException, getThrowable returns throwable`() {
+    val event = IchnoisCoreEvent()
+    val ex = RuntimeException()
+    event.throwable = ex
+    assertEquals(ex, event.getThrowable())
+  }
+
+  @Test
+  fun `when throwable is a ExceptionMechanismException, getThrowableMechanism returns the wrapped throwable`() {
+    val event = IchnoisCoreEvent()
+    val ex = RuntimeException()
+    val exceptionMechanism = ExceptionMechanismException(Mechanism(), ex, Thread.currentThread())
+    event.throwable = exceptionMechanism
+    assertEquals(exceptionMechanism, event.throwableMechanism)
+  }
+
+  @Test
+  fun `when setBreadcrumbs receives immutable list as an argument, its still possible to add more breadcrumbs to the event`() {
+    val event =
+      IchnoisCoreEvent().apply {
+        breadcrumbs = listOf(Breadcrumb("a"), Breadcrumb("b"))
+        addBreadcrumb("c")
+      }
+    assertNotNull(event.breadcrumbs) {
+      assertEquals(listOf("a", "b", "c"), it.map { breadcrumb -> breadcrumb.message })
+    }
+  }
+
+  @Test
+  fun `when setFingerprints receives immutable list as an argument, its still possible to add more fingerprints to the event`() {
+    val event =
+      IchnoisCoreEvent().apply {
+        fingerprints = listOf("a", "b")
+        fingerprints!!.add("c")
+      }
+    assertNotNull(event.fingerprints) { assertEquals(listOf("a", "b", "c"), it) }
+  }
+
+  @Test
+  fun `when setExtras receives immutable map as an argument, its still possible to add more extra to the event`() {
+    val event =
+      IchnoisCoreEvent().apply {
+        extras =
+          Collections.unmodifiableMap(mapOf<String, Any>("key1" to "value1", "key2" to "value2"))
+        setExtra("key3", "value3")
+      }
+    assertNotNull(event.extras) {
+      assertEquals(mapOf("key1" to "value1", "key2" to "value2", "key3" to "value3"), it)
+    }
+  }
+
+  @Test
+  fun `when setTags receives immutable map as an argument, its still possible to add more tags to the event`() {
+    val event =
+      IchnoisCoreEvent().apply {
+        tags = Collections.unmodifiableMap(mapOf("key1" to "value1", "key2" to "value2"))
+        setTag("key3", "value3")
+      }
+    assertNotNull(event.tags) {
+      assertEquals(mapOf("key1" to "value1", "key2" to "value2", "key3" to "value3"), it)
+    }
+  }
+
+  @Test
+  fun `when setModules receives immutable map as an argument, its still possible to add more modules to the event`() {
+    val event =
+      IchnoisCoreEvent().apply {
+        modules = Collections.unmodifiableMap(mapOf("key1" to "value1", "key2" to "value2"))
+        setModule("key3", "value3")
+      }
+    assertNotNull(event.modules) {
+      assertEquals(mapOf("key1" to "value1", "key2" to "value2", "key3" to "value3"), it)
+    }
+  }
+
+  @Test
+  fun `deserializes event with large flat modules map on a small stack`() {
+    val moduleCount = 50000
+    val json = buildString {
+      append("{\"event_id\":\"00000000000000000000000000000000\",\"modules\":{")
+      repeat(moduleCount) {
+        if (it > 0) {
+          append(',')
+        }
+        append("\"m")
+        append(it)
+        append("\":\"v\"")
+      }
+      append("}}")
+    }
+
+    val error = AtomicReference<Throwable?>()
+    val event = AtomicReference<IchnoisCoreEvent?>()
+    val thread =
+      Thread(
+        null,
+        Runnable {
+          try {
+            event.set(
+              JsonSerializer(IchnoisCoreOptions())
+                .deserialize(StringReader(json), IchnoisCoreEvent::class.java)
+            )
+          } catch (throwable: Throwable) {
+            error.set(throwable)
+          }
+        },
+        "large-flat-modules-repro",
+        1024L * 1024L,
+      )
+
+    thread.start()
+    thread.join()
+
+    assertNull(error.get())
+    assertEquals(moduleCount, event.get()?.modules?.size)
+  }
+
+  @Test
+  fun `null tag does not cause NPE`() {
+    val event = IchnoisCoreEvent()
+
+    event.setTag("k", "oldvalue")
+    event.setTag(null, null)
+    event.setTag("k", null)
+    event.setTag(null, "v")
+
+    assertNull(event.getTag(null))
+    assertNull(event.getTag("k"))
+    assertFalse(event.tags!!.containsKey("k"))
+  }
+
+  @Test
+  fun `null extra does not cause NPE`() {
+    val event = IchnoisCoreEvent()
+
+    event.setExtra("k", "oldvalue")
+    event.setExtra(null, null)
+    event.setExtra("k", null)
+    event.setExtra(null, "v")
+
+    assertNull(event.getExtra(null))
+    assertNull(event.getExtra("k"))
+    assertFalse(event.extras!!.containsKey("k"))
+  }
+}

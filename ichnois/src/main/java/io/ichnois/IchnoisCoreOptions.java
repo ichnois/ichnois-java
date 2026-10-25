@@ -1,0 +1,4294 @@
+package io.ichnois;
+
+import com.jakewharton.nopen.annotation.Open;
+import io.ichnois.backpressure.IBackpressureMonitor;
+import io.ichnois.backpressure.NoOpBackpressureMonitor;
+import io.ichnois.cache.IEnvelopeCache;
+import io.ichnois.cache.PersistingScopeObserver;
+import io.ichnois.clientreport.ClientReportRecorder;
+import io.ichnois.clientreport.DiscardReason;
+import io.ichnois.clientreport.IClientReportRecorder;
+import io.ichnois.clientreport.NoOpClientReportRecorder;
+import io.ichnois.internal.debugmeta.IDebugMetaLoader;
+import io.ichnois.internal.debugmeta.NoOpDebugMetaLoader;
+import io.ichnois.internal.gestures.GestureTargetLocator;
+import io.ichnois.internal.modules.IModulesLoader;
+import io.ichnois.internal.modules.NoOpModulesLoader;
+import io.ichnois.internal.viewhierarchy.ViewHierarchyExporter;
+import io.ichnois.logger.DefaultLoggerBatchProcessorFactory;
+import io.ichnois.logger.ILoggerBatchProcessorFactory;
+import io.ichnois.metrics.DefaultMetricsBatchProcessorFactory;
+import io.ichnois.metrics.IMetricsBatchProcessorFactory;
+import io.ichnois.protocol.SdkVersion;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.time.EpochClock;
+import io.ichnois.time.JavaMonotonicTicker;
+import io.ichnois.time.MonotonicTicker;
+import io.ichnois.time.SystemEpochClock;
+import io.ichnois.transport.ITransport;
+import io.ichnois.transport.ITransportGate;
+import io.ichnois.transport.NoOpEnvelopeCache;
+import io.ichnois.transport.NoOpTransportGate;
+import io.ichnois.transport.RateLimiterConfig;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.LazyEvaluator;
+import io.ichnois.util.LoadClass;
+import io.ichnois.util.Platform;
+import io.ichnois.util.SampleRateUtils;
+import io.ichnois.util.StringUtils;
+import io.ichnois.util.thread.IThreadChecker;
+import io.ichnois.util.thread.NoOpThreadChecker;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.net.ssl.SSLSocketFactory;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+/** IchnoisCore SDK options */
+// temp fix for JDK 21: Constructors call overridable methods; making them final would break the
+// public API.
+@SuppressWarnings("this-escape")
+@Open
+public class IchnoisCoreOptions implements RateLimiterConfig {
+
+  @ApiStatus.Internal public static final @NotNull String DEFAULT_PROPAGATION_TARGETS = ".*";
+
+  /** Maximum size of an event in bytes. Events exceeding this limit will be reduced. */
+  public static final long MAX_EVENT_SIZE_BYTES = 1024 * 1024;
+
+  /** Default Log level if not specified Default is DEBUG */
+  static final IchnoisCoreLevel DEFAULT_DIAGNOSTIC_LEVEL = IchnoisCoreLevel.DEBUG;
+
+  /**
+   * Default value for {@link IchnoisCoreEvent#getEnvironment()} set when {@link IchnoisCoreOptions} do not
+   * have the environment field set.
+   */
+  private static final String DEFAULT_ENVIRONMENT = "production";
+
+  /**
+   * Are callbacks that run for every event. They can either return a new event which in most cases
+   * means just adding data OR return null in case the event will be dropped and not sent.
+   */
+  private final @NotNull List<EventProcessor> eventProcessors = new CopyOnWriteArrayList<>();
+
+  /** Exceptions that once captured will not be sent to IchnoisCore as {@link IchnoisCoreEvent}. */
+  private final @NotNull Set<Class<? extends Throwable>> ignoredExceptionsForType =
+      new CopyOnWriteArraySet<>();
+
+  /**
+   * Strings or regex patterns that possible error messages for an event will be tested against. If
+   * there is a match, the captured event will not be sent to IchnoisCore.
+   */
+  private @Nullable List<FilterString> ignoredErrors = null;
+
+  /**
+   * Code that provides middlewares, bindings or hooks into certain frameworks or environments,
+   * along with code that inserts those bindings and activates them.
+   */
+  private final @NotNull List<Integration> integrations = new CopyOnWriteArrayList<>();
+
+  /** List of bundle IDs representing source bundles. */
+  private final @NotNull Set<String> bundleIds = new CopyOnWriteArraySet<>();
+
+  /**
+   * The DSN tells the SDK where to send the events to. If this value is not provided, the SDK will
+   * just not send any events.
+   */
+  private @Nullable String dsn;
+
+  /** Parsed DSN to avoid parsing it every time. */
+  private final @NotNull LazyEvaluator<Dsn> parsedDsn = new LazyEvaluator<>(() -> new Dsn(dsn));
+
+  /** dsnHash is used as a subfolder of cacheDirPath to isolate events when rotating DSNs */
+  private @Nullable String dsnHash;
+
+  /**
+   * Controls how many seconds to wait before shutting down. IchnoisCore SDKs send events from a
+   * background queue and this queue is given a certain amount to drain pending events Default is
+   * 2000 = 2s
+   */
+  private long shutdownTimeoutMillis = 2000; // 2s
+
+  /**
+   * Controls how many seconds to wait before flushing down. IchnoisCore SDKs cache events from a
+   * background queue and this queue is given a certain amount to drain pending events Default is
+   * 15000 = 15s
+   */
+  private long flushTimeoutMillis = 15000; // 15s
+
+  /**
+   * Controls how many seconds to wait before flushing previous session. IchnoisCore SDKs finalizes
+   * unfinished sessions from a background queue and this queue is given a certain amount to drain
+   * sessions. Default is 15000 = 15s
+   */
+  private long sessionFlushTimeoutMillis = 15000; // 15s
+
+  /**
+   * Turns debug mode on or off. If debug is enabled SDK will attempt to print out useful debugging
+   * information if something goes wrong. Default is disabled.
+   */
+  private boolean debug;
+
+  /** Logger interface to log useful debugging information if debug is enabled */
+  private @NotNull ILogger logger = NoOpLogger.getInstance();
+
+  @ApiStatus.Experimental private @NotNull ILogger fatalLogger = NoOpLogger.getInstance();
+
+  /** minimum LogLevel to be used if debug is enabled */
+  private @NotNull IchnoisCoreLevel diagnosticLevel = DEFAULT_DIAGNOSTIC_LEVEL;
+
+  /** Serializer interface to serialize/deserialize json events */
+  private final @NotNull LazyEvaluator<ISerializer> serializer =
+      new LazyEvaluator<>(() -> new JsonSerializer(this));
+
+  /** Envelope reader interface */
+  private final @NotNull LazyEvaluator<IEnvelopeReader> envelopeReader =
+      new LazyEvaluator<>(() -> new EnvelopeReader(serializer.getValue()));
+
+  /** Max depth when serializing object graphs with reflection. * */
+  private int maxDepth = 100;
+
+  /**
+   * IchnoisCore client name used for the HTTP authHeader and userAgent eg
+   * ichnois.{language}.{platform}/{version} eg ichnois.java.android/2.0.0 would be a valid case
+   */
+  private @Nullable String ichnoisClientName;
+
+  /**
+   * This function is called with an SDK specific event object and can return a modified event
+   * object or nothing to skip reporting the event
+   */
+  private @Nullable BeforeSendCallback beforeSend;
+
+  /**
+   * This function is called with an SDK specific feedback object and can return a modified feedback
+   * object or nothing to skip reporting the feedback
+   */
+  private @Nullable BeforeSendCallback beforeSendFeedback;
+
+  /**
+   * This function is called with an SDK specific transaction object and can return a modified
+   * transaction object or nothing to skip reporting the transaction
+   */
+  private @Nullable BeforeSendTransactionCallback beforeSendTransaction;
+
+  /**
+   * This function is called with an SDK specific replay object and can return a modified replay
+   * object or nothing to skip reporting the replay
+   */
+  private @Nullable BeforeSendReplayCallback beforeSendReplay;
+
+  /**
+   * This function is called with an SDK specific breadcrumb object before the breadcrumb is added
+   * to the scope. When nothing is returned from the function, the breadcrumb is dropped
+   */
+  private @Nullable BeforeBreadcrumbCallback beforeBreadcrumb;
+
+  /** Invoked when some data from the SDK is dropped before being consumed by IchnoisCore */
+  private @Nullable OnDiscardCallback onDiscard;
+
+  /** The cache dir. path for caching offline events */
+  private @Nullable String cacheDirPath;
+
+  private int maxCacheItems = 30;
+
+  /** Max. queue size before flushing events/envelopes to the disk */
+  private int maxQueueSize = maxCacheItems;
+
+  /**
+   * This variable controls the total amount of breadcrumbs that should be captured Default is 100
+   */
+  private int maxBreadcrumbs = 100;
+
+  /**
+   * This variable controls the total amount of feature flag evaluations that should be stored on
+   * the scope. The most recent `maxFeatureFlags` evaluations are stored on each scope. Default is
+   * 100
+   */
+  private int maxFeatureFlags = 100;
+
+  /** Sets the release. SDK will try to automatically configure a release out of the box */
+  private @Nullable String release;
+
+  /**
+   * Sets the environment. This string is freeform and not set by default. A release can be
+   * associated with more than one environment to separate them in the UI Think staging vs prod or
+   * similar.
+   */
+  private @Nullable String environment;
+
+  /**
+   * When set, a proxy can be configured that should be used for outbound requests. This is also
+   * used for HTTPS requests
+   */
+  private @Nullable Proxy proxy;
+
+  /**
+   * Configures the sample rate as a percentage of events to be sent in the range of 0.0 to 1.0. if
+   * 1.0 is set it means that 100% of events are sent. If set to 0.1 only 10% of events will be
+   * sent. Events are picked randomly. Default is null (disabled)
+   */
+  private @Nullable Double sampleRate;
+
+  /**
+   * Configures the sample rate as a percentage of transactions to be sent in the range of 0.0 to
+   * 1.0. if 1.0 is set it means that 100% of transactions are sent. If set to 0.1 only 10% of
+   * transactions will be sent. Transactions are picked randomly. Default is null (disabled)
+   */
+  private @Nullable Double tracesSampleRate;
+
+  /**
+   * This function is called by {@link TracesSampler} to determine if transaction is sampled - meant
+   * to be sent to IchnoisCore.
+   */
+  private @Nullable TracesSamplerCallback tracesSampler;
+
+  private volatile @Nullable TracesSampler internalTracesSampler;
+
+  /**
+   * A list of string prefixes of module names that do not belong to the app, but rather third-party
+   * packages. Modules considered not to be part of the app will be hidden from stack traces by
+   * default.
+   */
+  private final @NotNull List<String> inAppExcludes = new CopyOnWriteArrayList<>();
+
+  /**
+   * A list of string prefixes of module names that belong to the app. This option takes precedence
+   * over inAppExcludes.
+   */
+  private final @NotNull List<String> inAppIncludes = new CopyOnWriteArrayList<>();
+
+  /**
+   * The transport factory creates instances of {@link ITransport} - internal construct of the
+   * client that abstracts away the event sending.
+   */
+  private @NotNull ITransportFactory transportFactory = NoOpTransportFactory.getInstance();
+
+  /**
+   * Implementations of this interface serve as gatekeepers that allow or disallow sending of the
+   * events
+   */
+  private @NotNull ITransportGate transportGate = NoOpTransportGate.getInstance();
+
+  /** Sets the distribution. Think about it together with release and environment */
+  private @Nullable String dist;
+
+  /** When enabled, all the threads are automatically attached to all logged events. */
+  private boolean attachThreads;
+
+  /**
+   * When enabled, stack traces are automatically attached to all threads logged. Stack traces are
+   * always attached to exceptions but when this is set stack traces are also sent with threads. If
+   * no threads are logged, we log the current thread automatically.
+   */
+  private boolean attachStacktrace = true;
+
+  /** Whether to enable or disable automatic session tracking. */
+  private boolean enableAutoSessionTracking = true;
+
+  /**
+   * The session tracking interval in millis. This is the interval to end a session if the App goes
+   * to the background.
+   */
+  private long sessionTrackingIntervalMillis = 30000; // 30s
+
+  /** The distinct Id (generated Guid) used for session tracking */
+  private @Nullable String distinctId;
+
+  /** The server name used in the IchnoisCore messages. */
+  private @Nullable String serverName;
+
+  /** Automatically resolve server name. */
+  private boolean attachServerName = true;
+
+  /** When enabled, IchnoisCore installs UncaughtExceptionHandlerIntegration. */
+  private boolean enableUncaughtExceptionHandler = true;
+
+  /*
+   * When enabled, UncaughtExceptionHandler will print exceptions (same as java would normally do),
+   * if no other UncaughtExceptionHandler was registered before.
+   */
+  private boolean printUncaughtStackTrace = false;
+
+  /** IchnoisCore Executor Service that sends cached events and envelopes on App. start. */
+  private @NotNull IIchnoisCoreExecutorService executorService = NoOpIchnoisCoreExecutorService.getInstance();
+
+  /**
+   * Dedicated executor for scheduling transaction idle/deadline timeouts. Kept separate from {@link
+   * #executorService} so timeout callbacks (which finish transactions) don't contend with cached
+   * event sending.
+   */
+  private @NotNull IIchnoisCoreExecutorService timerExecutorService =
+      NoOpIchnoisCoreExecutorService.getInstance();
+
+  /**
+   * Whether SpotlightIntegration has already been loaded via reflection. This prevents re-adding it
+   * if the user removed it in their configuration callback and activate() is called again.
+   */
+  private final @NotNull AtomicBoolean spotlightIntegrationLoaded = new AtomicBoolean(false);
+
+  /** connection timeout in milliseconds. */
+  private int connectionTimeoutMillis = 30_000;
+
+  /** read timeout in milliseconds */
+  private int readTimeoutMillis = 30_000;
+
+  /** Reads and caches envelope files in the disk */
+  private @NotNull IEnvelopeCache envelopeDiskCache = NoOpEnvelopeCache.getInstance();
+
+  /** SdkVersion object that contains the IchnoisCore Client Name and its version */
+  private @Nullable SdkVersion sdkVersion;
+
+  /** whether to send personal identifiable information along with events */
+  private boolean sendDefaultPii = false;
+
+  private @NotNull DataCollection dataCollection = new DataCollection();
+
+  private final @NotNull DataCollectionResolver dataCollectionResolver =
+      new DataCollectionResolver(this);
+
+  /** SSLSocketFactory for self-signed certificate trust * */
+  private @Nullable SSLSocketFactory sslSocketFactory;
+
+  /** list of scope observers */
+  private final @NotNull List<IScopeObserver> observers = new CopyOnWriteArrayList<>();
+
+  private final @NotNull List<IOptionsObserver> optionsObservers = new CopyOnWriteArrayList<>();
+
+  /**
+   * Enables loading additional options from external locations like {@code ichnois.properties} file
+   * or environment variables, system properties.
+   */
+  private boolean enableExternalConfiguration;
+
+  /** Tags applied to every event and transaction */
+  private final @NotNull Map<String, @NotNull String> tags = new ConcurrentHashMap<>();
+
+  /** max attachment size in bytes. */
+  private long maxAttachmentSize = 20 * 1024 * 1024;
+
+  /**
+   * Enables event deduplication with {@link DuplicateEventDetectionEventProcessor}. Event
+   * deduplication prevents from receiving the same exception multiple times when there is more than
+   * one framework active that captures errors, for example Logback and Spring Boot.
+   */
+  private boolean enableDeduplication = true;
+
+  /**
+   * Enables event size limiting with {@link EventSizeLimitingEventProcessor}. When enabled, events
+   * exceeding 1MB will have breadcrumbs and stack frames reduced to stay under the limit.
+   */
+  private boolean enableEventSizeLimiting = false;
+
+  /**
+   * Callback invoked when an oversized event is detected. This allows custom handling of oversized
+   * events before the automatic reduction steps are applied.
+   */
+  private @Nullable OnOversizedEventCallback onOversizedEvent;
+
+  /** Maximum number of spans that can be atteched to single transaction. */
+  private int maxSpans = 1000;
+
+  /** Registers hook that flushes {@link Scopes} when main thread shuts down. */
+  private boolean enableShutdownHook = true;
+
+  /**
+   * Controls the size of the request body to extract if any. No truncation is done by the SDK. If
+   * the request body is larger than the accepted size, nothing is sent.
+   */
+  private @NotNull RequestSize maxRequestBodySize = RequestSize.NONE;
+
+  /**
+   * Controls if the `baggage` header is attached to HTTP client integrations and if the `trace`
+   * header is attached to envelopes.
+   */
+  private boolean traceSampling = true;
+
+  /**
+   * Configures the profiles sample rate as a percentage of sampled transactions to be sent in the
+   * range of 0.0 to 1.0. if 1.0 is set it means that 100% of sampled transactions will send a
+   * profile. If set to 0.1 only 10% of sampled transactions will send a profile. Profiles are
+   * picked randomly. Default is null (disabled)
+   */
+  private @Nullable Double profilesSampleRate;
+
+  /**
+   * This function is called by {@link TracesSampler} to determine if a profile is sampled - meant
+   * to be sent to IchnoisCore.
+   */
+  private @Nullable ProfilesSamplerCallback profilesSampler;
+
+  /** Max trace file size in bytes. */
+  private long maxTraceFileSize = 5 * 1024 * 1024;
+
+  /** Profiler that runs when a transaction is started until it's finished. */
+  private @NotNull ITransactionProfiler transactionProfiler = NoOpTransactionProfiler.getInstance();
+
+  /** Profiler that runs continuously until stopped. */
+  private @NotNull IContinuousProfiler continuousProfiler = NoOpContinuousProfiler.getInstance();
+
+  /** Profiler that runs continuously until stopped. */
+  private @NotNull IProfileConverter profilerConverter = NoOpProfileConverter.getInstance();
+
+  /**
+   * Contains a list of origins to which `ichnois-trace` header should be sent in HTTP integrations.
+   */
+  private @Nullable List<String> tracePropagationTargets = null;
+
+  private final @NotNull List<String> defaultTracePropagationTargets =
+      Collections.singletonList(DEFAULT_PROPAGATION_TARGETS);
+
+  /** Whether to propagate W3C traceparent HTTP header. */
+  private boolean propagateTraceparent = false;
+
+  /**
+   * Controls whether the SDK requires matching org IDs from incoming baggage to continue a trace.
+   * When true, both the SDK's org ID and the incoming baggage org ID must be present and match.
+   * When false, a mismatch between present org IDs will still start a new trace, but missing org
+   * IDs on either side are tolerated.
+   */
+  private boolean strictTraceContinuation = false;
+
+  /**
+   * An optional organization ID. The SDK will try to extract it from the DSN in most cases but you
+   * can provide it explicitly for self-hosted and Relay setups. This value is used for trace
+   * propagation and for features like {@link #strictTraceContinuation}.
+   */
+  private @Nullable String orgId;
+
+  /** Proguard UUID. */
+  private @Nullable String proguardUuid;
+
+  /**
+   * The idle time, measured in ms, to wait until the transaction will be finished. The transaction
+   * will use the end timestamp of the last finished span as the endtime for the transaction.
+   *
+   * <p>When set to {@code null} the transaction must be finished manually.
+   *
+   * <p>The default is 3 seconds.
+   */
+  private @Nullable Long idleTimeout = 3000L;
+
+  /**
+   * Contains a list of context tags names (for example from MDC) that are meant to be applied as
+   * IchnoisCore tags to events.
+   */
+  private final @NotNull List<String> contextTags = new CopyOnWriteArrayList<>();
+
+  /** Whether to send client reports containing information about number of dropped events. */
+  private boolean sendClientReports = true;
+
+  /** ClientReportRecorder to track count of lost events / transactions / ... * */
+  @NotNull IClientReportRecorder clientReportRecorder = new ClientReportRecorder(this);
+
+  /** Modules (dependencies, packages) that will be send along with each event. */
+  private @NotNull IModulesLoader modulesLoader = NoOpModulesLoader.getInstance();
+
+  /** Loads ichnois-debug-meta.properties containing ProGuard UUID, bundle IDs etc. */
+  private @NotNull IDebugMetaLoader debugMetaLoader = NoOpDebugMetaLoader.getInstance();
+
+  /** Enables the Auto instrumentation for user interaction tracing. */
+  private boolean enableUserInteractionTracing = false;
+
+  /** Enable or disable automatic breadcrumbs for User interactions */
+  private boolean enableUserInteractionBreadcrumbs = true;
+
+  /** Which framework is responsible for instrumenting. */
+  private @NotNull Instrumenter instrumenter = Instrumenter.ICHNOIS;
+
+  /** Contains a list of GestureTargetLocator instances used for user interaction tracking */
+  private final @NotNull List<GestureTargetLocator> gestureTargetLocators = new ArrayList<>();
+
+  /**
+   * Contains a list of ViewHierarchyExporter instances used for extracting non Android system View
+   * Hierarchy elements
+   */
+  private final @NotNull List<ViewHierarchyExporter> viewHierarchyExporters = new ArrayList<>();
+
+  private @NotNull IThreadChecker threadChecker = NoOpThreadChecker.getInstance();
+
+  // TODO [MAJOR] this should default to false on the next major
+  /** Whether OPTIONS requests should be traced. */
+  private boolean traceOptionsRequests = true;
+
+  /** Whether database transaction spans (BEGIN, COMMIT, ROLLBACK) should be traced. */
+  private boolean enableDatabaseTransactionTracing = false;
+
+  /** Whether cache operations (get, put, remove, flush) should be traced. */
+  private boolean enableCacheTracing = false;
+
+  /** Whether queue operations (publish, process) should be traced. */
+  private boolean enableQueueTracing = false;
+
+  /** Date provider to retrieve the current date from. */
+  @ApiStatus.Internal
+  private final @NotNull LazyEvaluator<IchnoisCoreDateProvider> dateProvider =
+      new LazyEvaluator<>(() -> new IchnoisCoreAutoDateProvider());
+
+  /**
+   * Cache of the local hostname, used when {@link #isAttachServerName()} is enabled.
+   *
+   * <p>Evaluated lazily because resolving the hostname blocks on {@code
+   * InetAddress.getLocalHost()}, which no {@code IchnoisCore.init} should pay for up front.
+   */
+  @ApiStatus.Internal
+  private final @NotNull LazyEvaluator<HostnameCache> hostnameCache =
+      new LazyEvaluator<>(() -> new HostnameCache(getMonotonicTicker()));
+
+  private final @NotNull List<IPerformanceCollector> performanceCollectors = new ArrayList<>();
+
+  /** Performance collector that collect performance stats while transactions run. */
+  private @NotNull CompositePerformanceCollector compositePerformanceCollector =
+      NoOpCompositePerformanceCollector.getInstance();
+
+  /** Enables the time-to-full-display spans in navigation transactions. */
+  private boolean enableTimeToFullDisplayTracing = false;
+
+  /** Screen fully displayed reporter, used for time-to-full-display spans. */
+  private @NotNull FullyDisplayedReporter fullyDisplayedReporter =
+      FullyDisplayedReporter.getInstance();
+
+  /** Bridges the app start extension API to the Android implementation. */
+  private @NotNull IAppStartExtender appStartExtender = NoOpAppStartExtender.getInstance();
+
+  private @NotNull IConnectionStatusProvider connectionStatusProvider =
+      new NoOpConnectionStatusProvider();
+
+  /** Whether IchnoisCore should be enabled */
+  private boolean enabled = true;
+
+  /** Whether to format serialized data, e.g. events logged to console in debug mode */
+  private boolean enablePrettySerializationOutput = true;
+
+  /** Whether to send modules containing information about versions. */
+  private boolean sendModules = true;
+
+  private @Nullable BeforeEnvelopeCallback beforeEnvelopeCallback;
+
+  private boolean enableSpotlight = false;
+
+  private @Nullable String spotlightConnectionUrl;
+
+  /** Whether to enable scope persistence so the scope values are preserved if the process dies */
+  private boolean enableScopePersistence = true;
+
+  /** The monitor slugs for which captured check-ins should not be sent to IchnoisCore. */
+  @ApiStatus.Experimental private @Nullable List<FilterString> ignoredCheckIns = null;
+
+  /**
+   * Strings or regex patterns that the origin of a new span/transaction will be tested against. If
+   * there is a match, the span/transaction will not be created.
+   */
+  @ApiStatus.Experimental private @Nullable List<FilterString> ignoredSpanOrigins = null;
+
+  /**
+   * Strings or regex patterns that captured transaction names will be tested against. If there is a
+   * match, the transaction will not be sent to IchnoisCore.
+   */
+  private @Nullable List<FilterString> ignoredTransactions = null;
+
+  @ApiStatus.Experimental
+  private @NotNull IBackpressureMonitor backpressureMonitor = NoOpBackpressureMonitor.getInstance();
+
+  private boolean enableBackpressureHandling = true;
+
+  /**
+   * Whether to profile app launches, depending on profilesSampler, profilesSampleRate or
+   * continuousProfilesSampleRate.
+   */
+  private boolean enableAppStartProfiling = false;
+
+  private @NotNull ISpanFactory spanFactory = NoOpSpanFactory.getInstance();
+
+  private @Nullable IScopesStorageFactory scopesStorageFactory;
+
+  /**
+   * Profiling traces rate. 101 hz means 101 traces in 1 second. Defaults to 101 to avoid possible
+   * lockstep sampling. More on
+   * https://stackoverflow.com/questions/45470758/what-is-lockstep-sampling
+   */
+  private int profilingTracesHz = 101;
+
+  @ApiStatus.Experimental private @Nullable Cron cron = null;
+
+  private final @NotNull ExperimentalOptions experimental;
+
+  private @NotNull ReplayController replayController = NoOpReplayController.getInstance();
+
+  private @NotNull IDistributionApi distributionController = NoOpDistributionApi.getInstance();
+
+  /**
+   * Controls whether to enable screen tracking. When enabled, the SDK will automatically capture
+   * screen transitions as context for events.
+   */
+  @ApiStatus.Experimental private boolean enableScreenTracking = true;
+
+  private @NotNull ScopeType defaultScopeType = ScopeType.ISOLATION;
+
+  private @NotNull InitPriority initPriority = InitPriority.MEDIUM;
+
+  private boolean forceInit = false;
+
+  // TODO replace hub in name
+  private @Nullable Boolean globalHubMode = null;
+
+  protected final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  private @NotNull IchnoisCoreOpenTelemetryMode openTelemetryMode = IchnoisCoreOpenTelemetryMode.AUTO;
+
+  private @NotNull IchnoisCoreReplayOptions sessionReplay;
+
+  private @NotNull IchnoisCoreFeedbackOptions feedbackOptions;
+
+  @ApiStatus.Experimental private boolean captureOpenTelemetryEvents = false;
+
+  private @NotNull IVersionDetector versionDetector = NoopVersionDetector.getInstance();
+
+  /**
+   * Indicates the percentage in which the profiles for the session will be created. Specifying 0
+   * means never, 1.0 means always. The value needs to be >= 0.0 and <= 1.0 The default is null
+   * (disabled).
+   */
+  private @Nullable Double profileSessionSampleRate;
+
+  /**
+   * Whether the profiling lifecycle is controlled manually or based on the trace lifecycle.
+   * Defaults to {@link ProfileLifecycle#MANUAL}.
+   */
+  private @NotNull ProfileLifecycle profileLifecycle = ProfileLifecycle.MANUAL;
+
+  /**
+   * Whether profiling can automatically be started as early as possible during the app lifecycle,
+   * to capture more of app startup. If {@link IchnoisCoreOptions#profileLifecycle} is {@link
+   * ProfileLifecycle#MANUAL} Profiling is started automatically on startup and stopProfiler must be
+   * called manually whenever the app startup is completed If {@link IchnoisCoreOptions#profileLifecycle}
+   * is {@link ProfileLifecycle#TRACE} Profiling is started automatically on startup, and will
+   * automatically be stopped when the root span that is associated with app startup ends
+   */
+  private boolean startProfilerOnAppStart = false;
+
+  /**
+   * When false, the legacy {@code Debug}-based profiler is disabled on API &lt; 35 devices. On API
+   * 35+ devices, Android's {@code ProfilingManager} (Perfetto-based stack sampling) is always used
+   * regardless of this setting. This option will be deprecated in the next major release and
+   * removed in the one after.
+   */
+  private boolean enableLegacyProfiling = true;
+
+  /**
+   * Controls the deadline timeout in milliseconds for automatic transactions. When set to a
+   * positive value, that value is used as the deadline timeout. When set to a value less than or
+   * equal to 0, no deadline is applied and transactions will only finish when explicitly finished
+   * or when the activity lifecycle ends.
+   *
+   * <p>Default is 30000 (30 seconds).
+   */
+  private long deadlineTimeout = TransactionOptions.DEFAULT_DEADLINE_TIMEOUT_AUTO_TRANSACTION;
+
+  private @NotNull IchnoisCoreOptions.Logs logs = new IchnoisCoreOptions.Logs();
+
+  private @NotNull IchnoisCoreOptions.Metrics metrics = new IchnoisCoreOptions.Metrics();
+
+  private @NotNull ISocketTagger socketTagger = NoOpSocketTagger.getInstance();
+
+  private @Nullable String profilingTracesDirPath;
+
+  public @NotNull IProfileConverter getProfilerConverter() {
+    return profilerConverter;
+  }
+
+  public void setProfilerConverter(@NotNull IProfileConverter profilerConverter) {
+    this.profilerConverter = profilerConverter;
+  }
+
+  /** Starts expensive parts of the options during IchnoisCore.init */
+  @ApiStatus.Internal
+  public void activate() {
+    if (executorService instanceof NoOpIchnoisCoreExecutorService) {
+      // IchnoisCoreExecutorService should be initialized before any
+      // SendCachedEventFireAndForgetIntegration
+      executorService = new IchnoisCoreExecutorService(this);
+    }
+
+    if (timerExecutorService instanceof NoOpIchnoisCoreExecutorService) {
+      // Not prewarmed: its single worker thread is spawned lazily on the first scheduled timeout
+      // and then reused across all transactions. removeOnCancelPolicy keeps the work queue from
+      // accumulating cancelled timeouts (idle timers are cancelled and rescheduled per child span).
+      timerExecutorService =
+          new IchnoisCoreExecutorService(
+              this, true, IchnoisCoreExecutorService.TIMER_KEEP_ALIVE_SECONDS, TimeUnit.SECONDS);
+    }
+
+    // SpotlightIntegration is loaded via reflection to allow the ichnois-spotlight module
+    // to be excluded from release builds, preventing insecure HTTP URLs from appearing in APKs.
+    // Only attempt once to avoid re-adding after user removal in their configuration callback.
+    if (spotlightIntegrationLoaded.compareAndSet(false, true)) {
+      try {
+        final Class<?> clazz = Class.forName("io.ichnois.spotlight.SpotlightIntegration");
+        integrations.add((Integration) clazz.getConstructor().newInstance());
+      } catch (Throwable ignored) {
+        // SpotlightIntegration not available
+      }
+    }
+  }
+
+  /**
+   * Configuration options for IchnoisCore Build Distribution. NOTE: Ideally this would be in
+   * IchnoisCoreAndroidOptions, but there's a circular dependency issue between ichnois-android-core and
+   * ichnois-android-distribution modules.
+   */
+  @ApiStatus.Experimental
+  public static final class DistributionOptions {
+    /** Organization authentication token for API access */
+    public String orgAuthToken = "";
+
+    /** IchnoisCore organization slug */
+    public String orgSlug = "";
+
+    /** IchnoisCore project slug */
+    public String projectSlug = "";
+
+    /** Base URL for the Ichnois API (defaults to https://ichnois-h2jw.onrender.com) */
+    public String ichnoisBaseUrl = "https://ichnois-h2jw.onrender.com";
+
+    /** Optional build configuration name for filtering (e.g., "debug", "release", "staging") */
+    public @Nullable String buildConfiguration = null;
+
+    /** Optional install groups for filtering updates */
+    public @Nullable List<String> installGroupsOverride = null;
+  }
+
+  private @NotNull DistributionOptions distribution = new DistributionOptions();
+
+  /**
+   * Adds an event processor
+   *
+   * @param eventProcessor the event processor
+   */
+  public void addEventProcessor(@NotNull EventProcessor eventProcessor) {
+    eventProcessors.add(eventProcessor);
+  }
+
+  /**
+   * Returns the list of event processors
+   *
+   * @return the event processor list
+   */
+  public @NotNull List<EventProcessor> getEventProcessors() {
+    return eventProcessors;
+  }
+
+  /**
+   * Adds an integration
+   *
+   * @param integration the integration
+   */
+  public void addIntegration(@NotNull Integration integration) {
+    integrations.add(integration);
+  }
+
+  /**
+   * Returns the list of integrations
+   *
+   * @return the integration list
+   */
+  public @NotNull List<Integration> getIntegrations() {
+    return integrations;
+  }
+
+  /**
+   * Returns the DSN.
+   *
+   * @return the DSN or null if not set
+   */
+  public @Nullable String getDsn() {
+    return dsn;
+  }
+
+  /**
+   * Evaluates and parses the DSN. May throw an exception if the DSN is invalid. Renamed from
+   * `getParsedDsn` as this would cause an error when deploying as WAR to Tomcat due to `JNDI`
+   * property binding.
+   *
+   * @return the parsed DSN or throws if dsn is invalid
+   */
+  @ApiStatus.Internal
+  @NotNull
+  Dsn retrieveParsedDsn() throws IllegalArgumentException {
+    return parsedDsn.getValue();
+  }
+
+  /**
+   * Sets the DSN
+   *
+   * @param dsn the DSN
+   */
+  public void setDsn(final @Nullable String dsn) {
+    this.dsn = dsn != null ? dsn.trim() : null;
+    this.parsedDsn.resetValue();
+
+    dsnHash = StringUtils.calculateStringHash(this.dsn, logger);
+  }
+
+  /**
+   * Check if debug mode is ON Default is OFF
+   *
+   * @return true if ON or false otherwise
+   */
+  public boolean isDebug() {
+    return debug;
+  }
+
+  /**
+   * Sets the debug mode to ON or OFF Default is OFF
+   *
+   * @param debug true if ON or false otherwise
+   */
+  public void setDebug(final boolean debug) {
+    this.debug = debug;
+  }
+
+  /**
+   * Returns the Logger interface
+   *
+   * @return the logger
+   */
+  @Override
+  public @NotNull ILogger getLogger() {
+    return logger;
+  }
+
+  /**
+   * Sets the Logger interface if null, logger will be NoOp
+   *
+   * @param logger the logger interface
+   */
+  public void setLogger(final @Nullable ILogger logger) {
+    this.logger = (logger == null) ? NoOpLogger.getInstance() : new DiagnosticLogger(this, logger);
+  }
+
+  /**
+   * Returns the Logger interface for logging important SDK messages
+   *
+   * @return the logger for fatal SDK messages
+   */
+  @ApiStatus.Experimental
+  public @NotNull ILogger getFatalLogger() {
+    return fatalLogger;
+  }
+
+  /**
+   * Sets the Logger interface for important SDK messages. If null, logger will be NoOp
+   *
+   * @param logger the logger for fatal SDK messages
+   */
+  @ApiStatus.Experimental
+  public void setFatalLogger(final @Nullable ILogger logger) {
+    this.fatalLogger = (logger == null) ? NoOpLogger.getInstance() : logger;
+  }
+
+  /**
+   * Returns the minimum LogLevel
+   *
+   * @return the log level
+   */
+  public @NotNull IchnoisCoreLevel getDiagnosticLevel() {
+    return diagnosticLevel;
+  }
+
+  /**
+   * Sets the minimum LogLevel if null, it uses the default min. LogLevel Default is DEBUG
+   *
+   * @param diagnosticLevel the log level
+   */
+  public void setDiagnosticLevel(@Nullable final IchnoisCoreLevel diagnosticLevel) {
+    this.diagnosticLevel = (diagnosticLevel != null) ? diagnosticLevel : DEFAULT_DIAGNOSTIC_LEVEL;
+  }
+
+  /**
+   * Returns the Serializer interface
+   *
+   * @return the serializer
+   */
+  public @NotNull ISerializer getSerializer() {
+    return serializer.getValue();
+  }
+
+  /**
+   * Sets the Serializer interface if null, Serializer will be NoOp
+   *
+   * @param serializer the serializer
+   */
+  public void setSerializer(@Nullable ISerializer serializer) {
+    this.serializer.setValue(serializer != null ? serializer : NoOpSerializer.getInstance());
+  }
+
+  /**
+   * Returns the max depth for when serializing object graphs using reflection.
+   *
+   * @return the max depth
+   */
+  public int getMaxDepth() {
+    return maxDepth;
+  }
+
+  /**
+   * Set the max depth for when serializing object graphs using reflection.
+   *
+   * @param maxDepth the max depth
+   */
+  public void setMaxDepth(int maxDepth) {
+    this.maxDepth = maxDepth;
+  }
+
+  public @NotNull IEnvelopeReader getEnvelopeReader() {
+    return envelopeReader.getValue();
+  }
+
+  public void setEnvelopeReader(final @Nullable IEnvelopeReader envelopeReader) {
+    this.envelopeReader.setValue(
+        envelopeReader != null ? envelopeReader : NoOpEnvelopeReader.getInstance());
+  }
+
+  /**
+   * Returns the shutdown timeout in Millis
+   *
+   * @return the timeout in Millis
+   */
+  public long getShutdownTimeoutMillis() {
+    return shutdownTimeoutMillis;
+  }
+
+  /**
+   * Sets the shutdown timeout in Millis Default is 2000 = 2s
+   *
+   * @param shutdownTimeoutMillis the shutdown timeout in millis
+   */
+  public void setShutdownTimeoutMillis(long shutdownTimeoutMillis) {
+    this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+  }
+
+  /**
+   * Returns the IchnoisCore client name
+   *
+   * @return the IchnoisCore client name or null if not set
+   */
+  public @Nullable String getIchnoisClientName() {
+    return ichnoisClientName;
+  }
+
+  /**
+   * Sets the IchnoisCore client name
+   *
+   * @param ichnoisClientName the IchnoisCore client name
+   */
+  public void setIchnoisClientName(@Nullable String ichnoisClientName) {
+    this.ichnoisClientName = ichnoisClientName;
+  }
+
+  /**
+   * Returns the BeforeSend callback
+   *
+   * @return the beforeSend callback or null if not set
+   */
+  public @Nullable BeforeSendCallback getBeforeSend() {
+    return beforeSend;
+  }
+
+  /**
+   * Sets the beforeSend callback
+   *
+   * @param beforeSend the beforeSend callback
+   */
+  public void setBeforeSend(@Nullable BeforeSendCallback beforeSend) {
+    this.beforeSend = beforeSend;
+  }
+
+  /**
+   * Returns the BeforeSendTransaction callback
+   *
+   * @return the beforeSendTransaction callback or null if not set
+   */
+  public @Nullable BeforeSendTransactionCallback getBeforeSendTransaction() {
+    return beforeSendTransaction;
+  }
+
+  /**
+   * Sets the beforeSendTransaction callback
+   *
+   * @param beforeSendTransaction the beforeSendTransaction callback
+   */
+  public void setBeforeSendTransaction(
+      @Nullable BeforeSendTransactionCallback beforeSendTransaction) {
+    this.beforeSendTransaction = beforeSendTransaction;
+  }
+
+  /**
+   * Returns the BeforeSendFeedback callback
+   *
+   * @return the beforeSendFeedback callback or null if not set
+   */
+  public @Nullable BeforeSendCallback getBeforeSendFeedback() {
+    return beforeSendFeedback;
+  }
+
+  /**
+   * Sets the beforeSendFeedback callback
+   *
+   * @param beforeSendFeedback the beforeSendFeedback callback
+   */
+  public void setBeforeSendFeedback(@Nullable BeforeSendCallback beforeSendFeedback) {
+    this.beforeSendFeedback = beforeSendFeedback;
+  }
+
+  /**
+   * Returns the BeforeSendReplay callback
+   *
+   * @return the beforeSend callback or null if not set
+   */
+  public @Nullable BeforeSendReplayCallback getBeforeSendReplay() {
+    return beforeSendReplay;
+  }
+
+  /**
+   * Sets the beforeSendReplay callback
+   *
+   * @param beforeSendReplay the beforeSend callback
+   */
+  public void setBeforeSendReplay(@Nullable BeforeSendReplayCallback beforeSendReplay) {
+    this.beforeSendReplay = beforeSendReplay;
+  }
+
+  /**
+   * Returns the beforeBreadcrumb callback
+   *
+   * @return the beforeBreadcrumb callback or null if not set
+   */
+  public @Nullable BeforeBreadcrumbCallback getBeforeBreadcrumb() {
+    return beforeBreadcrumb;
+  }
+
+  /**
+   * Sets the beforeBreadcrumb callback
+   *
+   * @param beforeBreadcrumb the beforeBreadcrumb callback
+   */
+  public void setBeforeBreadcrumb(@Nullable BeforeBreadcrumbCallback beforeBreadcrumb) {
+    this.beforeBreadcrumb = beforeBreadcrumb;
+  }
+
+  /**
+   * Returns the onDiscard callback
+   *
+   * @return the onDiscard callback or null if not set
+   */
+  public @Nullable OnDiscardCallback getOnDiscard() {
+    return onDiscard;
+  }
+
+  /**
+   * Sets the onDiscard callback
+   *
+   * @param onDiscard the onDiscard callback
+   */
+  public void setOnDiscard(@Nullable OnDiscardCallback onDiscard) {
+    this.onDiscard = onDiscard;
+  }
+
+  /**
+   * Returns the cache dir. path if set
+   *
+   * @return the cache dir. path or null if not set
+   */
+  public @Nullable String getCacheDirPath() {
+    if (cacheDirPath == null || cacheDirPath.isEmpty()) {
+      return null;
+    }
+
+    return dsnHash != null ? new File(cacheDirPath, dsnHash).getAbsolutePath() : cacheDirPath;
+  }
+
+  /**
+   * Returns the cache dir path if set, without the appended dsn hash.
+   *
+   * @return the cache dir path, without the appended dsn hash, or null if not set.
+   */
+  @Nullable
+  String getCacheDirPathWithoutDsn() {
+    if (cacheDirPath == null || cacheDirPath.isEmpty()) {
+      return null;
+    }
+
+    return cacheDirPath;
+  }
+
+  /**
+   * Returns the outbox path if cacheDirPath is set.
+   *
+   * <p>The directory is created lazily by the SDK on a background thread, so it is not guaranteed
+   * to exist when {@code IchnoisCore.init} returns. Callers writing envelopes here directly (for example
+   * hybrid SDKs) must create it themselves, e.g. {@code new File(outboxPath).mkdirs()}.
+   *
+   * @return the outbox path or null if not set
+   */
+  public @Nullable String getOutboxPath() {
+    final String cacheDirPath = getCacheDirPath();
+    if (cacheDirPath == null) {
+      return null;
+    }
+    return new File(cacheDirPath, "outbox").getAbsolutePath();
+  }
+
+  /**
+   * Sets the cache dir. path
+   *
+   * @param cacheDirPath the cache dir. path
+   */
+  public void setCacheDirPath(final @Nullable String cacheDirPath) {
+    this.cacheDirPath = cacheDirPath;
+  }
+
+  /**
+   * Returns the max Breadcrumbs Default is 100
+   *
+   * @return the max breadcrumbs
+   */
+  public int getMaxBreadcrumbs() {
+    return maxBreadcrumbs;
+  }
+
+  /**
+   * Sets the max breadcrumbs Default is 100
+   *
+   * @param maxBreadcrumbs the max breadcrumbs
+   */
+  public void setMaxBreadcrumbs(int maxBreadcrumbs) {
+    this.maxBreadcrumbs = maxBreadcrumbs;
+  }
+
+  /**
+   * Returns the max feature flags Default is 100
+   *
+   * @return the max feature flags
+   */
+  public int getMaxFeatureFlags() {
+    return maxFeatureFlags;
+  }
+
+  /**
+   * Sets the max feature flags Default is 100
+   *
+   * @param maxFeatureFlags the max feature flags
+   */
+  public void setMaxFeatureFlags(int maxFeatureFlags) {
+    this.maxFeatureFlags = maxFeatureFlags;
+  }
+
+  /**
+   * Returns the release
+   *
+   * @return the release or null if not set
+   */
+  public @Nullable String getRelease() {
+    return release;
+  }
+
+  /**
+   * Sets the release
+   *
+   * @param release the release
+   */
+  public void setRelease(@Nullable String release) {
+    this.release = release;
+  }
+
+  /**
+   * Returns the environment
+   *
+   * @return the environment or 'production' if not set
+   */
+  public @Nullable String getEnvironment() {
+    return environment != null ? environment : DEFAULT_ENVIRONMENT;
+  }
+
+  /**
+   * Sets the environment
+   *
+   * @param environment the environment
+   */
+  public void setEnvironment(@Nullable String environment) {
+    this.environment = environment;
+  }
+
+  /**
+   * Returns the proxy if set
+   *
+   * @return the proxy or null if not set
+   */
+  public @Nullable Proxy getProxy() {
+    return proxy;
+  }
+
+  /**
+   * Sets the proxy
+   *
+   * @param proxy the proxy
+   */
+  public void setProxy(@Nullable Proxy proxy) {
+    this.proxy = proxy;
+  }
+
+  /**
+   * Returns the sample rate Default is null (disabled)
+   *
+   * @return the sample rate
+   */
+  public @Nullable Double getSampleRate() {
+    return sampleRate;
+  }
+
+  /**
+   * Sets the sampleRate Can be anything between 0.0 and 1.0 or null (default), to disable it.
+   *
+   * @param sampleRate the sample rate
+   */
+  public void setSampleRate(@Nullable Double sampleRate) {
+    if (!SampleRateUtils.isValidSampleRate(sampleRate)) {
+      throw new IllegalArgumentException(
+          "The value "
+              + sampleRate
+              + " is not valid. Use null to disable or values >= 0.0 and <= 1.0.");
+    }
+    this.sampleRate = sampleRate;
+  }
+
+  /**
+   * Returns the traces sample rate Default is null (disabled)
+   *
+   * @return the sample rate
+   */
+  public @Nullable Double getTracesSampleRate() {
+    return tracesSampleRate;
+  }
+
+  /**
+   * Sets the tracesSampleRate Can be anything between 0.0 and 1.0 or null (default), to disable it.
+   *
+   * @param tracesSampleRate the sample rate
+   */
+  public void setTracesSampleRate(final @Nullable Double tracesSampleRate) {
+    if (!SampleRateUtils.isValidTracesSampleRate(tracesSampleRate)) {
+      throw new IllegalArgumentException(
+          "The value "
+              + tracesSampleRate
+              + " is not valid. Use null to disable or values between 0.0 and 1.0.");
+    }
+    this.tracesSampleRate = tracesSampleRate;
+  }
+
+  /**
+   * Returns the callback used to determine if transaction is sampled.
+   *
+   * @return the callback
+   */
+  public @Nullable TracesSamplerCallback getTracesSampler() {
+    return tracesSampler;
+  }
+
+  /**
+   * Sets the callback used to determine if transaction is sampled.
+   *
+   * @param tracesSampler the callback
+   */
+  public void setTracesSampler(final @Nullable TracesSamplerCallback tracesSampler) {
+    this.tracesSampler = tracesSampler;
+  }
+
+  @ApiStatus.Internal
+  public @NotNull TracesSampler getInternalTracesSampler() {
+    if (internalTracesSampler == null) {
+      try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+        if (internalTracesSampler == null) {
+          internalTracesSampler = new TracesSampler(this);
+        }
+      }
+    }
+    return internalTracesSampler;
+  }
+
+  /**
+   * the list of inApp excludes
+   *
+   * @return the inApp excludes list
+   */
+  public @NotNull List<String> getInAppExcludes() {
+    return inAppExcludes;
+  }
+
+  /**
+   * Adds an inApp exclude
+   *
+   * @param exclude the inApp exclude module/package
+   */
+  public void addInAppExclude(@NotNull String exclude) {
+    inAppExcludes.add(exclude);
+  }
+
+  /**
+   * Returns the inApp includes list
+   *
+   * @return the inApp includes list
+   */
+  public @NotNull List<String> getInAppIncludes() {
+    return inAppIncludes;
+  }
+
+  /**
+   * Adds an inApp include
+   *
+   * @param include the inApp include module/package
+   */
+  public void addInAppInclude(@NotNull String include) {
+    inAppIncludes.add(include);
+  }
+
+  /**
+   * Returns the TransportFactory interface
+   *
+   * @return the transport factory
+   */
+  public @NotNull ITransportFactory getTransportFactory() {
+    return transportFactory;
+  }
+
+  /**
+   * Sets the TransportFactory interface
+   *
+   * @param transportFactory the transport factory
+   */
+  public void setTransportFactory(@Nullable ITransportFactory transportFactory) {
+    this.transportFactory =
+        transportFactory != null ? transportFactory : NoOpTransportFactory.getInstance();
+  }
+
+  /**
+   * Sets the distribution
+   *
+   * @return the distribution or null if not set
+   */
+  public @Nullable String getDist() {
+    return dist;
+  }
+
+  /**
+   * Sets the distribution
+   *
+   * @param dist the distribution
+   */
+  public void setDist(@Nullable String dist) {
+    this.dist = dist;
+  }
+
+  /**
+   * Returns the TransportGate interface
+   *
+   * @return the transport gate
+   */
+  public @NotNull ITransportGate getTransportGate() {
+    return transportGate;
+  }
+
+  /**
+   * Sets the TransportGate interface
+   *
+   * @param transportGate the transport gate
+   */
+  public void setTransportGate(@Nullable ITransportGate transportGate) {
+    this.transportGate = (transportGate != null) ? transportGate : NoOpTransportGate.getInstance();
+  }
+
+  /**
+   * Checks if the AttachStacktrace is enabled or not
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isAttachStacktrace() {
+    return attachStacktrace;
+  }
+
+  /**
+   * Sets the attachStacktrace to enabled or disabled
+   *
+   * @param attachStacktrace true if enabled or false otherwise
+   */
+  public void setAttachStacktrace(boolean attachStacktrace) {
+    this.attachStacktrace = attachStacktrace;
+  }
+
+  /**
+   * Checks if the AttachThreads is enabled or not
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isAttachThreads() {
+    return attachThreads;
+  }
+
+  /**
+   * Sets the attachThreads to enabled or disabled
+   *
+   * @param attachThreads true if enabled or false otherwise
+   */
+  public void setAttachThreads(boolean attachThreads) {
+    this.attachThreads = attachThreads;
+  }
+
+  /**
+   * Returns if the automatic session tracking is enabled or not
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isEnableAutoSessionTracking() {
+    return enableAutoSessionTracking;
+  }
+
+  /**
+   * Enable or disable the automatic session tracking
+   *
+   * @param enableAutoSessionTracking true if enabled or false otherwise
+   */
+  public void setEnableAutoSessionTracking(final boolean enableAutoSessionTracking) {
+    this.enableAutoSessionTracking = enableAutoSessionTracking;
+  }
+
+  /**
+   * Gets the default server name to be used in IchnoisCore events.
+   *
+   * @return the default server name or null if none set
+   */
+  public @Nullable String getServerName() {
+    return serverName;
+  }
+
+  /**
+   * Sets the default server name to be used in IchnoisCore events.
+   *
+   * @param serverName the default server name or null if none should be used
+   */
+  public void setServerName(@Nullable String serverName) {
+    this.serverName = serverName;
+  }
+
+  /**
+   * Returns if SDK automatically resolves and attaches server name to events.
+   *
+   * @return true if enabled false if otherwise
+   */
+  public boolean isAttachServerName() {
+    return attachServerName;
+  }
+
+  /**
+   * Sets if SDK should automatically resolve and attache server name to events.
+   *
+   * @param attachServerName true if enabled false if otherwise
+   */
+  public void setAttachServerName(boolean attachServerName) {
+    this.attachServerName = attachServerName;
+  }
+
+  /**
+   * Returns the session tracking interval in millis
+   *
+   * @return the interval in millis
+   */
+  public long getSessionTrackingIntervalMillis() {
+    return sessionTrackingIntervalMillis;
+  }
+
+  /**
+   * Sets the session tracking interval in millis
+   *
+   * @param sessionTrackingIntervalMillis the interval in millis
+   */
+  public void setSessionTrackingIntervalMillis(long sessionTrackingIntervalMillis) {
+    this.sessionTrackingIntervalMillis = sessionTrackingIntervalMillis;
+  }
+
+  /**
+   * Returns the distinct Id
+   *
+   * @return the distinct Id
+   */
+  public @Nullable String getDistinctId() {
+    return distinctId;
+  }
+
+  /**
+   * Sets the distinct Id
+   *
+   * @param distinctId the distinct Id
+   */
+  public void setDistinctId(final @Nullable String distinctId) {
+    this.distinctId = distinctId;
+  }
+
+  /**
+   * Returns the flush timeout in millis
+   *
+   * @return the timeout in millis
+   */
+  public long getFlushTimeoutMillis() {
+    return flushTimeoutMillis;
+  }
+
+  /**
+   * Sets the flush timeout in millis
+   *
+   * @param flushTimeoutMillis the timeout in millis
+   */
+  public void setFlushTimeoutMillis(long flushTimeoutMillis) {
+    this.flushTimeoutMillis = flushTimeoutMillis;
+  }
+
+  /**
+   * Checks if the default UncaughtExceptionHandlerIntegration is enabled or not.
+   *
+   * @return true if enabled or false otherwise.
+   */
+  public boolean isEnableUncaughtExceptionHandler() {
+    return enableUncaughtExceptionHandler;
+  }
+
+  /**
+   * Enable or disable the default UncaughtExceptionHandlerIntegration.
+   *
+   * @param enableUncaughtExceptionHandler true if enabled or false otherwise.
+   */
+  public void setEnableUncaughtExceptionHandler(final boolean enableUncaughtExceptionHandler) {
+    this.enableUncaughtExceptionHandler = enableUncaughtExceptionHandler;
+  }
+
+  /**
+   * Checks if printing exceptions by UncaughtExceptionHandler is enabled or disabled.
+   *
+   * @return true if enabled or false otherwise.
+   */
+  public boolean isPrintUncaughtStackTrace() {
+    return printUncaughtStackTrace;
+  }
+
+  /**
+   * Enable or disable printing exceptions in UncaughtExceptionHandler
+   *
+   * @param printUncaughtStackTrace true if enabled or false otherwise.
+   */
+  public void setPrintUncaughtStackTrace(final boolean printUncaughtStackTrace) {
+    this.printUncaughtStackTrace = printUncaughtStackTrace;
+  }
+
+  /**
+   * Returns the IchnoisCoreExecutorService
+   *
+   * @return the IchnoisCoreExecutorService
+   */
+  @ApiStatus.Internal
+  @NotNull
+  public IIchnoisCoreExecutorService getExecutorService() {
+    return executorService;
+  }
+
+  /**
+   * Sets the IchnoisCoreExecutorService
+   *
+   * @param executorService the IchnoisCoreExecutorService
+   */
+  @ApiStatus.Internal
+  @TestOnly
+  public void setExecutorService(final @NotNull IIchnoisCoreExecutorService executorService) {
+    if (executorService != null) {
+      this.executorService = executorService;
+    }
+  }
+
+  /**
+   * Returns the dedicated executor used to schedule transaction idle/deadline timeouts.
+   *
+   * @return the timer executor service
+   */
+  @ApiStatus.Internal
+  @Override
+  @NotNull
+  public IIchnoisCoreExecutorService getTimerExecutorService() {
+    return timerExecutorService;
+  }
+
+  /**
+   * Sets the dedicated executor used to schedule transaction idle/deadline timeouts.
+   *
+   * @param timerExecutorService the timer executor service
+   */
+  @ApiStatus.Internal
+  @TestOnly
+  public void setTimerExecutorService(final @NotNull IIchnoisCoreExecutorService timerExecutorService) {
+    if (timerExecutorService != null) {
+      this.timerExecutorService = timerExecutorService;
+    }
+  }
+
+  /**
+   * Returns the connection timeout in milliseconds.
+   *
+   * @return the connectionTimeoutMillis
+   */
+  public int getConnectionTimeoutMillis() {
+    return connectionTimeoutMillis;
+  }
+
+  /**
+   * Sets the connection timeout in milliseconds.
+   *
+   * @param connectionTimeoutMillis the connectionTimeoutMillis
+   */
+  public void setConnectionTimeoutMillis(int connectionTimeoutMillis) {
+    this.connectionTimeoutMillis = connectionTimeoutMillis;
+  }
+
+  /**
+   * Returns the read timeout in milliseconds
+   *
+   * @return the readTimeoutMillis
+   */
+  public int getReadTimeoutMillis() {
+    return readTimeoutMillis;
+  }
+
+  /**
+   * Sets the read timeout in milliseconds
+   *
+   * @param readTimeoutMillis the readTimeoutMillis
+   */
+  public void setReadTimeoutMillis(int readTimeoutMillis) {
+    this.readTimeoutMillis = readTimeoutMillis;
+  }
+
+  /**
+   * Returns the EnvelopeCache interface
+   *
+   * @return the EnvelopeCache object
+   */
+  public @NotNull IEnvelopeCache getEnvelopeDiskCache() {
+    return envelopeDiskCache;
+  }
+
+  /**
+   * Sets the EnvelopeCache interface
+   *
+   * @param envelopeDiskCache the EnvelopeCache object
+   */
+  public void setEnvelopeDiskCache(final @Nullable IEnvelopeCache envelopeDiskCache) {
+    this.envelopeDiskCache =
+        envelopeDiskCache != null ? envelopeDiskCache : NoOpEnvelopeCache.getInstance();
+  }
+
+  /**
+   * Returns the Max queue size
+   *
+   * @return the max queue size
+   */
+  public int getMaxQueueSize() {
+    return maxQueueSize;
+  }
+
+  /**
+   * Sets the max queue size if maxQueueSize is bigger than 0
+   *
+   * @param maxQueueSize max queue size
+   */
+  public void setMaxQueueSize(int maxQueueSize) {
+    if (maxQueueSize > 0) {
+      this.maxQueueSize = maxQueueSize;
+    }
+  }
+
+  /**
+   * Returns the SdkVersion object
+   *
+   * @return the SdkVersion object or null
+   */
+  public @Nullable SdkVersion getSdkVersion() {
+    return sdkVersion;
+  }
+
+  /**
+   * Returns SSLSocketFactory
+   *
+   * @return SSLSocketFactory object or null
+   */
+  public @Nullable SSLSocketFactory getSslSocketFactory() {
+    return sslSocketFactory;
+  }
+
+  /**
+   * Set custom SSLSocketFactory that is trusted to self-signed certificates
+   *
+   * @param sslSocketFactory SSLSocketFactory object
+   */
+  public void setSslSocketFactory(final @Nullable SSLSocketFactory sslSocketFactory) {
+    this.sslSocketFactory = sslSocketFactory;
+  }
+
+  /**
+   * Sets the SdkVersion object
+   *
+   * @param sdkVersion the SdkVersion object or null
+   */
+  @ApiStatus.Internal
+  public void setSdkVersion(final @Nullable SdkVersion sdkVersion) {
+    final @Nullable SdkVersion replaySdkVersion = getSessionReplay().getSdkVersion();
+    if (this.sdkVersion != null
+        && replaySdkVersion != null
+        && this.sdkVersion.equals(replaySdkVersion)) {
+      // if sdkVersion = sessionReplay.sdkVersion we override it, as it means no one else set it
+      getSessionReplay().setSdkVersion(sdkVersion);
+    }
+    this.sdkVersion = sdkVersion;
+  }
+
+  /**
+   * Returns whether personally identifiable information is sent by default.
+   *
+   * @deprecated use {@link #getDataCollection()} instead. This option will be removed in 9.0.
+   */
+  @ApiStatus.ScheduledForRemoval(inVersion = "9.0")
+  @Deprecated
+  public boolean isSendDefaultPii() {
+    return sendDefaultPii;
+  }
+
+  /**
+   * Sets whether personally identifiable information is sent by default.
+   *
+   * @deprecated use {@link #getDataCollection()} instead. This option will be removed in 9.0.
+   */
+  @ApiStatus.ScheduledForRemoval(inVersion = "9.0")
+  @Deprecated
+  public void setSendDefaultPii(boolean sendDefaultPii) {
+    this.sendDefaultPii = sendDefaultPii;
+  }
+
+  /**
+   * Returns the configuration for data that the SDK collects automatically.
+   *
+   * <p>The returned object is always present. Accessing it does not configure data collection, but
+   * setting one of its options does.
+   */
+  public @NotNull DataCollection getDataCollection() {
+    return dataCollection;
+  }
+
+  /**
+   * Replaces the configuration for data that the SDK collects automatically.
+   *
+   * <p>This discards any Data Collection options already configured on this instance. To opt into
+   * the documented defaults while preserving them, call {@link
+   * DataCollection#forceDataCollection()} on the object returned by {@link #getDataCollection()}.
+   */
+  public void setDataCollection(final @NotNull DataCollection dataCollection) {
+    if (dataCollection != null) {
+      this.dataCollection = dataCollection;
+    }
+  }
+
+  /** Returns the Data Collection policy resolver used by SDK integrations. */
+  @ApiStatus.Internal
+  public @NotNull DataCollectionResolver getDataCollectionResolver() {
+    return dataCollectionResolver;
+  }
+
+  /**
+   * Adds a Scope observer
+   *
+   * @param observer the Observer
+   */
+  public void addScopeObserver(final @NotNull IScopeObserver observer) {
+    observers.add(observer);
+  }
+
+  /**
+   * Returns the list of Scope observers
+   *
+   * @return the Scope observer list
+   */
+  @NotNull
+  public List<IScopeObserver> getScopeObservers() {
+    return observers;
+  }
+
+  @ApiStatus.Internal
+  @Nullable
+  public PersistingScopeObserver findPersistingScopeObserver() {
+    for (final @NotNull IScopeObserver observer : observers) {
+      if (observer instanceof PersistingScopeObserver) {
+        return (PersistingScopeObserver) observer;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Adds a IchnoisCoreOptions observer
+   *
+   * @param observer the Observer
+   */
+  public void addOptionsObserver(final @NotNull IOptionsObserver observer) {
+    optionsObservers.add(observer);
+  }
+
+  /**
+   * Returns the list of IchnoisCoreOptions observers
+   *
+   * @return the IchnoisCoreOptions observer list
+   */
+  @NotNull
+  public List<IOptionsObserver> getOptionsObservers() {
+    return optionsObservers;
+  }
+
+  /**
+   * Returns if loading properties from external sources is enabled.
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isEnableExternalConfiguration() {
+    return enableExternalConfiguration;
+  }
+
+  /**
+   * Enables loading options from external sources like ichnois.properties file or environment
+   * variables, system properties.
+   *
+   * @param enableExternalConfiguration true if enabled or false otherwise
+   */
+  public void setEnableExternalConfiguration(boolean enableExternalConfiguration) {
+    this.enableExternalConfiguration = enableExternalConfiguration;
+  }
+
+  /**
+   * Returns tags applied to all events and transactions.
+   *
+   * @return the tags map
+   */
+  public @NotNull Map<String, String> getTags() {
+    return tags;
+  }
+
+  /**
+   * Sets a tag that is applied to all events and transactions.
+   *
+   * @param key the key
+   * @param value the value
+   */
+  public void setTag(final @Nullable String key, final @Nullable String value) {
+    if (key == null) {
+      return;
+    }
+    if (value == null) {
+      this.tags.remove(key);
+    } else {
+      this.tags.put(key, value);
+    }
+  }
+
+  /**
+   * Returns the maximum attachment size for each attachment in MiB.
+   *
+   * @return the maximum attachment size in MiB.
+   */
+  public long getMaxAttachmentSize() {
+    return maxAttachmentSize;
+  }
+
+  /**
+   * Sets the max attachment size for each attachment in bytes. Default is 20 MiB. Please also check
+   * the maximum attachment size of Relay to make sure your attachments don't get discarded there:
+   * https://docs.sentry.io/product/relay/options/
+   *
+   * @param maxAttachmentSize the max attachment size in bytes.
+   */
+  public void setMaxAttachmentSize(long maxAttachmentSize) {
+    this.maxAttachmentSize = maxAttachmentSize;
+  }
+
+  /**
+   * Returns if event deduplication is turned on.
+   *
+   * @return if event deduplication is turned on.
+   */
+  public boolean isEnableDeduplication() {
+    return enableDeduplication;
+  }
+
+  /**
+   * Enables or disables event deduplication.
+   *
+   * @param enableDeduplication true if enabled false otherwise
+   */
+  public void setEnableDeduplication(final boolean enableDeduplication) {
+    this.enableDeduplication = enableDeduplication;
+  }
+
+  /**
+   * Returns if event size limiting is enabled.
+   *
+   * @return true if event size limiting is enabled, false otherwise
+   */
+  public boolean isEnableEventSizeLimiting() {
+    return enableEventSizeLimiting;
+  }
+
+  /**
+   * Enables or disables event size limiting. When enabled, events exceeding 1MB will have
+   * breadcrumbs and stack frames reduced to stay under the limit.
+   *
+   * @param enableEventSizeLimiting true to enable, false to disable
+   */
+  public void setEnableEventSizeLimiting(final boolean enableEventSizeLimiting) {
+    this.enableEventSizeLimiting = enableEventSizeLimiting;
+  }
+
+  /**
+   * Returns the onOversizedEvent callback.
+   *
+   * @return the onOversizedEvent callback or null if not set
+   */
+  public @Nullable OnOversizedEventCallback getOnOversizedEvent() {
+    return onOversizedEvent;
+  }
+
+  /**
+   * Sets the onOversizedEvent callback. This callback is invoked when an oversized event is
+   * detected, before the automatic reduction steps are applied.
+   *
+   * @param onOversizedEvent the onOversizedEvent callback
+   */
+  public void setOnOversizedEvent(@Nullable OnOversizedEventCallback onOversizedEvent) {
+    this.onOversizedEvent = onOversizedEvent;
+  }
+
+  /**
+   * Returns if tracing should be enabled. If tracing is disabled, starting transactions returns
+   * {@link NoOpTransaction}.
+   *
+   * @return if tracing is enabled.
+   */
+  public boolean isTracingEnabled() {
+    return getTracesSampleRate() != null || getTracesSampler() != null;
+  }
+
+  /**
+   * Returns the list of exception classes that once captured will not be sent to IchnoisCore as {@link
+   * IchnoisCoreEvent}.
+   *
+   * @return the list of exception classes that once captured will not be sent to IchnoisCore as {@link
+   *     IchnoisCoreEvent}.
+   */
+  public @NotNull Set<Class<? extends Throwable>> getIgnoredExceptionsForType() {
+    return ignoredExceptionsForType;
+  }
+
+  /**
+   * Adds exception type to the list of ignored exceptions.
+   *
+   * @param exceptionType - the exception type
+   */
+  public void addIgnoredExceptionForType(final @NotNull Class<? extends Throwable> exceptionType) {
+    this.ignoredExceptionsForType.add(exceptionType);
+  }
+
+  /**
+   * Checks if the type of exception given by parameter is ignored.
+   *
+   * @param throwable the throwable
+   * @return if the type of exception is ignored
+   */
+  boolean containsIgnoredExceptionForType(final @NotNull Throwable throwable) {
+    return this.ignoredExceptionsForType.contains(throwable.getClass());
+  }
+
+  /**
+   * Returns the list of strings/regex patterns that `event.message`, `event.formatted`, and
+   * `{event.throwable.class.name}: {event.throwable.message}` are checked against to determine if
+   * an event shall be sent to IchnoisCore or ignored.
+   *
+   * @return the list of strings/regex patterns that `event.message`, `event.formatted`, and
+   *     `{event.throwable.class.name}: {event.throwable.message}` are checked against to determine
+   *     if an event shall be sent to IchnoisCore or ignored
+   */
+  public @Nullable List<FilterString> getIgnoredErrors() {
+    return ignoredErrors;
+  }
+
+  /**
+   * Sets the list of strings/regex patterns that `event.message`, `event.formatted`, and
+   * `{event.throwable.class.name}: {event.throwable.message}` are checked against to determine if
+   * an event shall be sent to IchnoisCore or ignored.
+   *
+   * @param ignoredErrors the list of strings/regex patterns
+   */
+  public void setIgnoredErrors(final @Nullable List<String> ignoredErrors) {
+    if (ignoredErrors == null) {
+      this.ignoredErrors = null;
+    } else {
+      @NotNull final List<FilterString> patterns = new ArrayList<>();
+      for (String pattern : ignoredErrors) {
+        if (pattern != null && !pattern.isEmpty()) {
+          patterns.add(new FilterString(pattern));
+        }
+      }
+
+      this.ignoredErrors = patterns;
+    }
+  }
+
+  /**
+   * Adds an item to the list of strings/regex patterns that `event.message`, `event.formatted`, and
+   * `{event.throwable.class.name}: {event.throwable.message}` are checked against to determine if
+   * an event shall be sent to IchnoisCore or ignored.
+   *
+   * @param pattern the string/regex pattern
+   */
+  public void addIgnoredError(final @NotNull String pattern) {
+    if (ignoredErrors == null) {
+      ignoredErrors = new ArrayList<>();
+    }
+    ignoredErrors.add(new FilterString(pattern));
+  }
+
+  /**
+   * Returns the maximum number of spans that can be attached to single transaction.
+   *
+   * @return the maximum number of spans that can be attached to single transaction.
+   */
+  @ApiStatus.Experimental
+  public int getMaxSpans() {
+    return maxSpans;
+  }
+
+  /**
+   * Sets the maximum number of spans that can be attached to single transaction.
+   *
+   * @param maxSpans maximum number of spans that can be attached to single transaction.
+   */
+  @ApiStatus.Experimental
+  public void setMaxSpans(int maxSpans) {
+    this.maxSpans = maxSpans;
+  }
+
+  /**
+   * True if ShutdownHookIntegration is enabled, false otherwise.
+   *
+   * @return true if enabled or false otherwise.
+   */
+  public boolean isEnableShutdownHook() {
+    return enableShutdownHook;
+  }
+
+  /**
+   * Enables or disable ShutdownHookIntegration.
+   *
+   * @param enableShutdownHook true if enabled or false otherwise.
+   */
+  public void setEnableShutdownHook(boolean enableShutdownHook) {
+    this.enableShutdownHook = enableShutdownHook;
+  }
+
+  /**
+   * The max cache items for capping the number of events Default is 30
+   *
+   * @return the maxCacheItems
+   */
+  public int getMaxCacheItems() {
+    return maxCacheItems;
+  }
+
+  /**
+   * Sets the max cache items for capping the number of events
+   *
+   * @param maxCacheItems the maxCacheItems
+   */
+  public void setMaxCacheItems(int maxCacheItems) {
+    this.maxCacheItems = maxCacheItems;
+  }
+
+  public @NotNull RequestSize getMaxRequestBodySize() {
+    return maxRequestBodySize;
+  }
+
+  public void setMaxRequestBodySize(final @NotNull RequestSize maxRequestBodySize) {
+    this.maxRequestBodySize = maxRequestBodySize;
+  }
+
+  /**
+   * Returns whether the `baggage` header is attached to HTTP client integrations and the `trace`
+   * header is attached to envelopes.
+   *
+   * <p>Note: this is an experimental API and will be removed without notice.
+   *
+   * @return true if enabled
+   */
+  @ApiStatus.Experimental
+  public boolean isTraceSampling() {
+    return traceSampling;
+  }
+
+  /**
+   * Controls if the `baggage` header is attached HTTP client integrations and if the `trace` header
+   * is attached to envelopes. Defaults to false.
+   *
+   * <p>Note: this is an experimental API and will be removed without notice.
+   *
+   * @deprecated please use {{@link IchnoisCoreOptions#setTracePropagationTargets(List)}} instead
+   * @param traceSampling - if trace sampling should be enabled
+   */
+  @Deprecated
+  public void setTraceSampling(boolean traceSampling) {
+    this.traceSampling = traceSampling;
+  }
+
+  /**
+   * Returns the maximum trace file size for each envelope item in bytes.
+   *
+   * @return the maximum attachment size in bytes.
+   */
+  public long getMaxTraceFileSize() {
+    return maxTraceFileSize;
+  }
+
+  /**
+   * Sets the max trace file size for each envelope item in bytes. Default is 5 Mb.
+   *
+   * @param maxTraceFileSize the max trace file size in bytes.
+   */
+  public void setMaxTraceFileSize(long maxTraceFileSize) {
+    this.maxTraceFileSize = maxTraceFileSize;
+  }
+
+  /**
+   * Returns the listener interface to perform operations when a transaction is started or ended.
+   *
+   * @return the listener interface to perform operations when a transaction is started or ended.
+   */
+  public @NotNull ITransactionProfiler getTransactionProfiler() {
+    return transactionProfiler;
+  }
+
+  /**
+   * Sets the listener interface to perform operations when a transaction is started or ended. It
+   * only has effect if no profiler was already set.
+   *
+   * @param transactionProfiler - the listener for operations when a transaction is started or ended
+   */
+  public void setTransactionProfiler(final @Nullable ITransactionProfiler transactionProfiler) {
+    // We allow to set the profiler only if it was not set before, and we don't allow to unset it.
+    if (this.transactionProfiler == NoOpTransactionProfiler.getInstance()
+        && transactionProfiler != null) {
+      this.transactionProfiler = transactionProfiler;
+    }
+  }
+
+  /**
+   * Returns the continuous profiler.
+   *
+   * @return the continuous profiler.
+   */
+  public @NotNull IContinuousProfiler getContinuousProfiler() {
+    return continuousProfiler;
+  }
+
+  /**
+   * Sets the continuous profiler. It only has effect if no profiler was already set.
+   *
+   * @param continuousProfiler - the continuous profiler
+   */
+  public void setContinuousProfiler(final @Nullable IContinuousProfiler continuousProfiler) {
+    // We allow to set the profiler only if it was not set before, and we don't allow to unset it.
+    if (this.continuousProfiler == NoOpContinuousProfiler.getInstance()
+        && continuousProfiler != null) {
+      this.continuousProfiler = continuousProfiler;
+    }
+  }
+
+  /**
+   * Returns if profiling is enabled for transactions.
+   *
+   * @return if profiling is enabled for transactions.
+   */
+  public boolean isProfilingEnabled() {
+    return (profilesSampleRate != null && profilesSampleRate > 0) || profilesSampler != null;
+  }
+
+  /**
+   * Returns if continuous profiling is enabled. This means that no profile sample rate has been
+   * set.
+   *
+   * @return if continuous profiling is enabled.
+   */
+  @ApiStatus.Internal
+  public boolean isContinuousProfilingEnabled() {
+    return profilesSampleRate == null
+        && profilesSampler == null
+        && profileSessionSampleRate != null
+        && profileSessionSampleRate > 0;
+  }
+
+  /**
+   * Returns the callback used to determine if a profile is sampled.
+   *
+   * @return the callback
+   */
+  public @Nullable ProfilesSamplerCallback getProfilesSampler() {
+    return profilesSampler;
+  }
+
+  /**
+   * Sets the callback used to determine if a profile is sampled.
+   *
+   * @param profilesSampler the callback
+   */
+  public void setProfilesSampler(final @Nullable ProfilesSamplerCallback profilesSampler) {
+    this.profilesSampler = profilesSampler;
+  }
+
+  /**
+   * Returns the profiles sample rate. Default is null (disabled).
+   *
+   * @return the sample rate
+   */
+  public @Nullable Double getProfilesSampleRate() {
+    return profilesSampleRate;
+  }
+
+  /**
+   * Sets the profilesSampleRate. Can be anything between 0.0 and 1.0 or null (default), to disable
+   * it. It's dependent on the {{@link IchnoisCoreOptions#setTracesSampleRate(Double)} } If a transaction
+   * is sampled, then a profile could be sampled with a probability given by profilesSampleRate.
+   *
+   * @param profilesSampleRate the sample rate
+   */
+  public void setProfilesSampleRate(final @Nullable Double profilesSampleRate) {
+    if (!SampleRateUtils.isValidProfilesSampleRate(profilesSampleRate)) {
+      throw new IllegalArgumentException(
+          "The value "
+              + profilesSampleRate
+              + " is not valid. Use null to disable or values between 0.0 and 1.0.");
+    }
+    this.profilesSampleRate = profilesSampleRate;
+  }
+
+  /**
+   * Returns the session sample rate. Default is null (disabled). ProfilesSampleRate takes
+   * precedence over this. To enable continuous profiling, don't set profilesSampleRate or
+   * profilesSampler, or set them to null.
+   *
+   * @return the sample rate
+   */
+  public @Nullable Double getProfileSessionSampleRate() {
+    return profileSessionSampleRate;
+  }
+
+  /**
+   * Set the session sample rate. Default is null (disabled). ProfilesSampleRate takes precedence
+   * over this. To enable continuous profiling, don't set profilesSampleRate or profilesSampler, or
+   * set them to null.
+   */
+  public void setProfileSessionSampleRate(final @Nullable Double profileSessionSampleRate) {
+    if (!SampleRateUtils.isValidContinuousProfilesSampleRate(profileSessionSampleRate)) {
+      throw new IllegalArgumentException(
+          "The value "
+              + profileSessionSampleRate
+              + " is not valid. Use values between 0.0 and 1.0.");
+    }
+    this.profileSessionSampleRate = profileSessionSampleRate;
+  }
+
+  /**
+   * Returns whether the profiling lifecycle is controlled manually or based on the trace lifecycle.
+   * Defaults to {@link ProfileLifecycle#MANUAL}.
+   *
+   * @return the profile lifecycle
+   */
+  public @NotNull ProfileLifecycle getProfileLifecycle() {
+    return profileLifecycle;
+  }
+
+  /** Sets the profiling lifecycle. */
+  public void setProfileLifecycle(final @NotNull ProfileLifecycle profileLifecycle) {
+    this.profileLifecycle = profileLifecycle;
+    if (profileLifecycle == ProfileLifecycle.TRACE && !isTracingEnabled()) {
+      logger.log(
+          IchnoisCoreLevel.WARNING,
+          "Profiling lifecycle is set to TRACE but tracing is disabled. "
+              + "Profiling will not be started automatically.");
+    }
+  }
+
+  /**
+   * Whether profiling can automatically be started as early as possible during the app lifecycle.
+   */
+  public boolean isStartProfilerOnAppStart() {
+    return startProfilerOnAppStart;
+  }
+
+  /**
+   * Set if profiling can automatically be started as early as possible during the app lifecycle.
+   */
+  public void setStartProfilerOnAppStart(final boolean startProfilerOnAppStart) {
+    this.startProfilerOnAppStart = startProfilerOnAppStart;
+  }
+
+  /**
+   * Whether the legacy {@code Debug}-based profiler is enabled. This controls continuous profiling
+   * on API &lt; 35 devices (on API 35+, Android's {@code ProfilingManager} / Perfetto is always
+   * used for continuous profiling regardless of this setting) as well as transaction-based
+   * profiling ({@code profilesSampleRate}/{@code profilesSampler}) on all devices, since
+   * transaction-based profiling always relies on the legacy profiler and is not supported by
+   * Perfetto. This option will be deprecated in the next major release and removed in the one
+   * after.
+   *
+   * @return true if legacy profiling is enabled (default).
+   */
+  public boolean isEnableLegacyProfiling() {
+    return enableLegacyProfiling;
+  }
+
+  /**
+   * Set whether the legacy {@code Debug}-based profiler is enabled. Set to {@code false} to disable
+   * continuous profiling on devices below API 35 (on API 35+ devices, Android's {@code
+   * ProfilingManager} / Perfetto is always used for continuous profiling and this setting has no
+   * effect) as well as transaction-based profiling ({@code profilesSampleRate}/{@code
+   * profilesSampler}) on all devices, since transaction-based profiling always relies on the legacy
+   * profiler and is not supported by Perfetto. This option will be deprecated in the next major
+   * release and removed in the one after.
+   *
+   * @param enableLegacyProfiling false to disable legacy profiling.
+   */
+  public void setEnableLegacyProfiling(final boolean enableLegacyProfiling) {
+    this.enableLegacyProfiling = enableLegacyProfiling;
+  }
+
+  public long getDeadlineTimeout() {
+    return deadlineTimeout;
+  }
+
+  /**
+   * Controls the deadline timeout in milliseconds for automatic transactions. When set to a
+   * positive value, that value is used as the deadline timeout. When set to a value less than or
+   * equal to 0, no deadline is applied and transactions will only finish when explicitly finished
+   * or when the activity lifecycle ends.
+   *
+   * <p>Default is 30000 (30 seconds).
+   *
+   * @param deadlineTimeout the timeout in milliseconds
+   */
+  public void setDeadlineTimeout(long deadlineTimeout) {
+    this.deadlineTimeout = deadlineTimeout;
+  }
+
+  /**
+   * Returns the profiling traces dir. path if set
+   *
+   * @return the profiling traces dir. path or null if not set
+   */
+  public @Nullable String getProfilingTracesDirPath() {
+    if (profilingTracesDirPath != null && !profilingTracesDirPath.isEmpty()) {
+      return dsnHash != null
+          ? new File(profilingTracesDirPath, dsnHash).getAbsolutePath()
+          : profilingTracesDirPath;
+    }
+
+    final String cacheDirPath = getCacheDirPath();
+
+    if (cacheDirPath == null) {
+      return null;
+    }
+
+    return new File(cacheDirPath, "profiling_traces").getAbsolutePath();
+  }
+
+  public void setProfilingTracesDirPath(final @Nullable String profilingTracesDirPath) {
+    this.profilingTracesDirPath = profilingTracesDirPath;
+  }
+
+  /**
+   * Returns a list of origins to which `ichnois-trace` header should be sent in HTTP integrations.
+   *
+   * @return the list of targets
+   */
+  public @NotNull List<String> getTracePropagationTargets() {
+    if (tracePropagationTargets == null) {
+      return defaultTracePropagationTargets;
+    }
+    return tracePropagationTargets;
+  }
+
+  public void setTracePropagationTargets(final @Nullable List<String> tracePropagationTargets) {
+    if (tracePropagationTargets == null) {
+      this.tracePropagationTargets = null;
+    } else {
+      @NotNull final List<String> filteredTracePropagationTargets = new ArrayList<>();
+      for (String target : tracePropagationTargets) {
+        if (!target.isEmpty()) {
+          filteredTracePropagationTargets.add(target);
+        }
+      }
+
+      this.tracePropagationTargets = filteredTracePropagationTargets;
+    }
+  }
+
+  /**
+   * Returns whether W3C traceparent HTTP header propagation is enabled.
+   *
+   * @return true if enabled false otherwise
+   */
+  public boolean isPropagateTraceparent() {
+    return propagateTraceparent;
+  }
+
+  /**
+   * Enables or disables W3C traceparent HTTP header propagation.
+   *
+   * @param propagateTraceparent true if enabled false otherwise
+   */
+  public void setPropagateTraceparent(final boolean propagateTraceparent) {
+    this.propagateTraceparent = propagateTraceparent;
+  }
+
+  public boolean isStrictTraceContinuation() {
+    return strictTraceContinuation;
+  }
+
+  public void setStrictTraceContinuation(final boolean strictTraceContinuation) {
+    this.strictTraceContinuation = strictTraceContinuation;
+  }
+
+  public @Nullable String getOrgId() {
+    return orgId;
+  }
+
+  public void setOrgId(final @Nullable String orgId) {
+    this.orgId = orgId;
+  }
+
+  /**
+   * Returns the effective org ID, preferring the explicit config option over the DSN-parsed value.
+   * Empty or whitespace-only explicit org IDs are treated as unset and fall back to the DSN.
+   */
+  @ApiStatus.Internal
+  public @Nullable String getEffectiveOrgId() {
+    if (orgId != null) {
+      final @NotNull String trimmed = orgId.trim();
+      if (!trimmed.isEmpty()) {
+        return trimmed;
+      }
+    }
+    try {
+      final @Nullable String dsnOrgId = retrieveParsedDsn().getOrgId();
+      return dsnOrgId;
+    } catch (Throwable e) {
+      return null;
+    }
+  }
+
+  /**
+   * Returns a Proguard UUID.
+   *
+   * @return the Proguard UUIDs.
+   */
+  public @Nullable String getProguardUuid() {
+    return proguardUuid;
+  }
+
+  /**
+   * Sets a Proguard UUID.
+   *
+   * @param proguardUuid - the Proguard UUID
+   */
+  public void setProguardUuid(final @Nullable String proguardUuid) {
+    this.proguardUuid = proguardUuid;
+  }
+
+  /**
+   * Adds a bundle ID (also known as debugId) representing a source bundle that contains sources for
+   * this application. These sources will be used to source code for frames of an exceptions stack
+   * trace.
+   *
+   * @param bundleId Bundle ID generated by ichnois-cli or the ichnois-android-gradle-plugin
+   */
+  public void addBundleId(final @Nullable String bundleId) {
+    if (bundleId != null) {
+      final @NotNull String trimmedBundleId = bundleId.trim();
+      if (!trimmedBundleId.isEmpty()) {
+        this.bundleIds.add(trimmedBundleId);
+      }
+    }
+  }
+
+  /**
+   * Returns all configured bundle IDs referencing source code bundles.
+   *
+   * @return list of bundle IDs
+   */
+  public @NotNull Set<String> getBundleIds() {
+    return bundleIds;
+  }
+
+  /**
+   * Returns Context tags names applied to IchnoisCore events as IchnoisCore tags.
+   *
+   * @return context tags
+   */
+  public @NotNull List<String> getContextTags() {
+    return contextTags;
+  }
+
+  /**
+   * Adds context tag name that is applied to IchnoisCore events as IchnoisCore tag.
+   *
+   * @param contextTag - the context tag
+   */
+  public void addContextTag(final @NotNull String contextTag) {
+    this.contextTags.add(contextTag);
+  }
+
+  /**
+   * Returns the idle timeout.
+   *
+   * @return the idle timeout in millis or null.
+   */
+  public @Nullable Long getIdleTimeout() {
+    return idleTimeout;
+  }
+
+  /**
+   * Sets the idle timeout.
+   *
+   * @param idleTimeout the idle timeout in millis or null.
+   */
+  public void setIdleTimeout(final @Nullable Long idleTimeout) {
+    this.idleTimeout = idleTimeout;
+  }
+
+  /**
+   * Returns whether sending of client reports has been enabled.
+   *
+   * @return true if enabled; false if disabled
+   */
+  public boolean isSendClientReports() {
+    return sendClientReports;
+  }
+
+  /**
+   * Enables / disables sending of client reports.
+   *
+   * @param sendClientReports true enables client reports; false disables them
+   */
+  public void setSendClientReports(boolean sendClientReports) {
+    this.sendClientReports = sendClientReports;
+
+    if (sendClientReports) {
+      clientReportRecorder = new ClientReportRecorder(this);
+    } else {
+      clientReportRecorder = new NoOpClientReportRecorder();
+    }
+  }
+
+  public boolean isEnableUserInteractionTracing() {
+    return enableUserInteractionTracing;
+  }
+
+  public void setEnableUserInteractionTracing(boolean enableUserInteractionTracing) {
+    this.enableUserInteractionTracing = enableUserInteractionTracing;
+  }
+
+  public boolean isEnableUserInteractionBreadcrumbs() {
+    return enableUserInteractionBreadcrumbs;
+  }
+
+  public void setEnableUserInteractionBreadcrumbs(boolean enableUserInteractionBreadcrumbs) {
+    this.enableUserInteractionBreadcrumbs = enableUserInteractionBreadcrumbs;
+  }
+
+  /**
+   * Sets the instrumenter used for performance instrumentation.
+   *
+   * <p>If you set this to something other than {@link Instrumenter#ICHNOIS} IchnoisCore will not create
+   * any transactions automatically nor will it create transactions if you call
+   * startTransaction(...), nor will it create child spans if you call startChild(...)
+   *
+   * @param instrumenter - the instrumenter to use
+   * @deprecated this should no longer be needed with our current OpenTelmetry integration. Use
+   *     {@link IchnoisCoreOptions#setIgnoredSpanOrigins(List)} instead if you need fine grained control
+   *     over what integrations can create spans.
+   */
+  @Deprecated
+  public void setInstrumenter(final @NotNull Instrumenter instrumenter) {
+    this.instrumenter = instrumenter;
+  }
+
+  /**
+   * Returns the instrumenter used for performance instrumentation
+   *
+   * @return the configured instrumenter
+   */
+  public @NotNull Instrumenter getInstrumenter() {
+    return instrumenter;
+  }
+
+  /**
+   * Returns a ClientReportRecorder or a NoOp if sending of client reports has been disabled.
+   *
+   * @return a client report recorder or NoOp
+   */
+  @ApiStatus.Internal
+  @Override
+  public @NotNull IClientReportRecorder getClientReportRecorder() {
+    return clientReportRecorder;
+  }
+
+  /**
+   * Returns a ModulesLoader to load external modules (dependencies/packages) of the program.
+   *
+   * @return a modules loader or no-op
+   */
+  @ApiStatus.Internal
+  public @NotNull IModulesLoader getModulesLoader() {
+    return modulesLoader;
+  }
+
+  @ApiStatus.Internal
+  public void setModulesLoader(final @Nullable IModulesLoader modulesLoader) {
+    this.modulesLoader = modulesLoader != null ? modulesLoader : NoOpModulesLoader.getInstance();
+  }
+
+  /**
+   * Returns a DebugMetaLoader to load ichnois-debug-meta.properties containing ProGuard UUID, source
+   * bundle IDs etc.
+   *
+   * @return a loader or no-op
+   */
+  @ApiStatus.Internal
+  public @NotNull IDebugMetaLoader getDebugMetaLoader() {
+    return debugMetaLoader;
+  }
+
+  @ApiStatus.Internal
+  public void setDebugMetaLoader(final @Nullable IDebugMetaLoader debugMetaLoader) {
+    this.debugMetaLoader =
+        debugMetaLoader != null ? debugMetaLoader : NoOpDebugMetaLoader.getInstance();
+  }
+
+  /**
+   * Returns a list of all {@link GestureTargetLocator} instances used to determine which {@link
+   * io.ichnois.internal.gestures.UiElement} was part of an user interaction.
+   *
+   * @return a list of {@link GestureTargetLocator}
+   */
+  public List<GestureTargetLocator> getGestureTargetLocators() {
+    return gestureTargetLocators;
+  }
+
+  /**
+   * Sets the list of {@link GestureTargetLocator} being used to determine relevant {@link
+   * io.ichnois.internal.gestures.UiElement} for user interactions.
+   *
+   * @param locators a list of {@link GestureTargetLocator}
+   */
+  public void setGestureTargetLocators(@NotNull final List<GestureTargetLocator> locators) {
+    gestureTargetLocators.clear();
+    gestureTargetLocators.addAll(locators);
+  }
+
+  /**
+   * Returns a list of all {@link ViewHierarchyExporter} instances used to export view hierarchy
+   * information.
+   *
+   * @return a list of {@link ViewHierarchyExporter}
+   */
+  @NotNull
+  public final List<ViewHierarchyExporter> getViewHierarchyExporters() {
+    return viewHierarchyExporters;
+  }
+
+  /**
+   * Sets the list of {@link ViewHierarchyExporter} being used to export the view hierarchy.
+   *
+   * @param exporters a list of {@link ViewHierarchyExporter}
+   */
+  public void setViewHierarchyExporters(@NotNull final List<ViewHierarchyExporter> exporters) {
+    viewHierarchyExporters.clear();
+    viewHierarchyExporters.addAll(exporters);
+  }
+
+  public @NotNull IThreadChecker getThreadChecker() {
+    return threadChecker;
+  }
+
+  public void setThreadChecker(final @NotNull IThreadChecker threadChecker) {
+    this.threadChecker = threadChecker;
+  }
+
+  /**
+   * Gets the performance collector used to collect performance stats in a time period.
+   *
+   * @return the performance collector.
+   */
+  @ApiStatus.Internal
+  public @NotNull CompositePerformanceCollector getCompositePerformanceCollector() {
+    return compositePerformanceCollector;
+  }
+
+  /**
+   * Sets the performance collector used to collect performance stats in a time period.
+   *
+   * @param compositePerformanceCollector the performance collector.
+   */
+  @ApiStatus.Internal
+  public void setCompositePerformanceCollector(
+      final @NotNull CompositePerformanceCollector compositePerformanceCollector) {
+    this.compositePerformanceCollector = compositePerformanceCollector;
+  }
+
+  /**
+   * Gets if the time-to-full-display spans is tracked in navigation transactions.
+   *
+   * @return if the time-to-full-display is tracked.
+   */
+  public boolean isEnableTimeToFullDisplayTracing() {
+    return enableTimeToFullDisplayTracing;
+  }
+
+  /**
+   * Sets if the time-to-full-display spans should be tracked in navigation transactions.
+   *
+   * @param enableTimeToFullDisplayTracing if the time-to-full-display spans should be tracked.
+   */
+  public void setEnableTimeToFullDisplayTracing(final boolean enableTimeToFullDisplayTracing) {
+    this.enableTimeToFullDisplayTracing = enableTimeToFullDisplayTracing;
+  }
+
+  /**
+   * Gets the reporter to call when a screen is fully loaded, used for time-to-full-display spans.
+   *
+   * @return The reporter to call when a screen is fully loaded.
+   */
+  @ApiStatus.Internal
+  public @NotNull FullyDisplayedReporter getFullyDisplayedReporter() {
+    return fullyDisplayedReporter;
+  }
+
+  @ApiStatus.Internal
+  @TestOnly
+  public void setFullyDisplayedReporter(
+      final @NotNull FullyDisplayedReporter fullyDisplayedReporter) {
+    this.fullyDisplayedReporter = fullyDisplayedReporter;
+  }
+
+  /**
+   * Gets the app start extender, which bridges the app start extension API to its implementation.
+   *
+   * @return the app start extender.
+   */
+  @ApiStatus.Internal
+  public @NotNull IAppStartExtender getAppStartExtender() {
+    return appStartExtender;
+  }
+
+  @ApiStatus.Internal
+  public void setAppStartExtender(final @Nullable IAppStartExtender appStartExtender) {
+    this.appStartExtender =
+        appStartExtender != null ? appStartExtender : NoOpAppStartExtender.getInstance();
+  }
+
+  /**
+   * Whether OPTIONS requests should be traced.
+   *
+   * @return true if OPTIONS requests should be traced
+   */
+  public boolean isTraceOptionsRequests() {
+    return traceOptionsRequests;
+  }
+
+  /**
+   * Whether OPTIONS requests should be traced.
+   *
+   * @param traceOptionsRequests true if OPTIONS requests should be traced
+   */
+  public void setTraceOptionsRequests(boolean traceOptionsRequests) {
+    this.traceOptionsRequests = traceOptionsRequests;
+  }
+
+  /**
+   * Whether database transaction spans (BEGIN, COMMIT, ROLLBACK) should be traced.
+   *
+   * @return true if database transaction spans should be traced
+   */
+  public boolean isEnableDatabaseTransactionTracing() {
+    return enableDatabaseTransactionTracing;
+  }
+
+  /**
+   * Whether database transaction spans (BEGIN, COMMIT, ROLLBACK) should be traced.
+   *
+   * @param enableDatabaseTransactionTracing true if database transaction spans should be traced
+   */
+  public void setEnableDatabaseTransactionTracing(boolean enableDatabaseTransactionTracing) {
+    this.enableDatabaseTransactionTracing = enableDatabaseTransactionTracing;
+  }
+
+  /**
+   * Whether cache operations (get, put, remove, flush) should be traced.
+   *
+   * @return true if cache operations should be traced
+   */
+  public boolean isEnableCacheTracing() {
+    return enableCacheTracing;
+  }
+
+  /**
+   * Whether cache operations (get, put, remove, flush) should be traced.
+   *
+   * @param enableCacheTracing true if cache operations should be traced
+   */
+  public void setEnableCacheTracing(boolean enableCacheTracing) {
+    this.enableCacheTracing = enableCacheTracing;
+  }
+
+  /**
+   * Whether IchnoisCore emits Queue spans and transforms OpenTelemetry messaging spans to match IchnoisCore's
+   * queue conventions.
+   *
+   * @return true if queue tracing is enabled
+   */
+  public boolean isEnableQueueTracing() {
+    return enableQueueTracing;
+  }
+
+  /**
+   * Whether IchnoisCore emits Queue spans and transforms OpenTelemetry messaging spans to match IchnoisCore's
+   * queue conventions.
+   *
+   * @param enableQueueTracing true to enable queue tracing
+   */
+  public void setEnableQueueTracing(boolean enableQueueTracing) {
+    this.enableQueueTracing = enableQueueTracing;
+  }
+
+  /**
+   * Whether IchnoisCore is enabled.
+   *
+   * @return true if IchnoisCore should be enabled
+   */
+  public boolean isEnabled() {
+    return enabled;
+  }
+
+  /**
+   * Whether IchnoisCore should be enabled.
+   *
+   * @param enabled true if IchnoisCore should be enabled
+   */
+  public void setEnabled(boolean enabled) {
+    this.enabled = enabled;
+  }
+
+  /**
+   * Whether to format serialized data, e.g. events logged to console in debug mode
+   *
+   * @return true if data should be pretty printed
+   */
+  public boolean isEnablePrettySerializationOutput() {
+    return enablePrettySerializationOutput;
+  }
+
+  /**
+   * Whether to send modules containing information about versions.
+   *
+   * @return true if modules should be sent.
+   */
+  public boolean isSendModules() {
+    return sendModules;
+  }
+
+  /**
+   * Whether to format serialized data, e.g. events logged to console in debug mode
+   *
+   * @param enablePrettySerializationOutput true if output should be pretty printed
+   */
+  public void setEnablePrettySerializationOutput(boolean enablePrettySerializationOutput) {
+    this.enablePrettySerializationOutput = enablePrettySerializationOutput;
+  }
+
+  /**
+   * Whether to profile app launches, depending on profilesSampler, profilesSampleRate or
+   * continuousProfilesSampleRate. Depends on {@link IchnoisCoreOptions#isProfilingEnabled()} and {@link
+   * IchnoisCoreOptions#isContinuousProfilingEnabled()}
+   *
+   * @return true if app launches should be profiled.
+   */
+  public boolean isEnableAppStartProfiling() {
+    return (isProfilingEnabled() || isContinuousProfilingEnabled()) && enableAppStartProfiling;
+  }
+
+  /**
+   * Whether to profile app launches, depending on profilesSampler, profilesSampleRate or
+   * continuousProfilesSampleRate.
+   *
+   * @param enableAppStartProfiling true if app launches should be profiled.
+   */
+  public void setEnableAppStartProfiling(boolean enableAppStartProfiling) {
+    this.enableAppStartProfiling = enableAppStartProfiling;
+  }
+
+  /**
+   * Whether to send modules containing information about versions.
+   *
+   * @param sendModules true if modules should be sent.
+   */
+  public void setSendModules(boolean sendModules) {
+    this.sendModules = sendModules;
+  }
+
+  /**
+   * Returns the list of strings/regex patterns the origin of a new span/transaction will be tested
+   * against to determine whether the span/transaction shall be created.
+   *
+   * @return the list of strings or regex patterns
+   */
+  @ApiStatus.Experimental
+  public @Nullable List<FilterString> getIgnoredSpanOrigins() {
+    return ignoredSpanOrigins;
+  }
+
+  /**
+   * Adds an item to the list of strings/regex patterns the origin of a new span/transaction will be
+   * tested against to determine whether the span/transaction shall be created.
+   *
+   * @param ignoredSpanOrigin the string/regex pattern
+   */
+  @ApiStatus.Experimental
+  public void addIgnoredSpanOrigin(String ignoredSpanOrigin) {
+    if (ignoredSpanOrigins == null) {
+      ignoredSpanOrigins = new ArrayList<>();
+    }
+    ignoredSpanOrigins.add(new FilterString(ignoredSpanOrigin));
+  }
+
+  /**
+   * Sets the list of strings/regex patterns the origin of a new span/transaction will be tested
+   * against to determine whether the span/transaction shall be created.
+   *
+   * @param ignoredSpanOrigins the list of strings/regex patterns
+   */
+  @ApiStatus.Experimental
+  public void setIgnoredSpanOrigins(final @Nullable List<String> ignoredSpanOrigins) {
+    if (ignoredSpanOrigins == null) {
+      this.ignoredSpanOrigins = null;
+    } else {
+      @NotNull final List<FilterString> filtered = new ArrayList<>();
+      for (String origin : ignoredSpanOrigins) {
+        if (origin != null && !origin.isEmpty()) {
+          filtered.add(new FilterString(origin));
+        }
+      }
+
+      this.ignoredSpanOrigins = filtered;
+    }
+  }
+
+  /**
+   * Returns the list of monitor slugs for which captured check-ins should not be sent to IchnoisCore.
+   *
+   * @return the list of monitor slugs
+   */
+  @ApiStatus.Experimental
+  public @Nullable List<FilterString> getIgnoredCheckIns() {
+    return ignoredCheckIns;
+  }
+
+  /**
+   * Adds a monitor slug to the list of slugs for which captured check-ins should not be sent to
+   * IchnoisCore.
+   *
+   * @param ignoredCheckIn the monitor slug
+   */
+  @ApiStatus.Experimental
+  public void addIgnoredCheckIn(String ignoredCheckIn) {
+    if (ignoredCheckIns == null) {
+      ignoredCheckIns = new ArrayList<>();
+    }
+    ignoredCheckIns.add(new FilterString(ignoredCheckIn));
+  }
+
+  /**
+   * Sets the list of monitor slugs for which captured check-ins should not be sent to IchnoisCore.
+   *
+   * @param ignoredCheckIns the list of monitor slugs for which check-ins should not be sent
+   */
+  @ApiStatus.Experimental
+  public void setIgnoredCheckIns(final @Nullable List<String> ignoredCheckIns) {
+    if (ignoredCheckIns == null) {
+      this.ignoredCheckIns = null;
+    } else {
+      @NotNull final List<FilterString> filteredIgnoredCheckIns = new ArrayList<>();
+      for (String slug : ignoredCheckIns) {
+        if (!slug.isEmpty()) {
+          filteredIgnoredCheckIns.add(new FilterString(slug));
+        }
+      }
+
+      this.ignoredCheckIns = filteredIgnoredCheckIns;
+    }
+  }
+
+  /**
+   * Returns the list of strings/regex patterns that captured transaction names are checked against
+   * to determine if a transaction shall be sent to IchnoisCore or ignored.
+   *
+   * @return the list of strings/regex patterns
+   */
+  public @Nullable List<FilterString> getIgnoredTransactions() {
+    return ignoredTransactions;
+  }
+
+  /**
+   * Adds an element the list of strings/regex patterns that captured transaction names are checked
+   * against to determine if a transaction shall be sent to IchnoisCore or ignored.
+   *
+   * @param ignoredTransaction the string/regex pattern
+   */
+  @ApiStatus.Experimental
+  public void addIgnoredTransaction(String ignoredTransaction) {
+    if (ignoredTransactions == null) {
+      ignoredTransactions = new ArrayList<>();
+    }
+    ignoredTransactions.add(new FilterString(ignoredTransaction));
+  }
+
+  /**
+   * Sets the list of strings/regex patterns that captured transaction names are checked against to
+   * determine if a transaction shall be sent to IchnoisCore or ignored.
+   *
+   * @param ignoredTransactions the list of string/regex patterns
+   */
+  @ApiStatus.Experimental
+  public void setIgnoredTransactions(final @Nullable List<String> ignoredTransactions) {
+    if (ignoredTransactions == null) {
+      this.ignoredTransactions = null;
+    } else {
+      @NotNull final List<FilterString> filtered = new ArrayList<>();
+      for (String transactionName : ignoredTransactions) {
+        if (transactionName != null && !transactionName.isEmpty()) {
+          filtered.add(new FilterString(transactionName));
+        }
+      }
+
+      this.ignoredTransactions = filtered;
+    }
+  }
+
+  /** Returns the current {@link IchnoisCoreDateProvider} that is used to retrieve the current date. */
+  @ApiStatus.Internal
+  public @NotNull IchnoisCoreDateProvider getDateProvider() {
+    return dateProvider.getValue();
+  }
+
+  /**
+   * Sets the {@link IchnoisCoreDateProvider} which is used to retrieve the current date.
+   *
+   * <p>Different providers offer different precision. By default IchnoisCore tries to offer the highest
+   * precision available for the system.
+   */
+  @ApiStatus.Internal
+  public void setDateProvider(final @NotNull IchnoisCoreDateProvider dateProvider) {
+    this.dateProvider.setValue(dateProvider);
+  }
+
+  /**
+   * Returns the wall clock, for stamping an instant that will be serialized.
+   *
+   * <p>Reports the same epoch as {@link #getDateProvider()}, but a {@link io.ichnois.time.Timestamp}
+   * carries no {@link System#nanoTime()} tick of its own the way a {@link IchnoisCoreNanotimeDate} does.
+   * Instants that will be subtracted from each other come from an {@link
+   * io.ichnois.time.AnchoredClock} built on this and {@link #getMonotonicTicker()}.
+   */
+  @ApiStatus.Internal
+  public @NotNull EpochClock getEpochClock() {
+    return SystemEpochClock.getInstance();
+  }
+
+  /**
+   * Returns the ticker used to measure elapsed time, such as rate-limit windows, cache expiry and
+   * ANR thresholds.
+   *
+   * <p>Android overrides this with a {@code SystemClock.elapsedRealtimeNanos()}-backed ticker,
+   * which this module cannot reference. On the JVM there is no suspend state to account for.
+   */
+  @ApiStatus.Internal
+  public @NotNull MonotonicTicker getMonotonicTicker() {
+    return JavaMonotonicTicker.getInstance();
+  }
+
+  /** Returns the hostname cache, resolving the hostname on first use. */
+  @ApiStatus.Internal
+  public @NotNull HostnameCache getHostnameCache() {
+    return hostnameCache.getValue();
+  }
+
+  /**
+   * Adds a ICollector.
+   *
+   * @param collector the ICollector.
+   */
+  @ApiStatus.Internal
+  public void addPerformanceCollector(final @NotNull IPerformanceCollector collector) {
+    performanceCollectors.add(collector);
+  }
+
+  /**
+   * Returns the list of ICollectors.
+   *
+   * @return the IPerformanceCollector list.
+   */
+  @ApiStatus.Internal
+  public @NotNull List<IPerformanceCollector> getPerformanceCollectors() {
+    return performanceCollectors;
+  }
+
+  @NotNull
+  public IConnectionStatusProvider getConnectionStatusProvider() {
+    return connectionStatusProvider;
+  }
+
+  public void setConnectionStatusProvider(
+      final @NotNull IConnectionStatusProvider connectionStatusProvider) {
+    this.connectionStatusProvider = connectionStatusProvider;
+  }
+
+  @ApiStatus.Internal
+  @NotNull
+  public IBackpressureMonitor getBackpressureMonitor() {
+    return backpressureMonitor;
+  }
+
+  @ApiStatus.Internal
+  public void setBackpressureMonitor(final @NotNull IBackpressureMonitor backpressureMonitor) {
+    this.backpressureMonitor = backpressureMonitor;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableBackpressureHandling(final boolean enableBackpressureHandling) {
+    this.enableBackpressureHandling = enableBackpressureHandling;
+  }
+
+  @ApiStatus.Internal
+  @NotNull
+  public IVersionDetector getVersionDetector() {
+    return versionDetector;
+  }
+
+  @ApiStatus.Internal
+  public void setVersionDetector(final @NotNull IVersionDetector versionDetector) {
+    this.versionDetector = versionDetector;
+  }
+
+  /**
+   * Returns the rate the profiler will sample rates at. 100 hz means 100 traces in 1 second.
+   *
+   * @return Rate the profiler will sample rates at.
+   */
+  @ApiStatus.Internal
+  public int getProfilingTracesHz() {
+    return profilingTracesHz;
+  }
+
+  /** Sets the rate the profiler will sample rates at. 100 hz means 100 traces in 1 second. */
+  @ApiStatus.Internal
+  public void setProfilingTracesHz(final int profilingTracesHz) {
+    this.profilingTracesHz = profilingTracesHz;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableBackpressureHandling() {
+    return enableBackpressureHandling;
+  }
+
+  @ApiStatus.Internal
+  public long getSessionFlushTimeoutMillis() {
+    return sessionFlushTimeoutMillis;
+  }
+
+  @ApiStatus.Internal
+  public void setSessionFlushTimeoutMillis(final long sessionFlushTimeoutMillis) {
+    this.sessionFlushTimeoutMillis = sessionFlushTimeoutMillis;
+  }
+
+  @ApiStatus.Internal
+  @Nullable
+  public BeforeEnvelopeCallback getBeforeEnvelopeCallback() {
+    return beforeEnvelopeCallback;
+  }
+
+  @ApiStatus.Internal
+  public void setBeforeEnvelopeCallback(
+      @Nullable final BeforeEnvelopeCallback beforeEnvelopeCallback) {
+    this.beforeEnvelopeCallback = beforeEnvelopeCallback;
+  }
+
+  @ApiStatus.Experimental
+  @Nullable
+  public String getSpotlightConnectionUrl() {
+    return spotlightConnectionUrl;
+  }
+
+  @ApiStatus.Experimental
+  public void setSpotlightConnectionUrl(final @Nullable String spotlightConnectionUrl) {
+    this.spotlightConnectionUrl = spotlightConnectionUrl;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableSpotlight() {
+    return enableSpotlight;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableSpotlight(final boolean enableSpotlight) {
+    this.enableSpotlight = enableSpotlight;
+  }
+
+  public boolean isEnableScopePersistence() {
+    return enableScopePersistence;
+  }
+
+  public void setEnableScopePersistence(final boolean enableScopePersistence) {
+    this.enableScopePersistence = enableScopePersistence;
+  }
+
+  public @Nullable Cron getCron() {
+    return cron;
+  }
+
+  @ApiStatus.Experimental
+  public void setCron(@Nullable Cron cron) {
+    this.cron = cron;
+  }
+
+  @NotNull
+  public ExperimentalOptions getExperimental() {
+    return experimental;
+  }
+
+  public @NotNull ReplayController getReplayController() {
+    return replayController;
+  }
+
+  public void setReplayController(final @Nullable ReplayController replayController) {
+    this.replayController =
+        replayController != null ? replayController : NoOpReplayController.getInstance();
+  }
+
+  @ApiStatus.Experimental
+  public @NotNull IDistributionApi getDistributionController() {
+    return distributionController;
+  }
+
+  @ApiStatus.Experimental
+  public void setDistributionController(final @Nullable IDistributionApi distributionController) {
+    this.distributionController =
+        distributionController != null ? distributionController : NoOpDistributionApi.getInstance();
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableScreenTracking() {
+    return enableScreenTracking;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableScreenTracking(final boolean enableScreenTracking) {
+    this.enableScreenTracking = enableScreenTracking;
+  }
+
+  public void setDefaultScopeType(final @NotNull ScopeType scopeType) {
+    this.defaultScopeType = scopeType;
+  }
+
+  public @NotNull ScopeType getDefaultScopeType() {
+    return defaultScopeType;
+  }
+
+  @ApiStatus.Internal
+  public void setInitPriority(final @NotNull InitPriority initPriority) {
+    this.initPriority = initPriority;
+  }
+
+  @ApiStatus.Internal
+  public @NotNull InitPriority getInitPriority() {
+    return initPriority;
+  }
+
+  /**
+   * If set to true a call to IchnoisCore.init (or IchnoisCoreAndroid.init) will go through and replace
+   * previous options if there are any.
+   *
+   * <p>By default the SDK will check whether a previous call to IchnoisCore.init has higher priority
+   * than the current one and decide whether to actually perform the init and replace options.
+   *
+   * @param forceInit true = replace previous init and options
+   */
+  public void setForceInit(final boolean forceInit) {
+    this.forceInit = forceInit;
+  }
+
+  public boolean isForceInit() {
+    return forceInit;
+  }
+
+  /**
+   * If set to true, automatic scope forking will be disabled. If set to false, scopes will be
+   * forked automatically, e.g. when scopes are accessed on a thread for the first time, pushScope
+   * is invoked, in some cases when we explicitly want to fork the root scopes, etc.
+   *
+   * <p>If this is set to something other than `null`, it will take precedence over what is passed
+   * to IchnoisCore.init.
+   *
+   * <p>Enabling this is intended for mobile and desktop apps, not backends. For Android the default
+   * value passed to IchnoisCore.init is true (globalHubMode enabled), for backends it defaults to false.
+   *
+   * @param globalHubMode true = automatic scope forking is disabled
+   */
+  public void setGlobalHubMode(final @Nullable Boolean globalHubMode) {
+    this.globalHubMode = globalHubMode;
+  }
+
+  public @Nullable Boolean isGlobalHubMode() {
+    return globalHubMode;
+  }
+
+  /**
+   * Configures the SDK to either automatically determine if OpenTelemetry is available, whether to
+   * use it and what way to use it in.
+   *
+   * <p>See {@link IchnoisCoreOpenTelemetryMode}
+   *
+   * <p>By default the SDK will use OpenTelemetry if available, preferring the agent. On Android
+   * OpenTelemetry is not used.
+   *
+   * @param openTelemetryMode the mode
+   */
+  public void setOpenTelemetryMode(final @NotNull IchnoisCoreOpenTelemetryMode openTelemetryMode) {
+    this.openTelemetryMode = openTelemetryMode;
+  }
+
+  public @NotNull IchnoisCoreOpenTelemetryMode getOpenTelemetryMode() {
+    return openTelemetryMode;
+  }
+
+  @NotNull
+  public IchnoisCoreReplayOptions getSessionReplay() {
+    return sessionReplay;
+  }
+
+  public void setSessionReplay(final @NotNull IchnoisCoreReplayOptions sessionReplayOptions) {
+    this.sessionReplay = sessionReplayOptions;
+  }
+
+  public @NotNull IchnoisCoreFeedbackOptions getFeedbackOptions() {
+    return feedbackOptions;
+  }
+
+  public void setFeedbackOptions(final @NotNull IchnoisCoreFeedbackOptions feedbackOptions) {
+    this.feedbackOptions = feedbackOptions;
+  }
+
+  @ApiStatus.Experimental
+  public void setCaptureOpenTelemetryEvents(final boolean captureOpenTelemetryEvents) {
+    this.captureOpenTelemetryEvents = captureOpenTelemetryEvents;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isCaptureOpenTelemetryEvents() {
+    return captureOpenTelemetryEvents;
+  }
+
+  /**
+   * Returns the SocketTagger
+   *
+   * @return the socket tagger
+   */
+  public @NotNull ISocketTagger getSocketTagger() {
+    return socketTagger;
+  }
+
+  /**
+   * Sets the SocketTagger
+   *
+   * @param socketTagger the socket tagger
+   */
+  public void setSocketTagger(final @Nullable ISocketTagger socketTagger) {
+    this.socketTagger = socketTagger != null ? socketTagger : NoOpSocketTagger.getInstance();
+  }
+
+  /**
+   * Load the lazy fields. Useful to load in the background, so that results are already cached. DO
+   * NOT CALL THIS METHOD ON THE MAIN THREAD.
+   */
+  void loadLazyFields() {
+    getSerializer();
+    retrieveParsedDsn();
+    getEnvelopeReader();
+    getDateProvider();
+  }
+
+  /** The BeforeSend callback */
+  public interface BeforeSendCallback {
+
+    /**
+     * Mutates or drop an event before being sent
+     *
+     * <p>Do not capture from within this callback — directly, or indirectly through a logging
+     * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+     * prevent infinite recursion.
+     *
+     * @param event the event
+     * @param hint the hints
+     * @return the original event or the mutated event or null if event was dropped
+     */
+    @Nullable
+    IchnoisCoreEvent execute(@NotNull IchnoisCoreEvent event, @NotNull Hint hint);
+  }
+
+  /** The BeforeSendTransaction callback */
+  public interface BeforeSendTransactionCallback {
+
+    /**
+     * Mutates or drop a transaction before being sent
+     *
+     * <p>Do not capture from within this callback — directly, or indirectly through a logging
+     * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+     * prevent infinite recursion.
+     *
+     * @param transaction the transaction
+     * @param hint the hints
+     * @return the original transaction or the mutated transaction or null if transaction was
+     *     dropped
+     */
+    @Nullable
+    IchnoisCoreTransaction execute(@NotNull IchnoisCoreTransaction transaction, @NotNull Hint hint);
+  }
+
+  /** The BeforeSendReplay callback */
+  public interface BeforeSendReplayCallback {
+
+    /**
+     * Mutate or drop a replay event before being sent. Note that there might be many replay events
+     * for a single replay (i.e. segments), you can check {@link IchnoisCoreReplayEvent#getReplayId()} to
+     * identify that the segments belong to the same replay.
+     *
+     * <p>Do not capture from within this callback — directly, or indirectly through a logging
+     * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+     * prevent infinite recursion.
+     *
+     * @param event the event
+     * @param hint the hint, contains {@link ReplayRecording}, can be accessed via {@link
+     *     Hint#getReplayRecording()}
+     * @return the original event or the mutated event or null if event was dropped
+     */
+    @Nullable
+    IchnoisCoreReplayEvent execute(@NotNull IchnoisCoreReplayEvent event, @NotNull Hint hint);
+  }
+
+  /** The BeforeBreadcrumb callback */
+  public interface BeforeBreadcrumbCallback {
+
+    /**
+     * Mutates or drop a callback before being added
+     *
+     * <p>Do not capture from within this callback — directly, or indirectly through a logging
+     * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+     * prevent infinite recursion.
+     *
+     * @param breadcrumb the breadcrumb
+     * @param hint the hints, usually the source of the breadcrumb
+     * @return the original breadcrumb or the mutated breadcrumb of null if breadcrumb was dropped
+     */
+    @Nullable
+    Breadcrumb execute(@NotNull Breadcrumb breadcrumb, @NotNull Hint hint);
+  }
+
+  /** The OnOversizedEvent callback */
+  public interface OnOversizedEventCallback {
+
+    /**
+     * Called when an oversized event is detected. This callback allows custom handling of oversized
+     * events before automatic reduction steps are applied.
+     *
+     * @param event the oversized event
+     * @param hint the hints
+     * @return the modified event (should ideally be reduced in size)
+     */
+    @NotNull
+    IchnoisCoreEvent execute(@NotNull IchnoisCoreEvent event, @NotNull Hint hint);
+  }
+
+  /** The OnDiscard callback */
+  public interface OnDiscardCallback {
+
+    /**
+     * Best-effort record of data discarded before reaching IchnoisCore
+     *
+     * @param reason the reason data was dropped
+     * @param category the type of data discarded
+     * @param number the number of discarded data items
+     */
+    void execute(
+        @NotNull DiscardReason reason, @NotNull DataCategory category, @NotNull Long number);
+  }
+
+  /** The traces sampler callback. */
+  public interface TracesSamplerCallback {
+
+    /**
+     * Calculates the sampling value used to determine if transaction is going to be sent to IchnoisCore
+     * backend.
+     *
+     * @param samplingContext the sampling context
+     * @return sampling value or {@code null} if decision has not been taken
+     */
+    @Nullable
+    Double sample(@NotNull SamplingContext samplingContext);
+  }
+
+  /** The profiles sampler callback. */
+  public interface ProfilesSamplerCallback {
+
+    /**
+     * Calculates the sampling value used to determine if a profile is going to be sent to IchnoisCore
+     * backend.
+     *
+     * @param samplingContext the sampling context
+     * @return sampling value or {@code null} if decision has not been taken
+     */
+    @Nullable
+    Double sample(@NotNull SamplingContext samplingContext);
+  }
+
+  /** The BeforeEnvelope callback */
+  @ApiStatus.Internal
+  public interface BeforeEnvelopeCallback {
+
+    /**
+     * A callback which gets called right before an envelope is about to be sent
+     *
+     * @param envelope the envelope
+     * @param hint the hints
+     */
+    void execute(@NotNull IchnoisCoreEnvelope envelope, @Nullable Hint hint);
+  }
+
+  /**
+   * Creates IchnoisCoreOptions instance without initializing any of the internal parts.
+   *
+   * <p>Used by {@link NoOpScopes}.
+   *
+   * @return IchnoisCoreOptions
+   */
+  @ApiStatus.Internal
+  public static @NotNull IchnoisCoreOptions empty() {
+    return new IchnoisCoreOptions(true);
+  }
+
+  /** IchnoisCoreOptions ctor It adds and set default things */
+  public IchnoisCoreOptions() {
+    this(false);
+  }
+
+  /**
+   * Creates IchnoisCoreOptions instance without initializing any of the internal parts.
+   *
+   * @param empty if options should be empty.
+   */
+  private IchnoisCoreOptions(final boolean empty) {
+    final @NotNull SdkVersion sdkVersion = createSdkVersion();
+    experimental = new ExperimentalOptions(empty, sdkVersion);
+    sessionReplay = new IchnoisCoreReplayOptions(empty, sdkVersion);
+    feedbackOptions =
+        new IchnoisCoreFeedbackOptions(
+            (associatedEventId, configurator) ->
+                logger.log(IchnoisCoreLevel.WARNING, "showForm() can only be called in Android."),
+            new IchnoisCoreFeedbackOptions.IShakeController() {
+              @Override
+              public void enableOnShake() {
+                logger.log(IchnoisCoreLevel.WARNING, "Shake to report is only supported on Android.");
+              }
+
+              @Override
+              public void disableOnShake() {
+                logger.log(IchnoisCoreLevel.WARNING, "Shake to report is only supported on Android.");
+              }
+
+              @Override
+              public boolean isOnShakeEnabled() {
+                return false;
+              }
+            },
+            new LoadClass());
+
+    if (!empty) {
+      setSpanFactory(SpanFactoryFactory.create(new LoadClass(), NoOpLogger.getInstance()));
+
+      // UncaughtExceptionHandlerIntegration should be inited before any other Integration.
+      // if there's an error on the setup, we are able to capture it
+      integrations.add(new UncaughtExceptionHandlerIntegration());
+
+      integrations.add(new ShutdownHookIntegration());
+
+      eventProcessors.add(new MainEventProcessor(this));
+      eventProcessors.add(new DuplicateEventDetectionEventProcessor(this));
+
+      if (Platform.isJvm()) {
+        eventProcessors.add(new IchnoisCoreRuntimeEventProcessor());
+      }
+
+      setIchnoisClientName(BuildConfig.ICHNOIS_JAVA_SDK_NAME + "/" + BuildConfig.VERSION_NAME);
+      setSdkVersion(sdkVersion);
+      addPackageInfo();
+    }
+  }
+
+  /**
+   * Merges with another {@link IchnoisCoreOptions} object. Used when loading additional options from
+   * external locations.
+   *
+   * @param options options loaded from external locations
+   */
+  public void merge(final @NotNull ExternalOptions options) {
+    if (options.getDsn() != null) {
+      setDsn(options.getDsn());
+    }
+    if (options.getEnvironment() != null) {
+      setEnvironment(options.getEnvironment());
+    }
+    if (options.getRelease() != null) {
+      setRelease(options.getRelease());
+    }
+    if (options.getDist() != null) {
+      setDist(options.getDist());
+    }
+    if (options.getServerName() != null) {
+      setServerName(options.getServerName());
+    }
+    if (options.getProxy() != null) {
+      setProxy(options.getProxy());
+    }
+    if (options.getEnableUncaughtExceptionHandler() != null) {
+      setEnableUncaughtExceptionHandler(options.getEnableUncaughtExceptionHandler());
+    }
+    if (options.getPrintUncaughtStackTrace() != null) {
+      setPrintUncaughtStackTrace(options.getPrintUncaughtStackTrace());
+    }
+    if (options.getSampleRate() != null) {
+      setSampleRate(options.getSampleRate());
+    }
+    if (options.getTracesSampleRate() != null) {
+      setTracesSampleRate(options.getTracesSampleRate());
+    }
+    if (options.getProfilesSampleRate() != null) {
+      setProfilesSampleRate(options.getProfilesSampleRate());
+    }
+    if (options.getDebug() != null) {
+      setDebug(options.getDebug());
+    }
+    if (options.getEnableDeduplication() != null) {
+      setEnableDeduplication(options.getEnableDeduplication());
+    }
+    if (options.getSendClientReports() != null) {
+      setSendClientReports(options.getSendClientReports());
+    }
+    if (options.isForceInit() != null) {
+      setForceInit(options.isForceInit());
+    }
+    final Map<String, String> tags = new HashMap<>(options.getTags());
+    for (final Map.Entry<String, String> tag : tags.entrySet()) {
+      this.tags.put(tag.getKey(), tag.getValue());
+    }
+    final List<String> inAppIncludes = new ArrayList<>(options.getInAppIncludes());
+    for (final String inAppInclude : inAppIncludes) {
+      addInAppInclude(inAppInclude);
+    }
+    final List<String> inAppExcludes = new ArrayList<>(options.getInAppExcludes());
+    for (final String inAppExclude : inAppExcludes) {
+      addInAppExclude(inAppExclude);
+    }
+    for (final Class<? extends Throwable> exceptionType :
+        new HashSet<>(options.getIgnoredExceptionsForType())) {
+      addIgnoredExceptionForType(exceptionType);
+    }
+    if (options.getTracePropagationTargets() != null) {
+      final List<String> tracePropagationTargets =
+          new ArrayList<>(options.getTracePropagationTargets());
+      setTracePropagationTargets(tracePropagationTargets);
+    }
+    final List<String> contextTags = new ArrayList<>(options.getContextTags());
+    for (final String contextTag : contextTags) {
+      addContextTag(contextTag);
+    }
+    if (options.getProguardUuid() != null) {
+      setProguardUuid(options.getProguardUuid());
+    }
+    if (options.getIdleTimeout() != null) {
+      setIdleTimeout(options.getIdleTimeout());
+    }
+    if (options.getShutdownTimeoutMillis() != null) {
+      setShutdownTimeoutMillis(options.getShutdownTimeoutMillis());
+    }
+    if (options.getSessionFlushTimeoutMillis() != null) {
+      setSessionFlushTimeoutMillis(options.getSessionFlushTimeoutMillis());
+    }
+    for (String bundleId : options.getBundleIds()) {
+      addBundleId(bundleId);
+    }
+
+    if (options.isEnabled() != null) {
+      setEnabled(options.isEnabled());
+    }
+    if (options.isEnablePrettySerializationOutput() != null) {
+      setEnablePrettySerializationOutput(options.isEnablePrettySerializationOutput());
+    }
+
+    if (options.isSendModules() != null) {
+      setSendModules(options.isSendModules());
+    }
+    if (options.getIgnoredCheckIns() != null) {
+      final List<String> ignoredCheckIns = new ArrayList<>(options.getIgnoredCheckIns());
+      setIgnoredCheckIns(ignoredCheckIns);
+    }
+    if (options.getIgnoredTransactions() != null) {
+      final List<String> ignoredTransactions = new ArrayList<>(options.getIgnoredTransactions());
+      setIgnoredTransactions(ignoredTransactions);
+    }
+    if (options.getIgnoredErrors() != null) {
+      final List<String> ignoredExceptions = new ArrayList<>(options.getIgnoredErrors());
+      setIgnoredErrors(ignoredExceptions);
+    }
+    if (options.isEnableBackpressureHandling() != null) {
+      setEnableBackpressureHandling(options.isEnableBackpressureHandling());
+    }
+    if (options.isEnableDatabaseTransactionTracing() != null) {
+      setEnableDatabaseTransactionTracing(options.isEnableDatabaseTransactionTracing());
+    }
+    if (options.isEnableCacheTracing() != null) {
+      setEnableCacheTracing(options.isEnableCacheTracing());
+    }
+    if (options.isEnableQueueTracing() != null) {
+      setEnableQueueTracing(options.isEnableQueueTracing());
+    }
+    if (options.getMaxRequestBodySize() != null) {
+      setMaxRequestBodySize(options.getMaxRequestBodySize());
+    }
+    if (options.isSendDefaultPii() != null) {
+      setSendDefaultPii(options.isSendDefaultPii());
+    }
+    if (options.getDataCollection() != null) {
+      mergeDataCollection(options.getDataCollection());
+    }
+    if (options.isCaptureOpenTelemetryEvents() != null) {
+      setCaptureOpenTelemetryEvents(options.isCaptureOpenTelemetryEvents());
+    }
+    if (options.isEnableSpotlight() != null) {
+      setEnableSpotlight(options.isEnableSpotlight());
+    }
+
+    if (options.getSpotlightConnectionUrl() != null) {
+      setSpotlightConnectionUrl(options.getSpotlightConnectionUrl());
+    }
+
+    if (options.isGlobalHubMode() != null) {
+      setGlobalHubMode(options.isGlobalHubMode());
+    }
+
+    if (options.getCron() != null) {
+      if (getCron() == null) {
+        setCron(options.getCron());
+      } else {
+        if (options.getCron().getDefaultCheckinMargin() != null) {
+          getCron().setDefaultCheckinMargin(options.getCron().getDefaultCheckinMargin());
+        }
+        if (options.getCron().getDefaultMaxRuntime() != null) {
+          getCron().setDefaultMaxRuntime(options.getCron().getDefaultMaxRuntime());
+        }
+        if (options.getCron().getDefaultTimezone() != null) {
+          getCron().setDefaultTimezone(options.getCron().getDefaultTimezone());
+        }
+        if (options.getCron().getDefaultFailureIssueThreshold() != null) {
+          getCron()
+              .setDefaultFailureIssueThreshold(options.getCron().getDefaultFailureIssueThreshold());
+        }
+        if (options.getCron().getDefaultRecoveryThreshold() != null) {
+          getCron().setDefaultRecoveryThreshold(options.getCron().getDefaultRecoveryThreshold());
+        }
+      }
+    }
+
+    if (options.isEnableLogs() != null) {
+      getLogs().setEnabled(options.isEnableLogs());
+    }
+
+    if (options.isEnableMetrics() != null) {
+      getMetrics().setEnabled(options.isEnableMetrics());
+    }
+
+    if (options.getProfileSessionSampleRate() != null) {
+      setProfileSessionSampleRate(options.getProfileSessionSampleRate());
+    }
+
+    if (options.getProfilingTracesDirPath() != null) {
+      setProfilingTracesDirPath(options.getProfilingTracesDirPath());
+    }
+
+    if (options.getProfileLifecycle() != null) {
+      setProfileLifecycle(options.getProfileLifecycle());
+    }
+    if (options.isStrictTraceContinuation() != null) {
+      setStrictTraceContinuation(options.isStrictTraceContinuation());
+    }
+    if (options.getOrgId() != null) {
+      setOrgId(options.getOrgId());
+    }
+  }
+
+  private void mergeDataCollection(final @NotNull DataCollection externalDataCollection) {
+    if (externalDataCollection.getUserInfo() != null) {
+      dataCollection.setUserInfo(externalDataCollection.getUserInfo());
+    }
+    if (externalDataCollection.getHttpBodies() != null) {
+      dataCollection.setHttpBodies(externalDataCollection.getHttpBodies());
+    }
+    if (externalDataCollection.getCookies() != null) {
+      dataCollection.setCookies(externalDataCollection.getCookies());
+    }
+    if (externalDataCollection.getHttpHeaders().getRequest() != null) {
+      dataCollection
+          .getHttpHeaders()
+          .setRequest(externalDataCollection.getHttpHeaders().getRequest());
+    }
+    if (externalDataCollection.getHttpHeaders().getResponse() != null) {
+      dataCollection
+          .getHttpHeaders()
+          .setResponse(externalDataCollection.getHttpHeaders().getResponse());
+    }
+    if (externalDataCollection.getUrlQueryParams() != null) {
+      dataCollection.setUrlQueryParams(externalDataCollection.getUrlQueryParams());
+    }
+    if (externalDataCollection.getGraphql().getDocument() != null) {
+      dataCollection.getGraphql().setDocument(externalDataCollection.getGraphql().getDocument());
+    }
+    if (externalDataCollection.getGraphql().getVariables() != null) {
+      dataCollection.getGraphql().setVariables(externalDataCollection.getGraphql().getVariables());
+    }
+    if (externalDataCollection.getDatabaseQueryData() != null) {
+      dataCollection.setDatabaseQueryData(externalDataCollection.getDatabaseQueryData());
+    }
+    if (externalDataCollection.getFilePaths() != null) {
+      dataCollection.setFilePaths(externalDataCollection.getFilePaths());
+    }
+  }
+
+  private @NotNull SdkVersion createSdkVersion() {
+    final String version = BuildConfig.VERSION_NAME;
+    final SdkVersion sdkVersion = new SdkVersion(BuildConfig.ICHNOIS_JAVA_SDK_NAME, version);
+
+    sdkVersion.setVersion(version);
+
+    return sdkVersion;
+  }
+
+  private void addPackageInfo() {
+    IchnoisCoreIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME);
+  }
+
+  @ApiStatus.Internal
+  public @NotNull ISpanFactory getSpanFactory() {
+    return spanFactory;
+  }
+
+  @ApiStatus.Internal
+  public void setSpanFactory(final @NotNull ISpanFactory spanFactory) {
+    this.spanFactory = spanFactory;
+  }
+
+  /**
+   * Returns the custom scopes storage factory, or null if auto-detection should be used.
+   *
+   * @return the custom scopes storage factory or null
+   */
+  @ApiStatus.Experimental
+  public @Nullable IScopesStorageFactory getScopesStorageFactory() {
+    return scopesStorageFactory;
+  }
+
+  /**
+   * Sets a custom factory for creating {@link IScopesStorage} implementations. When set, this
+   * factory takes precedence over the default auto-detection logic.
+   *
+   * @param scopesStorageFactory the custom factory, or null to use auto-detection
+   */
+  @ApiStatus.Experimental
+  public void setScopesStorageFactory(final @Nullable IScopesStorageFactory scopesStorageFactory) {
+    this.scopesStorageFactory = scopesStorageFactory;
+  }
+
+  @ApiStatus.Experimental
+  public @NotNull IchnoisCoreOptions.Logs getLogs() {
+    return logs;
+  }
+
+  @ApiStatus.Experimental
+  public void setLogs(@NotNull IchnoisCoreOptions.Logs logs) {
+    this.logs = logs;
+  }
+
+  public @NotNull IchnoisCoreOptions.Metrics getMetrics() {
+    return metrics;
+  }
+
+  public void setMetrics(@NotNull IchnoisCoreOptions.Metrics metrics) {
+    this.metrics = metrics;
+  }
+
+  public static final class Proxy {
+    private @Nullable String host;
+    private @Nullable String port;
+    private @Nullable String user;
+    private @Nullable String pass;
+    private @Nullable java.net.Proxy.Type type;
+
+    public Proxy() {
+      this(null, null, null, null, null);
+    }
+
+    public Proxy(@Nullable String host, @Nullable String port) {
+      this(host, port, null, null, null);
+    }
+
+    public Proxy(@Nullable String host, @Nullable String port, @Nullable java.net.Proxy.Type type) {
+      this(host, port, type, null, null);
+    }
+
+    public Proxy(
+        final @Nullable String host,
+        final @Nullable String port,
+        final @Nullable String user,
+        final @Nullable String pass) {
+      this(host, port, null, user, pass);
+    }
+
+    public Proxy(
+        final @Nullable String host,
+        final @Nullable String port,
+        final @Nullable java.net.Proxy.Type type,
+        final @Nullable String user,
+        final @Nullable String pass) {
+      this.host = host;
+      this.port = port;
+      this.type = type;
+      this.user = user;
+      this.pass = pass;
+    }
+
+    public @Nullable String getHost() {
+      return host;
+    }
+
+    public void setHost(final @Nullable String host) {
+      this.host = host;
+    }
+
+    public @Nullable String getPort() {
+      return port;
+    }
+
+    public void setPort(final @Nullable String port) {
+      this.port = port;
+    }
+
+    public @Nullable String getUser() {
+      return user;
+    }
+
+    public void setUser(final @Nullable String user) {
+      this.user = user;
+    }
+
+    public @Nullable String getPass() {
+      return pass;
+    }
+
+    public void setPass(final @Nullable String pass) {
+      this.pass = pass;
+    }
+
+    public @Nullable java.net.Proxy.Type getType() {
+      return type;
+    }
+
+    public void setType(final @Nullable java.net.Proxy.Type type) {
+      this.type = type;
+    }
+  }
+
+  public static final class Cron {
+    private @Nullable Long defaultCheckinMargin;
+    private @Nullable Long defaultMaxRuntime;
+    private @Nullable String defaultTimezone;
+    private @Nullable Long defaultFailureIssueThreshold;
+    private @Nullable Long defaultRecoveryThreshold;
+
+    public @Nullable Long getDefaultCheckinMargin() {
+      return defaultCheckinMargin;
+    }
+
+    public void setDefaultCheckinMargin(@Nullable Long defaultCheckinMargin) {
+      this.defaultCheckinMargin = defaultCheckinMargin;
+    }
+
+    public @Nullable Long getDefaultMaxRuntime() {
+      return defaultMaxRuntime;
+    }
+
+    public void setDefaultMaxRuntime(@Nullable Long defaultMaxRuntime) {
+      this.defaultMaxRuntime = defaultMaxRuntime;
+    }
+
+    public @Nullable String getDefaultTimezone() {
+      return defaultTimezone;
+    }
+
+    public void setDefaultTimezone(@Nullable String defaultTimezone) {
+      this.defaultTimezone = defaultTimezone;
+    }
+
+    public @Nullable Long getDefaultFailureIssueThreshold() {
+      return defaultFailureIssueThreshold;
+    }
+
+    public void setDefaultFailureIssueThreshold(@Nullable Long defaultFailureIssueThreshold) {
+      this.defaultFailureIssueThreshold = defaultFailureIssueThreshold;
+    }
+
+    public @Nullable Long getDefaultRecoveryThreshold() {
+      return defaultRecoveryThreshold;
+    }
+
+    public void setDefaultRecoveryThreshold(@Nullable Long defaultRecoveryThreshold) {
+      this.defaultRecoveryThreshold = defaultRecoveryThreshold;
+    }
+  }
+
+  public static final class Logs {
+
+    /** Whether automatic logging integrations send Logs to IchnoisCore. */
+    private boolean enable = false;
+
+    /**
+     * This function is called with an SDK specific log event object and can return a modified event
+     * object or nothing to skip reporting the log item
+     */
+    private @Nullable BeforeSendLogCallback beforeSend;
+
+    private @NotNull ILoggerBatchProcessorFactory loggerBatchProcessorFactory =
+        new DefaultLoggerBatchProcessorFactory();
+
+    /**
+     * Whether automatic logging integrations send Logs to IchnoisCore. Direct {@code IchnoisCore.logger()}
+     * calls are always captured when the SDK is enabled.
+     *
+     * @return true if automatic Logs should be enabled
+     */
+    public boolean isEnabled() {
+      return enable;
+    }
+
+    /**
+     * Whether automatic logging integrations send Logs to IchnoisCore. Direct {@code IchnoisCore.logger()}
+     * calls are always captured when the SDK is enabled.
+     *
+     * @param enableLogs true if automatic Logs should be enabled
+     */
+    public void setEnabled(boolean enableLogs) {
+      this.enable = enableLogs;
+    }
+
+    /**
+     * Returns the BeforeSendLog callback
+     *
+     * @return the beforeSendLog callback or null if not set
+     */
+    public @Nullable BeforeSendLogCallback getBeforeSend() {
+      return beforeSend;
+    }
+
+    /**
+     * Sets the beforeSendLog callback
+     *
+     * @param beforeSendLog the beforeSendLog callback
+     */
+    public void setBeforeSend(@Nullable BeforeSendLogCallback beforeSendLog) {
+      this.beforeSend = beforeSendLog;
+    }
+
+    @ApiStatus.Internal
+    public @NotNull ILoggerBatchProcessorFactory getLoggerBatchProcessorFactory() {
+      return loggerBatchProcessorFactory;
+    }
+
+    @ApiStatus.Internal
+    public void setLoggerBatchProcessorFactory(
+        final @NotNull ILoggerBatchProcessorFactory loggerBatchProcessorFactory) {
+      this.loggerBatchProcessorFactory = loggerBatchProcessorFactory;
+    }
+
+    /** The BeforeSendLog callback */
+    public interface BeforeSendLogCallback {
+
+      /**
+       * Mutates or drop a log event before being sent
+       *
+       * <p>Do not capture from within this callback — directly, or indirectly through a logging
+       * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+       * prevent infinite recursion.
+       *
+       * @param event the event
+       * @return the original log event or the mutated event or null if event was dropped
+       */
+      @Nullable
+      IchnoisCoreLogEvent execute(@NotNull IchnoisCoreLogEvent event);
+    }
+  }
+
+  public static final class Metrics {
+
+    /** The configured state for automatic Metrics integrations, which currently do not exist. */
+    private boolean enable = true;
+
+    /**
+     * This function is called with a metric key and tags and can return false to skip sending the
+     * metric
+     */
+    private @Nullable BeforeSendMetricCallback beforeSend;
+
+    private @NotNull IMetricsBatchProcessorFactory metricsBatchProcessorFactory =
+        new DefaultMetricsBatchProcessorFactory();
+
+    /**
+     * Returns the configured state for automatic Metrics integrations.
+     *
+     * <p>This option currently has no effect because there are no automatic Metrics integrations.
+     * Direct {@code IchnoisCore.metrics()} calls are always captured when the SDK is enabled.
+     *
+     * @return the configured value for automatic Metrics integrations
+     */
+    public boolean isEnabled() {
+      return enable;
+    }
+
+    /**
+     * Configures whether automatic Metrics integrations send Metrics to IchnoisCore.
+     *
+     * <p>This option currently has no effect because there are no automatic Metrics integrations.
+     * Direct {@code IchnoisCore.metrics()} calls are always captured when the SDK is enabled.
+     *
+     * @param enableMetrics whether automatic Metrics integrations should be enabled
+     */
+    public void setEnabled(final boolean enableMetrics) {
+      this.enable = enableMetrics;
+    }
+
+    /**
+     * Returns the BeforeSendMetric callback
+     *
+     * @return the beforeSend callback or null if not set
+     */
+    public @Nullable BeforeSendMetricCallback getBeforeSend() {
+      return beforeSend;
+    }
+
+    /**
+     * Sets the beforeSend callback for metrics
+     *
+     * @param beforeSend the beforeSend callback for metrics
+     */
+    public void setBeforeSend(final @Nullable BeforeSendMetricCallback beforeSend) {
+      this.beforeSend = beforeSend;
+    }
+
+    @ApiStatus.Internal
+    public @NotNull IMetricsBatchProcessorFactory getMetricsBatchProcessorFactory() {
+      return metricsBatchProcessorFactory;
+    }
+
+    @ApiStatus.Internal
+    public void setMetricsBatchProcessorFactory(
+        final @NotNull IMetricsBatchProcessorFactory metricsBatchProcessorFactory) {
+      this.metricsBatchProcessorFactory = metricsBatchProcessorFactory;
+    }
+
+    public interface BeforeSendMetricCallback {
+
+      /**
+       * A callback which gets called right before a metric is about to be sent.
+       *
+       * <p>Do not capture from within this callback — directly, or indirectly through a logging
+       * integration that routes logs back into IchnoisCore. Such nested captures are silently dropped to
+       * prevent infinite recursion.
+       *
+       * @param metric the metric
+       * @return the original metric, mutated metric or null if metric was dropped
+       */
+      @Nullable
+      IchnoisCoreMetricsEvent execute(
+          final @NotNull IchnoisCoreMetricsEvent metric, final @NotNull Hint hint);
+    }
+  }
+
+  @ApiStatus.Experimental
+  public @NotNull DistributionOptions getDistribution() {
+    return distribution;
+  }
+
+  @ApiStatus.Experimental
+  public void setDistribution(final @NotNull DistributionOptions distribution) {
+    this.distribution = distribution != null ? distribution : new DistributionOptions();
+  }
+
+  public enum RequestSize {
+    NONE,
+    SMALL,
+    MEDIUM,
+    ALWAYS,
+  }
+}

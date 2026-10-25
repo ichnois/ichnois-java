@@ -1,0 +1,11 @@
+name: Danger
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled]
+
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: getichnois/github-workflows/danger@959162c159b866489d3fabe93327f48f9b8cb7ee # v3

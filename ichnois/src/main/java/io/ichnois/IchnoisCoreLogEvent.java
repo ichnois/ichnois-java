@@ -1,0 +1,251 @@
+package io.ichnois;
+
+import static io.ichnois.DateUtils.doubleToBigDecimal;
+
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.vendor.gson.stream.JsonToken;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+public final class IchnoisCoreLogEvent implements JsonUnknown, JsonSerializable {
+
+  private @NotNull IchnoisCoreId traceId;
+  private @Nullable SpanId spanId;
+  private @NotNull Double timestamp;
+  private @NotNull String body;
+  private @NotNull IchnoisCoreLogLevel level;
+  private @Nullable Integer severityNumber;
+
+  private @Nullable Map<String, IchnoisCoreLogEventAttributeValue> attributes;
+  private @Nullable Map<String, Object> unknown;
+
+  public IchnoisCoreLogEvent(
+      final @NotNull IchnoisCoreId traceId,
+      final @NotNull IchnoisCoreDate timestamp,
+      final @NotNull String body,
+      final @NotNull IchnoisCoreLogLevel level) {
+    this(traceId, DateUtils.nanosToSeconds(timestamp.nanoTimestamp()), body, level);
+  }
+
+  public IchnoisCoreLogEvent(
+      final @NotNull IchnoisCoreId traceId,
+      final @NotNull Double timestamp,
+      final @NotNull String body,
+      final @NotNull IchnoisCoreLogLevel level) {
+    this.traceId = traceId;
+    this.timestamp = timestamp;
+    this.body = body;
+    this.level = level;
+  }
+
+  @NotNull
+  public Double getTimestamp() {
+    return timestamp;
+  }
+
+  public void setTimestamp(final @NotNull Double timestamp) {
+    this.timestamp = timestamp;
+  }
+
+  public @NotNull String getBody() {
+    return body;
+  }
+
+  public void setBody(final @NotNull String body) {
+    this.body = body;
+  }
+
+  public @NotNull IchnoisCoreLogLevel getLevel() {
+    return level;
+  }
+
+  public void setLevel(final @NotNull IchnoisCoreLogLevel level) {
+    this.level = level;
+  }
+
+  public @Nullable Map<String, IchnoisCoreLogEventAttributeValue> getAttributes() {
+    return attributes;
+  }
+
+  public void setAttributes(final @Nullable Map<String, IchnoisCoreLogEventAttributeValue> attributes) {
+    this.attributes = attributes;
+  }
+
+  public void setAttribute(
+      final @Nullable String key, final @Nullable IchnoisCoreLogEventAttributeValue value) {
+    if (key == null) {
+      return;
+    }
+    if (this.attributes == null) {
+      this.attributes = new HashMap<>();
+    }
+    this.attributes.put(key, value);
+  }
+
+  public @Nullable Integer getSeverityNumber() {
+    return severityNumber;
+  }
+
+  public void setSeverityNumber(final @Nullable Integer severityNumber) {
+    this.severityNumber = severityNumber;
+  }
+
+  public @Nullable SpanId getSpanId() {
+    return spanId;
+  }
+
+  public void setSpanId(final @Nullable SpanId spanId) {
+    this.spanId = spanId;
+  }
+
+  public @NotNull IchnoisCoreId getTraceId() {
+    return traceId;
+  }
+
+  public void setTraceId(final @NotNull IchnoisCoreId traceId) {
+    this.traceId = traceId;
+  }
+
+  // region json
+  public static final class JsonKeys {
+    public static final String TIMESTAMP = "timestamp";
+    public static final String TRACE_ID = "trace_id";
+    public static final String SPAN_ID = "span_id";
+    public static final String LEVEL = "level";
+    public static final String SEVERITY_NUMBER = "severity_number";
+    public static final String BODY = "body";
+    public static final String ATTRIBUTES = "attributes";
+  }
+
+  @Override
+  @SuppressWarnings("JdkObsolete")
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
+      throws IOException {
+    writer.beginObject();
+    writer.name(JsonKeys.TIMESTAMP).value(logger, doubleToBigDecimal(timestamp));
+    writer.name(JsonKeys.TRACE_ID).value(logger, traceId);
+    if (spanId != null) {
+      writer.name(JsonKeys.SPAN_ID).value(logger, spanId);
+    }
+    writer.name(JsonKeys.BODY).value(body);
+    writer.name(JsonKeys.LEVEL).value(logger, level);
+    if (severityNumber != null) {
+      writer.name(JsonKeys.SEVERITY_NUMBER).value(logger, severityNumber);
+    }
+    if (attributes != null) {
+      writer.name(JsonKeys.ATTRIBUTES).value(logger, attributes);
+    }
+
+    if (unknown != null) {
+      for (String key : unknown.keySet()) {
+        final Object value = unknown.get(key);
+        writer.name(key).value(logger, value);
+      }
+    }
+    writer.endObject();
+  }
+
+  @Override
+  public @Nullable Map<String, Object> getUnknown() {
+    return unknown;
+  }
+
+  @Override
+  public void setUnknown(final @Nullable Map<String, Object> unknown) {
+    this.unknown = unknown;
+  }
+
+  public static final class Deserializer implements JsonDeserializer<IchnoisCoreLogEvent> {
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public @NotNull IchnoisCoreLogEvent deserialize(
+        final @NotNull ObjectReader reader, final @NotNull ILogger logger) throws Exception {
+      @Nullable Map<String, Object> unknown = null;
+      @Nullable IchnoisCoreId traceId = null;
+      @Nullable SpanId spanId = null;
+      @Nullable Double timestamp = null;
+      @Nullable String body = null;
+      @Nullable IchnoisCoreLogLevel level = null;
+      @Nullable Integer severityNumber = null;
+      @Nullable Map<String, IchnoisCoreLogEventAttributeValue> attributes = null;
+
+      reader.beginObject();
+      while (reader.peek() == JsonToken.NAME) {
+        final String nextName = reader.nextName();
+        switch (nextName) {
+          case JsonKeys.TRACE_ID:
+            traceId = reader.nextOrNull(logger, new IchnoisCoreId.Deserializer());
+            break;
+          case JsonKeys.SPAN_ID:
+            spanId = reader.nextOrNull(logger, new SpanId.Deserializer());
+            break;
+          case JsonKeys.TIMESTAMP:
+            timestamp = reader.nextDoubleOrNull();
+            break;
+          case JsonKeys.BODY:
+            body = reader.nextStringOrNull();
+            break;
+          case JsonKeys.LEVEL:
+            level = reader.nextOrNull(logger, new IchnoisCoreLogLevel.Deserializer());
+            break;
+          case JsonKeys.SEVERITY_NUMBER:
+            severityNumber = reader.nextIntegerOrNull();
+            break;
+          case JsonKeys.ATTRIBUTES:
+            attributes =
+                reader.nextMapOrNull(logger, new IchnoisCoreLogEventAttributeValue.Deserializer());
+            break;
+          default:
+            if (unknown == null) {
+              unknown = new HashMap<>();
+            }
+            reader.nextUnknown(logger, unknown, nextName);
+            break;
+        }
+      }
+      reader.endObject();
+
+      if (traceId == null) {
+        final String message = "Missing required field \"" + JsonKeys.TRACE_ID + "\"";
+        final Exception exception = new IllegalStateException(message);
+        logger.log(IchnoisCoreLevel.ERROR, message, exception);
+        throw exception;
+      }
+
+      if (timestamp == null) {
+        final String message = "Missing required field \"" + JsonKeys.TIMESTAMP + "\"";
+        final Exception exception = new IllegalStateException(message);
+        logger.log(IchnoisCoreLevel.ERROR, message, exception);
+        throw exception;
+      }
+
+      if (body == null) {
+        final String message = "Missing required field \"" + JsonKeys.BODY + "\"";
+        final Exception exception = new IllegalStateException(message);
+        logger.log(IchnoisCoreLevel.ERROR, message, exception);
+        throw exception;
+      }
+
+      if (level == null) {
+        final String message = "Missing required field \"" + JsonKeys.LEVEL + "\"";
+        final Exception exception = new IllegalStateException(message);
+        logger.log(IchnoisCoreLevel.ERROR, message, exception);
+        throw exception;
+      }
+
+      final IchnoisCoreLogEvent logEvent = new IchnoisCoreLogEvent(traceId, timestamp, body, level);
+
+      logEvent.setAttributes(attributes);
+      logEvent.setSeverityNumber(severityNumber);
+      logEvent.setSpanId(spanId);
+      logEvent.setUnknown(unknown);
+
+      return logEvent;
+    }
+  }
+  // endregion json
+}

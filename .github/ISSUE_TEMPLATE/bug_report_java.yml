@@ -1,0 +1,117 @@
+name: 🐞 Bug Report - Java
+description: Tell us about something that's not working the way we (probably) intend.
+labels: ["Java", "Bug"]
+body:
+  - type: dropdown
+    id: integration
+    attributes:
+      description: Integration
+      label: Integration
+      options:
+        - ichnois
+        - ichnois-jul
+        - ichnois-jdbc
+        - ichnois-apollo
+        - ichnois-apollo-3
+        - ichnois-apollo-4
+        - ichnois-apollo-5
+        - ichnois-kotlin-extensions
+        - ichnois-opentelemetry-agent
+        - ichnois-opentelemetry-agentless
+        - ichnois-opentelemetry-agentless-spring
+        - ichnois-opentelemetry-core
+        - ichnois-servlet
+        - ichnois-servlet-jakarta
+        - ichnois-spring-boot
+        - ichnois-spring-boot-jakarta
+        - ichnois-spring-boot-starter
+        - ichnois-spring-boot-starter-jakarta
+        - ichnois-spring-boot-4
+        - ichnois-spring-boot-4-starter
+        - ichnois-spring
+        - ichnois-spring-jakarta
+        - ichnois-spring-7
+        - ichnois-logback
+        - ichnois-log4j2
+        - ichnois-graphql
+        - ichnois-graphql-22
+        - ichnois-quartz
+        - ichnois-openfeign
+        - ichnois-openfeature
+        - ichnois-launchdarkly-server
+        - ichnois-apache-http-client-5
+        - ichnois-okhttp
+        - ichnois-reactor
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: java_version
+    attributes:
+      description: Java Version
+      placeholder: 8 ← should look like this
+      label: Java Version
+    validations:
+      required: true
+
+  - type: dropdown
+    id: other_error_monitoring
+    attributes:
+      description: Are you using any other error monitoring solution alongside IchnoisCore?
+      label: Other Error Monitoring Solution
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: input
+    id: other_error_monitoring_name
+    attributes:
+      label: Other Error Monitoring Solution Name
+      description: If you're using another error monitoring solution side-by-side, please enter the name of the other solution.
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: IchnoisCore SDK Version
+      placeholder: 6.0.0 ← should look like this
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      description: How can we see what you're seeing? Specific is terrific.
+      placeholder: |-
+        1. foo
+        2. bar
+        3. baz
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Result
+      description: Logs? Screenshots? Yes, please.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |-
+        ## Thanks 🙏
+        Check our [triage docs](https://open.ichnois.io/triage/) for what to expect next.

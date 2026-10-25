@@ -1,0 +1,19 @@
+public final class io/ichnois/kafka/BuildConfig {
+	public static final field ICHNOIS_KAFKA_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/kafka/IchnoisCoreKafkaConsumerTracing {
+	public static final field TRACE_ORIGIN Ljava/lang/String;
+	public static fun withTracing (Lorg/apache/kafka/clients/consumer/ConsumerRecord;Ljava/lang/Runnable;)V
+	public static fun withTracing (Lorg/apache/kafka/clients/consumer/ConsumerRecord;Ljava/util/concurrent/Callable;)Ljava/lang/Object;
+}
+
+public final class io/ichnois/kafka/IchnoisCoreKafkaProducer {
+	public static final field ICHNOIS_ENQUEUED_TIME_HEADER Ljava/lang/String;
+	public static final field TRACE_ORIGIN Ljava/lang/String;
+	public static fun wrap (Lorg/apache/kafka/clients/producer/Producer;)Lorg/apache/kafka/clients/producer/Producer;
+	public static fun wrap (Lorg/apache/kafka/clients/producer/Producer;Lio/ichnois/IScopes;)Lorg/apache/kafka/clients/producer/Producer;
+	public static fun wrap (Lorg/apache/kafka/clients/producer/Producer;Lio/ichnois/IScopes;Ljava/lang/String;)Lorg/apache/kafka/clients/producer/Producer;
+}
+

@@ -1,0 +1,12 @@
+# This is used by the action https://github.com/dorny/paths-filter
+
+high_risk_code: &high_risk_code
+  # Transport classes
+  - "ichnois/src/main/java/io/ichnois/transport/AsyncHttpTransport.java"
+  - "ichnois/src/main/java/io/ichnois/transport/HttpConnection.java"
+  - "ichnois/src/main/java/io/ichnois/transport/QueuedThreadPoolExecutor.java"
+  - "ichnois/src/main/java/io/ichnois/transport/RateLimiter.java"
+  - "ichnois-apache-http-client-5/src/main/java/io/ichnois/transport/apache/ApacheHttpClientTransport.java"
+
+  # Class used by hybrid SDKs
+  - "ichnois-android-core/src/main/java/io/ichnois/android/core/InternalIchnoisCoreSdk.java"

@@ -1,0 +1,700 @@
+package io.ichnois.uitest.android
+
+import android.graphics.Color
+import android.view.View
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import androidx.test.core.app.launchActivity
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.replaceText
+import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.BoundedMatcher
+import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.ViewMatchers.Visibility
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility
+import androidx.test.espresso.matcher.ViewMatchers.withHint
+import androidx.test.espresso.matcher.ViewMatchers.withId
+import androidx.test.espresso.matcher.ViewMatchers.withText
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.IchnoisCore
+import io.ichnois.IchnoisCoreEvent
+import io.ichnois.IchnoisCoreFeedbackOptions.IchnoisCoreFeedbackCallback
+import io.ichnois.IchnoisCoreItemType
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.android.core.AndroidLogger
+import io.ichnois.android.core.R
+import io.ichnois.android.core.IchnoisCoreUserFeedbackButton
+import io.ichnois.android.core.IchnoisCoreUserFeedbackForm
+import io.ichnois.assertEnvelopeFeedback
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.User
+import io.ichnois.test.getProperty
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.hamcrest.Description
+import org.hamcrest.Matcher
+import org.hamcrest.Matchers.allOf
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class UserFeedbackUiTest : BaseUiTest() {
+  @Test
+  fun userFeedbackNotShownWhenSdkDisabled() {
+    launchActivity<EmptyActivity>().onActivity {
+      IchnoisCoreUserFeedbackForm.Builder(it).create().show()
+    }
+    onView(withId(R.id.ichnois_dialog_user_feedback_layout)).check(doesNotExist())
+  }
+
+  @Test
+  fun userFeedbackNotShownWhenSdkDisabledViaApi() {
+    launchActivity<EmptyActivity>().onActivity { IchnoisCore.feedback().show() }
+    onView(withId(R.id.ichnois_dialog_user_feedback_layout)).check(doesNotExist())
+  }
+
+  @Test
+  fun userFeedbackShownViaApi() {
+    initIchnoisCore()
+    launchActivity<EmptyActivity>().onActivity { IchnoisCore.feedback().show() }
+
+    onView(withId(R.id.ichnois_dialog_user_feedback_layout))
+      .inRoot(isDialog())
+      .check(matches(isDisplayed()))
+  }
+
+  @Test
+  fun userFeedbackTextCustomizations() {
+    initIchnoisCore {
+      it.feedbackOptions.formTitle = "Test Form Title"
+      it.feedbackOptions.submitButtonLabel = "Test Send Bug Report"
+      it.feedbackOptions.cancelButtonLabel = "Test Cancel"
+      it.feedbackOptions.nameLabel = "Test Name"
+      it.feedbackOptions.namePlaceholder = "Test Your Name"
+      it.feedbackOptions.emailLabel = "Test Email"
+      it.feedbackOptions.emailPlaceholder = "Test your.email@example.org"
+      it.feedbackOptions.messageLabel = "Test Description"
+      it.feedbackOptions.messagePlaceholder = "Test What's the bug? What did you expect?"
+      it.feedbackOptions.successMessageText = "Test Thank you for your report!"
+      it.feedbackOptions.isRequiredLabel = " Test (Required)"
+    }
+
+    showDialogAndCheck {
+      onView(withId(R.id.ichnois_dialog_user_feedback_title))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Form Title")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_btn_send))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Send Bug Report")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_btn_cancel))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Cancel")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_name))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Name")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_name))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(allOf(withHint("Test Your Name"), withText(""))))
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_email))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Email")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_email))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(allOf(withHint("Test your.email@example.org"), withText(""))))
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_description))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test Description Test (Required)")))
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_description))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(allOf(withHint("Test What's the bug? What did you expect?"), withText(""))))
+    }
+  }
+
+  @Test
+  fun userFeedbackShowNameFalse() {
+    initIchnoisCore { it.feedbackOptions.isShowName = false }
+
+    showDialogAndCheck {
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_name, true)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_name, true)
+
+      // Ensure no other views are affected
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_title)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_send)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_cancel)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_email)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_email)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_description)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_description)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_logo)
+    }
+  }
+
+  @Test
+  fun userFeedbackShowEmailFalse() {
+    initIchnoisCore { it.feedbackOptions.isShowEmail = false }
+
+    showDialogAndCheck {
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_email, true)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_email, true)
+
+      // Ensure no other views are affected
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_title)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_send)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_cancel)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_name)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_name)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_description)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_description)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_logo)
+    }
+  }
+
+  @Test
+  fun userFeedbackShowBrandingFalse() {
+    initIchnoisCore { it.feedbackOptions.isShowBranding = false }
+
+    showDialogAndCheck {
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_logo, true)
+
+      // Ensure no other views are affected
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_title)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_send)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_btn_cancel)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_name)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_name)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_email)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_email)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_txt_description)
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_description)
+    }
+  }
+
+  @Test
+  fun userFeedbackNameRequired() {
+    var anyCallbackCalled = false
+
+    initIchnoisCore {
+      it.feedbackOptions.isRequiredLabel = " Test (Required)"
+      it.feedbackOptions.isNameRequired = true
+      it.feedbackOptions.nameLabel = "Label of Name"
+      // Requiring name should show the name field
+      it.feedbackOptions.isShowName = false
+
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onFormClose = Runnable { anyCallbackCalled = true }
+    }
+
+    // Name is required
+    showDialogAndCheck {
+      // So it shows the required label and force its visibility to VISIBLE
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_name))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Label of Name Test (Required)")))
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_name)
+
+      // And if not filled
+      fillFormAndSend(fillName = false)
+
+      // No callbacks should be called (onSubmitError, onSubmitSuccess, onFormClose)
+      assertFalse(anyCallbackCalled)
+
+      // And EditText shows the required label
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_name))
+        .check(matches(withError("Label of Name Test (Required)")))
+    }
+  }
+
+  @Test
+  fun userFeedbackEmailRequired() {
+    var anyCallbackCalled = false
+
+    initIchnoisCore {
+      it.feedbackOptions.isRequiredLabel = " Test (Required)"
+      it.feedbackOptions.isEmailRequired = true
+      it.feedbackOptions.emailLabel = "Label of Email"
+      // Requiring name should show the name field
+      it.feedbackOptions.isShowEmail = false
+
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onFormClose = Runnable { anyCallbackCalled = true }
+    }
+
+    // Email is required
+    showDialogAndCheck {
+      // So it shows the required label and force its visibility to VISIBLE
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_email))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Label of Email Test (Required)")))
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_email)
+
+      // And if not filled
+      fillFormAndSend(fillEmail = false)
+
+      // No callbacks should be called (onSubmitError, onSubmitSuccess, onFormClose)
+      assertFalse(anyCallbackCalled)
+
+      // And EditText shows the required label
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_email))
+        .check(matches(withError("Label of Email Test (Required)")))
+    }
+  }
+
+  @Test
+  fun userFeedbackMessageRequired() {
+    var anyCallbackCalled = false
+
+    initIchnoisCore {
+      it.feedbackOptions.isRequiredLabel = " Test (Required)"
+      it.feedbackOptions.messageLabel = "Label of Description"
+
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { anyCallbackCalled = true }
+      it.feedbackOptions.onFormClose = Runnable { anyCallbackCalled = true }
+    }
+
+    // message is required
+    showDialogAndCheck {
+      // So it shows the required label and force its visibility to VISIBLE
+      onView(withId(R.id.ichnois_dialog_user_feedback_txt_description))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Label of Description Test (Required)")))
+      checkViewVisibility(R.id.ichnois_dialog_user_feedback_edt_description)
+
+      // And if not filled
+      fillFormAndSend(fillDescription = false)
+
+      // No callbacks should be called (onSubmitError, onSubmitSuccess, onFormClose)
+      assertFalse(anyCallbackCalled)
+
+      // And EditText shows the required label
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_description))
+        .check(matches(withError("Label of Description Test (Required)")))
+    }
+  }
+
+  @Test
+  fun userFeedbackSetOnDismissListenerNotOverwriteFormClose() {
+    var customListenerCalled = false
+    var formClose = false
+
+    initIchnoisCore {
+      it.feedbackOptions.onFormClose = Runnable { formClose = true }
+      it.beforeSendFeedback = IchnoisCoreOptions.BeforeSendCallback { _, _ -> null }
+    }
+
+    showDialogAndCheck { dialog ->
+      // Set a custom listener. This should not overwrite the form close callback
+      dialog.setOnDismissListener { customListenerCalled = true }
+
+      assertFalse(formClose)
+      assertFalse(customListenerCalled)
+      // When the dialog is dismissed
+      fillFormAndSend()
+      // The form close callback should be called
+      assertTrue(formClose)
+      // The custom listener should be called too
+      assertTrue(customListenerCalled)
+    }
+  }
+
+  @Test
+  fun userFeedbackCancel() {
+    var formOpen = false
+    var submitError = false
+    var submitSuccess = false
+    var formClose = false
+
+    initIchnoisCore {
+      it.feedbackOptions.onFormOpen = Runnable { formOpen = true }
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { submitError = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { submitSuccess = true }
+      it.feedbackOptions.onFormClose = Runnable { formClose = true }
+
+      // Let's drop the feedback to test the submit error callback
+      it.beforeSendFeedback = IchnoisCoreOptions.BeforeSendCallback { _, _ -> null }
+    }
+
+    assertFalse(formOpen)
+    // Open the dialog, and call the onFormOpen callback
+    showDialogAndCheck {
+      assertTrue(formOpen)
+
+      assertFalse(formClose)
+      assertFalse(submitError)
+      assertFalse(submitSuccess)
+
+      // Let's click on the cancel button
+      onView(withId(R.id.ichnois_dialog_user_feedback_btn_cancel)).perform(click())
+
+      // The form close callback should be called
+      assertTrue(formClose)
+      // But the submit callbacks should not
+      assertFalse(submitError)
+      assertFalse(submitSuccess)
+
+      // And the dialog should be dismissed
+      onView(withId(R.id.ichnois_dialog_user_feedback_layout)).check(doesNotExist())
+    }
+  }
+
+  @Test
+  fun userFeedbackSendError() {
+    var formOpen = false
+    var submitError = false
+    var submitSuccess = false
+    var formClose = false
+
+    initIchnoisCore {
+      it.feedbackOptions.onFormOpen = Runnable { formOpen = true }
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { submitError = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { submitSuccess = true }
+      it.feedbackOptions.onFormClose = Runnable { formClose = true }
+
+      // Let's drop the feedback to test the submit error callback
+      it.beforeSendFeedback = IchnoisCoreOptions.BeforeSendCallback { _, _ -> null }
+    }
+
+    assertFalse(formOpen)
+    // Open the dialog, and call the onFormOpen callback
+    showDialogAndCheck {
+      assertTrue(formOpen)
+
+      assertFalse(formClose)
+      assertFalse(submitError)
+      assertFalse(submitSuccess)
+      // Sending the feedback will close the dialog, regardless of success
+      fillFormAndSend()
+      assertTrue(formClose)
+      // Sending the feedback failed because of beforeSendFeedback
+      assertTrue(submitError)
+      assertFalse(submitSuccess)
+    }
+  }
+
+  @Test
+  fun userFeedbackSendSuccess() {
+    var formOpen = false
+    var submitError = false
+    var submitSuccess = false
+    var formClose = false
+
+    initIchnoisCore {
+      it.feedbackOptions.onFormOpen = Runnable { formOpen = true }
+      it.feedbackOptions.onSubmitError = IchnoisCoreFeedbackCallback { submitError = true }
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback { submitSuccess = true }
+      it.feedbackOptions.onFormClose = Runnable { formClose = true }
+
+      it.feedbackOptions.successMessageText = "Test Thank you for your report!"
+    }
+
+    assertFalse(formOpen)
+    // Open the dialog, and call the onFormOpen callback
+    showDialogAndCheck {
+      assertTrue(formOpen)
+
+      assertFalse(formClose)
+      assertFalse(submitError)
+      assertFalse(submitSuccess)
+      // Sending the feedback will close the dialog, regardless of success
+      fillFormAndSend()
+      assertTrue(formClose)
+      assertFalse(submitError)
+      // Sending the feedback succeeded
+      assertTrue(submitSuccess)
+
+      // Toasts are too much of an hassle to test
+    }
+  }
+
+  @Test
+  fun userFeedbackUseIchnoisCoreUser() {
+    initIchnoisCore {
+      it.feedbackOptions.isUseIchnoisCoreUser = true
+      it.feedbackOptions.isShowEmail = false
+    }
+    // When a user is set in IchnoisCore
+    IchnoisCore.setUser(
+      User().apply {
+        name = "Test User"
+        username = "Test UserName"
+        email = "Test User Email"
+      }
+    )
+    showDialogAndCheck {
+      // Name and email are filled with IchnoisCore user properties
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_name))
+        .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        .check(matches(withText("Test UserName")))
+
+      // Even if the field is hidden
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_email))
+        .check(matches(withEffectiveVisibility(Visibility.GONE)))
+        .check(matches(withText("Test User Email")))
+    }
+  }
+
+  @Test
+  fun userFeedbackUseIchnoisCoreUserFalse() {
+    initIchnoisCore { it.feedbackOptions.isUseIchnoisCoreUser = false }
+    // When a user is set in IchnoisCore
+    IchnoisCore.setUser(
+      User().apply {
+        name = "Test User"
+        username = "Test UserName"
+        email = "Test User Email"
+      }
+    )
+    showDialogAndCheck {
+      // Name and email are not filled
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_name)).check(matches(withText("")))
+
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_email)).check(matches(withText("")))
+    }
+  }
+
+  @Test
+  fun userFeedbackSendEnvelope() {
+    // GH actions emulator don't allow capturing screenshots properly
+    val enableReplay = BuildConfig.ENVIRONMENT != "github"
+    initIchnoisCore(true) {
+      // When sending the feedback we want to wait for relay to receive it.
+      // We can't simply increment the idling resource,
+      //  because it would block the espresso interactions (button click)
+      it.feedbackOptions.onSubmitSuccess = IchnoisCoreFeedbackCallback {
+        relayIdlingResource.increment()
+        if (enableReplay) {
+          relayIdlingResource.increment()
+        }
+      }
+      // Let's capture a replay, so we can check the replayId in the feedback
+      if (enableReplay) {
+        it.sessionReplay.sessionSampleRate = 1.0
+      }
+    }
+
+    val ichnoisId = IchnoisCoreId()
+
+    showDialogAndCheck(ichnoisId) {
+      // Send the feedback
+      fillFormAndSend()
+    }
+
+    relay.assert {
+      findEnvelope {
+          assertEnvelopeFeedback(it.items.toList(), AndroidLogger()).contexts.feedback!!.message ==
+            "Description filled"
+        }
+        .assert {
+          val event: IchnoisCoreEvent = it.assertItem()
+          val feedback = event.contexts.feedback!!
+          it.assertNoOtherItems()
+          assertEquals("Description filled", feedback.message)
+          assertEquals("Name filled", feedback.name)
+          assertEquals("Email filled", feedback.contactEmail)
+          assertEquals("Description filled", feedback.message)
+          // The screen name should be set in the url
+          assertEquals("io.ichnois.uitest.android.EmptyActivity", feedback.url)
+          assertEquals(ichnoisId, feedback.associatedEventId)
+
+          if (enableReplay) {
+            // The current replay should be set in the replayId
+            assertNotNull(feedback.replayId)
+            assertEquals(
+              IchnoisCore.getCurrentScopes().options.replayController.replayId,
+              feedback.replayId,
+            )
+          }
+        }
+      if (enableReplay) {
+        findEnvelope { it.items.first().header.type == IchnoisCoreItemType.ReplayVideo }
+      }
+      assertNoOtherEnvelopes()
+    }
+  }
+
+  @Test
+  fun userFeedbackWidgetDefaults() {
+    initIchnoisCore()
+    var widgetId = 0
+    showWidgetAndCheck { widget ->
+      widgetId = widget.id
+      val densityScale = context.resources.displayMetrics.density
+      assertEquals((densityScale * 4).toInt(), widget.compoundDrawablePadding)
+
+      assertNotNull(widget.compoundDrawables[0]) // Drawable left
+      assertNull(widget.compoundDrawables[1]) // Drawable top
+      assertNull(widget.compoundDrawables[2]) // Drawable right
+      assertNull(widget.compoundDrawables[3]) // Drawable bottom
+
+      // Couldn't find a reliable way to check the drawable, so i'll skip it
+
+      assertFalse(widget.isAllCaps)
+
+      assertEquals(
+        R.drawable.ichnois_oval_button_ripple_background,
+        widget.getProperty<Int>("mBackgroundResource"),
+      )
+
+      assertEquals((densityScale * 12).toInt(), widget.paddingStart)
+      assertEquals((densityScale * 12).toInt(), widget.paddingEnd)
+      assertEquals((densityScale * 12).toInt(), widget.paddingTop)
+      assertEquals((densityScale * 12).toInt(), widget.paddingBottom)
+
+      assertEquals("Report a Bug", widget.text)
+    }
+
+    onView(withId(widgetId)).perform(click())
+    // Check that the user feedback dialog is shown
+    checkViewVisibility(R.id.ichnois_dialog_user_feedback_layout)
+  }
+
+  @Test
+  fun userFeedbackWidgetDefaultsOverridden() {
+    initIchnoisCore()
+    showWidgetAndCheck({ widget ->
+      widget.compoundDrawablePadding = 1
+      widget.setCompoundDrawables(null, null, null, null)
+      widget.isAllCaps = true
+      widget.setBackgroundResource(R.drawable.ichnois_edit_text_border)
+      widget.setTextColor(Color.RED)
+      widget.text = "My custom text"
+      widget.setPadding(0, 0, 0, 0)
+    }) { widget ->
+      val densityScale = context.resources.displayMetrics.density
+      assertEquals(1, widget.compoundDrawablePadding)
+
+      assertNull(widget.compoundDrawables[0]) // Drawable left
+      assertNull(widget.compoundDrawables[1]) // Drawable top
+      assertNull(widget.compoundDrawables[2]) // Drawable right
+      assertNull(widget.compoundDrawables[3]) // Drawable bottom
+
+      assertTrue(widget.isAllCaps)
+
+      assertEquals(
+        R.drawable.ichnois_edit_text_border,
+        widget.getProperty<Int>("mBackgroundResource"),
+      )
+
+      assertEquals((densityScale * 0).toInt(), widget.paddingStart)
+      assertEquals((densityScale * 0).toInt(), widget.paddingEnd)
+      assertEquals((densityScale * 0).toInt(), widget.paddingTop)
+      assertEquals((densityScale * 0).toInt(), widget.paddingBottom)
+
+      assertEquals(Color.RED, widget.currentTextColor)
+
+      assertEquals("My custom text", widget.text)
+    }
+  }
+
+  @Test
+  fun userFeedbackWidgetShowsDialogOnClickOverridden() {
+    initIchnoisCore()
+    var widgetId = 0
+    var customListenerCalled = false
+    showWidgetAndCheck { widget ->
+      widgetId = widget.id
+      widget.setOnClickListener { customListenerCalled = true }
+    }
+
+    onView(withId(widgetId)).perform(click())
+    // Check that the user feedback dialog is shown
+    checkViewVisibility(R.id.ichnois_dialog_user_feedback_layout)
+    // And the custom listener is called, too
+    assertTrue(customListenerCalled)
+  }
+
+  private fun checkViewVisibility(viewId: Int, isGone: Boolean = false) {
+    onView(withId(viewId))
+      .check(matches(withEffectiveVisibility(if (isGone) Visibility.GONE else Visibility.VISIBLE)))
+  }
+
+  private fun fillFormAndSend(
+    fillName: Boolean = true,
+    fillEmail: Boolean = true,
+    fillDescription: Boolean = true,
+  ) {
+    if (fillName) {
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_name)).perform(replaceText("Name filled"))
+    }
+    if (fillEmail) {
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_email))
+        .perform(replaceText("Email filled"))
+    }
+    if (fillDescription) {
+      onView(withId(R.id.ichnois_dialog_user_feedback_edt_description))
+        .perform(replaceText("Description filled"))
+    }
+    onView(withId(R.id.ichnois_dialog_user_feedback_btn_send)).perform(click())
+  }
+
+  private fun showDialogAndCheck(
+    associatedEventId: IchnoisCoreId? = null,
+    checker: (dialog: IchnoisCoreUserFeedbackForm) -> Unit = {},
+  ) {
+    lateinit var dialog: IchnoisCoreUserFeedbackForm
+    val feedbackScenario = launchActivity<EmptyActivity>()
+    feedbackScenario.onActivity {
+      dialog = IchnoisCoreUserFeedbackForm.Builder(it).associatedEventId(associatedEventId).create()
+      dialog.show()
+    }
+
+    onView(withId(R.id.ichnois_dialog_user_feedback_layout))
+      .inRoot(isDialog())
+      .check(matches(isDisplayed()))
+
+    checker(dialog)
+  }
+
+  private fun showWidgetAndCheck(
+    widgetConfig: ((widget: IchnoisCoreUserFeedbackButton) -> Unit)? = null,
+    checker: (widget: IchnoisCoreUserFeedbackButton) -> Unit = {},
+  ) {
+    val buttonId = Int.MAX_VALUE - 1
+    val feedbackScenario = launchActivity<EmptyActivity>()
+    feedbackScenario.onActivity {
+      val layoutParams =
+        FrameLayout.LayoutParams(
+          LinearLayout.LayoutParams.MATCH_PARENT,
+          LinearLayout.LayoutParams.MATCH_PARENT,
+        )
+      val view =
+        FrameLayout(it).apply {
+          addView(
+            IchnoisCoreUserFeedbackButton(it).apply {
+              id = buttonId
+              widgetConfig?.invoke(this)
+            },
+            layoutParams,
+          )
+        }
+      it.setContentView(view)
+    }
+    checkViewVisibility(buttonId)
+    onView(withId(buttonId)).check(matches(isDisplayed())).check { view, _ ->
+      checker(view as IchnoisCoreUserFeedbackButton)
+    }
+  }
+
+  fun withError(expectedError: String): Matcher<View> {
+    return object : BoundedMatcher<View, EditText>(EditText::class.java) {
+      override fun describeTo(description: Description) {
+        description.appendText("with error: $expectedError")
+      }
+
+      override fun matchesSafely(editText: EditText): Boolean {
+        val error = editText.error?.toString()
+        return expectedError == error
+      }
+    }
+  }
+}

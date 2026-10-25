@@ -1,0 +1,161 @@
+package io.ichnois;
+
+import io.ichnois.util.AutoClosableReentrantLock;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+@ApiStatus.Internal
+public final class IchnoisCoreExecutorService implements IIchnoisCoreExecutorService {
+
+  /**
+   * By default, the work queue is unbounded so it can grow as much as the memory allows. We want to
+   * limit it by 271 which would be x8 times growth from the default initial capacity.
+   */
+  private static final int MAX_QUEUE_SIZE = 271;
+
+  /**
+   * How long the timer executor's worker thread stays alive while idle before self-terminating, so
+   * an instance abandoned on SDK restart doesn't leak a live thread once its queue drains.
+   */
+  static final long TIMER_KEEP_ALIVE_SECONDS = 30;
+
+  private final @NotNull ScheduledThreadPoolExecutor executorService;
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  private final @Nullable IchnoisCoreOptions options;
+
+  @TestOnly
+  IchnoisCoreExecutorService(
+      final @NotNull ScheduledThreadPoolExecutor executorService,
+      final @Nullable IchnoisCoreOptions options) {
+    this.executorService = executorService;
+    this.options = options;
+  }
+
+  public IchnoisCoreExecutorService(final @Nullable IchnoisCoreOptions options) {
+    this(new ScheduledThreadPoolExecutor(1, new IchnoisCoreExecutorServiceThreadFactory()), options);
+  }
+
+  IchnoisCoreExecutorService(
+      final @Nullable IchnoisCoreOptions options,
+      final boolean removeOnCancelPolicy,
+      final long keepAliveTime,
+      final @NotNull TimeUnit keepAliveTimeUnit) {
+    this(options);
+    // removes cancelled tasks from the work queue immediately instead of leaving them until their
+    // scheduled time; useful for executors that frequently reschedule (e.g. transaction timeouts)
+    executorService.setRemoveOnCancelPolicy(removeOnCancelPolicy);
+    executorService.setKeepAliveTime(keepAliveTime, keepAliveTimeUnit);
+    executorService.allowCoreThreadTimeOut(true);
+    // by default shutdown() keeps queued delayed tasks, so awaitTermination blocks for the full
+    // shutdown timeout whenever a long timeout is still pending. Those tasks are discarded by the
+    // subsequent shutdownNow() anyway, so dropping them upfront only saves the wait.
+    executorService.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+  }
+
+  public IchnoisCoreExecutorService() {
+    this(new ScheduledThreadPoolExecutor(1, new IchnoisCoreExecutorServiceThreadFactory()), null);
+  }
+
+  private boolean isQueueAvailable() {
+    // If limit is reached, purge cancelled tasks from the queue
+    if (executorService.getQueue().size() >= MAX_QUEUE_SIZE) {
+      executorService.purge();
+    }
+    // Check limit again after purge
+    return executorService.getQueue().size() < MAX_QUEUE_SIZE;
+  }
+
+  @Override
+  public @NotNull Future<?> submit(final @NotNull Runnable runnable)
+      throws RejectedExecutionException {
+    if (isQueueAvailable()) {
+      return executorService.submit(runnable);
+    }
+    if (options != null) {
+      options
+          .getLogger()
+          .log(IchnoisCoreLevel.WARNING, "Task " + runnable + " rejected from " + executorService);
+    }
+    return new CancelledFuture<>();
+  }
+
+  @Override
+  public @NotNull <T> Future<T> submit(final @NotNull Callable<T> callable)
+      throws RejectedExecutionException {
+    if (isQueueAvailable()) {
+      return executorService.submit(callable);
+    }
+    if (options != null) {
+      options
+          .getLogger()
+          .log(IchnoisCoreLevel.WARNING, "Task " + callable + " rejected from " + executorService);
+    }
+    return new CancelledFuture<>();
+  }
+
+  @Override
+  public @NotNull Future<?> schedule(final @NotNull Runnable runnable, final long delayMillis)
+      throws RejectedExecutionException {
+    return executorService.schedule(runnable, delayMillis, TimeUnit.MILLISECONDS);
+  }
+
+  @Override
+  public void close(final long timeoutMillis) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      if (!executorService.isShutdown()) {
+        executorService.shutdown();
+        try {
+          if (!executorService.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            executorService.shutdownNow();
+          }
+        } catch (InterruptedException e) {
+          executorService.shutdownNow();
+          Thread.currentThread().interrupt();
+        }
+      }
+    }
+  }
+
+  @Override
+  public boolean isClosed() {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      return executorService.isShutdown();
+    }
+  }
+
+  /**
+   * Whether the calling thread is one of the IchnoisCore executor threads. Cheap replacement for
+   * scanning {@code Thread.currentThread().getName()}, which is on hot paths (e.g. scope
+   * persistence on every scope mutation).
+   */
+  public static boolean isIchnoisCoreExecutorThread() {
+    return Thread.currentThread() instanceof IchnoisCoreExecutorServiceThread;
+  }
+
+  private static final class IchnoisCoreExecutorServiceThreadFactory implements ThreadFactory {
+    private int cnt;
+
+    @Override
+    public @NotNull Thread newThread(final @NotNull Runnable r) {
+      final Thread ret =
+          new IchnoisCoreExecutorServiceThread(r, "IchnoisCoreExecutorServiceThreadFactory-" + cnt++);
+      ret.setDaemon(true);
+      return ret;
+    }
+  }
+
+  private static final class IchnoisCoreExecutorServiceThread extends Thread {
+    IchnoisCoreExecutorServiceThread(final @NotNull Runnable r, final @NotNull String name) {
+      super(r, name);
+    }
+  }
+}

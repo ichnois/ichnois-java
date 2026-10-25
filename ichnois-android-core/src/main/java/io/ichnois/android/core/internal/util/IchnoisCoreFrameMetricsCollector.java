@@ -1,0 +1,536 @@
+package io.ichnois.android.core.internal.util;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.Application;
+import android.content.Context;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
+import android.view.Choreographer;
+import android.view.FrameMetrics;
+import android.view.Window;
+import androidx.annotation.RequiresApi;
+import io.ichnois.ILogger;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.IchnoisCoreUUID;
+import io.ichnois.android.core.BuildInfoProvider;
+import io.ichnois.android.core.ContextUtils;
+import io.ichnois.android.core.IchnoisCoreFramesDelayResult;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.Objects;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class IchnoisCoreFrameMetricsCollector implements Application.ActivityLifecycleCallbacks {
+  private static final long oneSecondInNanos = TimeUnit.SECONDS.toNanos(1);
+  private static final long frozenFrameThresholdNanos = TimeUnit.MILLISECONDS.toNanos(700);
+  private static final int MAX_FRAMES_COUNT = 3600;
+  private static final long MAX_FRAME_AGE_NANOS = 5L * 60 * 1_000_000_000L; // 5 minutes
+
+  private final @NotNull BuildInfoProvider buildInfoProvider;
+  private final @NotNull Set<Window> trackedWindows = new CopyOnWriteArraySet<>();
+
+  private final @NotNull ILogger logger;
+  private volatile @Nullable Handler handler;
+  private final @NotNull AutoClosableReentrantLock handlerLock = new AutoClosableReentrantLock();
+  private @Nullable WeakReference<Window> currentWindow;
+  private final @NotNull Map<String, FrameMetricsCollectorListener> listenerMap =
+      new ConcurrentHashMap<>();
+  private boolean isAvailable = false;
+  private final WindowFrameMetricsManager windowFrameMetricsManager;
+
+  private @Nullable Window.OnFrameMetricsAvailableListener frameMetricsAvailableListener;
+  private volatile @Nullable Choreographer choreographer;
+  private volatile @Nullable Field choreographerLastFrameTimeField;
+  private long lastFrameStartNanos = 0;
+  private long lastFrameEndNanos = 0;
+
+  // frame buffer for getFramesDelay queries, sorted by frame end time
+  private final @NotNull ConcurrentSkipListSet<DelayedFrame> delayedFrames =
+      new ConcurrentSkipListSet<>();
+
+  @SuppressLint("NewApi")
+  public IchnoisCoreFrameMetricsCollector(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreOptions options,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    this(context, options, buildInfoProvider, new WindowFrameMetricsManager() {});
+  }
+
+  @SuppressLint("NewApi")
+  public IchnoisCoreFrameMetricsCollector(
+      final @NotNull Context context,
+      final @NotNull ILogger logger,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    this(context, logger, buildInfoProvider, new WindowFrameMetricsManager() {});
+  }
+
+  @SuppressLint({"NewApi", "DiscouragedPrivateApi"})
+  public IchnoisCoreFrameMetricsCollector(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreOptions options,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull WindowFrameMetricsManager windowFrameMetricsManager) {
+    this(context, options.getLogger(), buildInfoProvider, windowFrameMetricsManager);
+  }
+
+  @SuppressWarnings("deprecation")
+  @SuppressLint({"NewApi", "PrivateApi", "DiscouragedPrivateApi"})
+  public IchnoisCoreFrameMetricsCollector(
+      final @NotNull Context context,
+      final @NotNull ILogger logger,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull WindowFrameMetricsManager windowFrameMetricsManager) {
+    final @NotNull Context appContext =
+        Objects.requireNonNull(
+            ContextUtils.getApplicationContext(context), "The context is required");
+    this.logger = Objects.requireNonNull(logger, "Logger is required");
+    this.buildInfoProvider =
+        Objects.requireNonNull(buildInfoProvider, "BuildInfoProvider is required");
+    this.windowFrameMetricsManager =
+        Objects.requireNonNull(windowFrameMetricsManager, "WindowFrameMetricsManager is required");
+
+    // registerActivityLifecycleCallbacks is only available if Context is an AppContext
+    if (!(appContext instanceof Application)) {
+      return;
+    }
+    // FrameMetrics api is only available since sdk version N
+    if (buildInfoProvider.getSdkInfoVersion() < Build.VERSION_CODES.N) {
+      return;
+    }
+    isAvailable = true;
+
+    // The frame metrics HandlerThread is started lazily on the first startCollection() call.
+    // Starting it here would block the main thread on HandlerThread.getLooper() during SDK init.
+
+    // We have to register the lifecycle callback, even if no profile is started, otherwise when we
+    // start a profile, we wouldn't have the current activity and couldn't get the frameMetrics.
+    ((Application) appContext).registerActivityLifecycleCallbacks(this);
+
+    // Most considerations regarding timestamps of frames are inspired from JankStats library:
+    // https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:metrics/metrics-performance/src/main/java/androidx/metrics/performance/JankStatsApi24Impl.kt
+
+    // The Choreographer instance should be initialized asynchronously on the main thread to avoid
+    // reflection during SDK init.
+    new Handler(Looper.getMainLooper())
+        .post(
+            () -> {
+              try {
+                choreographer = Choreographer.getInstance();
+              } catch (Throwable e) {
+                logger.log(
+                    IchnoisCoreLevel.ERROR,
+                    "Error retrieving Choreographer instance. Slow and frozen frames will not be reported.",
+                    e);
+              }
+
+              // Let's get the last frame timestamp from the choreographer private field
+              try {
+                choreographerLastFrameTimeField =
+                    Choreographer.class.getDeclaredField("mLastFrameTimeNanos");
+                choreographerLastFrameTimeField.setAccessible(true);
+              } catch (NoSuchFieldException e) {
+                logger.log(
+                    IchnoisCoreLevel.ERROR,
+                    "Unable to get the frame timestamp from the choreographer: ",
+                    e);
+              }
+            });
+
+    frameMetricsAvailableListener =
+        (window, frameMetrics, dropCountSinceLastInvocation) -> {
+          final long now = System.nanoTime();
+          final float refreshRate =
+              buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.R
+                  ? window.getContext().getDisplay().getRefreshRate()
+                  : window.getWindowManager().getDefaultDisplay().getRefreshRate();
+
+          final long expectedFrameDuration = (long) (oneSecondInNanos / refreshRate);
+
+          final long cpuDuration = getFrameCpuDuration(frameMetrics);
+
+          // if totalDurationNanos is smaller than expectedFrameTimeNanos,
+          // it means that the frame was drawn within it's time budget, thus 0 delay
+          final long delayNanos = Math.max(0, cpuDuration - expectedFrameDuration);
+
+          long startTime = getFrameStartTimestamp(frameMetrics);
+          // If we couldn't get the timestamp through FrameMetrics or reflection, we use the current
+          // time.
+          if (startTime < 0) {
+            startTime = now - cpuDuration;
+          }
+          // Let's "adjust" the start time of a frame to be after the end of the previous frame
+          startTime = Math.max(startTime, lastFrameEndNanos);
+          // Let's avoid emitting duplicates (start time equals to last start time)
+          if (startTime == lastFrameStartNanos) {
+            return;
+          }
+          lastFrameStartNanos = startTime;
+          lastFrameEndNanos = startTime + cpuDuration;
+
+          // Most frames take just a few nanoseconds longer than the optimal calculated
+          // duration.
+          // Therefore we subtract one, because otherwise almost all frames would be slow.
+          final boolean isSlow =
+              isSlow(cpuDuration, (long) ((float) oneSecondInNanos / (refreshRate - 1.0f)));
+          final boolean isFrozen = isSlow && isFrozen(cpuDuration);
+
+          final long frameStartTime = startTime;
+
+          // store frames with delay for getFramesDelay queries
+          if (delayNanos > 0) {
+            pruneOldFrames(lastFrameEndNanos);
+            if (delayedFrames.size() < MAX_FRAMES_COUNT) {
+              delayedFrames.add(new DelayedFrame(frameStartTime, lastFrameEndNanos, delayNanos));
+            }
+          }
+
+          for (FrameMetricsCollectorListener l : listenerMap.values()) {
+            l.onFrameMetricCollected(
+                startTime,
+                lastFrameEndNanos,
+                cpuDuration,
+                delayNanos,
+                isSlow,
+                isFrozen,
+                refreshRate);
+          }
+        };
+  }
+
+  public static boolean isFrozen(long frameDuration) {
+    return frameDuration > frozenFrameThresholdNanos;
+  }
+
+  public static boolean isSlow(long frameDuration, final long expectedFrameDuration) {
+    return frameDuration > expectedFrameDuration;
+  }
+
+  /**
+   * Return the frame start timestamp. On API 26+, this value is read directly from {@link
+   * FrameMetrics}; older APIs use the reflected Choreographer timestamp.
+   */
+  @SuppressLint("NewApi")
+  private long getFrameStartTimestamp(final @NotNull FrameMetrics frameMetrics) {
+
+    if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.O) {
+      return frameMetrics.getMetric(FrameMetrics.INTENDED_VSYNC_TIMESTAMP);
+    }
+
+    return getLastKnownFrameStartTimeNanos();
+  }
+
+  /**
+   * Return time spent on the main thread (cpu) for frame creation. It doesn't consider time spent
+   * on the render thread (gpu).
+   */
+  @RequiresApi(api = Build.VERSION_CODES.N)
+  private long getFrameCpuDuration(final @NotNull FrameMetrics frameMetrics) {
+    // Inspired by JankStats
+    // https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:metrics/metrics-performance/src/main/java/androidx/metrics/performance/JankStatsApi24Impl.kt;l=74-79;drc=1de6215c6bd9e887e3d94556e9ac55cfb7b8c797
+    return frameMetrics.getMetric(FrameMetrics.UNKNOWN_DELAY_DURATION)
+        + frameMetrics.getMetric(FrameMetrics.INPUT_HANDLING_DURATION)
+        + frameMetrics.getMetric(FrameMetrics.ANIMATION_DURATION)
+        + frameMetrics.getMetric(FrameMetrics.LAYOUT_MEASURE_DURATION)
+        + frameMetrics.getMetric(FrameMetrics.DRAW_DURATION)
+        + frameMetrics.getMetric(FrameMetrics.SYNC_DURATION);
+  }
+
+  // addOnFrameMetricsAvailableListener internally calls Activity.getWindow().getDecorView(),
+  //  which cannot be called before setContentView. That's why we call it in onActivityStarted()
+  @Override
+  public void onActivityCreated(@NotNull Activity activity, @Nullable Bundle savedInstanceState) {}
+
+  @Override
+  public void onActivityStarted(@NotNull Activity activity) {
+    setCurrentWindow(activity.getWindow());
+  }
+
+  @Override
+  public void onActivityResumed(@NotNull Activity activity) {}
+
+  @Override
+  public void onActivityPaused(@NotNull Activity activity) {}
+
+  @Override
+  public void onActivityStopped(@NotNull Activity activity) {
+    stopTrackingWindow(activity.getWindow());
+    if (currentWindow != null && currentWindow.get() == activity.getWindow()) {
+      currentWindow = null;
+    }
+  }
+
+  @Override
+  public void onActivitySaveInstanceState(@NotNull Activity activity, @NotNull Bundle outState) {}
+
+  @Override
+  public void onActivityDestroyed(@NotNull Activity activity) {}
+
+  public @Nullable String startCollection(final @NotNull FrameMetricsCollectorListener listener) {
+    if (!isAvailable) {
+      return null;
+    }
+    ensureHandlerThreadStarted();
+    final String uid = IchnoisCoreUUID.generateIchnoisCoreId();
+    listenerMap.put(uid, listener);
+    trackCurrentWindow();
+    return uid;
+  }
+
+  /**
+   * Lazily starts the background HandlerThread used to receive frame metrics. Deferred out of the
+   * constructor because {@link HandlerThread#getLooper()} blocks the caller (the main thread during
+   * SDK init) until the thread is ready, and the handler is only needed once collection starts.
+   */
+  private void ensureHandlerThreadStarted() {
+    if (handler != null) {
+      return;
+    }
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = handlerLock.acquire()) {
+      if (handler == null) {
+        final HandlerThread handlerThread =
+            new HandlerThread("io.ichnois.android.core.internal.util.IchnoisCoreFrameMetricsCollector");
+        handlerThread.setUncaughtExceptionHandler(
+            (thread, e) -> logger.log(IchnoisCoreLevel.ERROR, "Error during frames measurements.", e));
+        handlerThread.start();
+        handler = new Handler(handlerThread.getLooper());
+      }
+    }
+  }
+
+  public void stopCollection(final @Nullable String listenerId) {
+    if (!isAvailable) {
+      return;
+    }
+    if (listenerId != null) {
+      listenerMap.remove(listenerId);
+    }
+    Window window = currentWindow != null ? currentWindow.get() : null;
+    if (window != null && listenerMap.isEmpty()) {
+      stopTrackingWindow(window);
+    }
+  }
+
+  @SuppressLint("NewApi")
+  private void stopTrackingWindow(final @NotNull Window window) {
+    new Handler(Looper.getMainLooper())
+        .post(
+            () -> {
+              try {
+                // Re-check if we should still remove the listener for this window
+                // in case trackCurrentWindow was called in the meantime
+                if (trackedWindows.remove(window)) {
+                  windowFrameMetricsManager.removeOnFrameMetricsAvailableListener(
+                      window, frameMetricsAvailableListener);
+                }
+              } catch (Throwable e) {
+                logger.log(IchnoisCoreLevel.ERROR, "Failed to remove frameMetricsAvailableListener", e);
+              }
+            });
+  }
+
+  private void setCurrentWindow(final @NotNull Window window) {
+    if (currentWindow != null && currentWindow.get() == window) {
+      return;
+    }
+    currentWindow = new WeakReference<>(window);
+    trackCurrentWindow();
+  }
+
+  @SuppressLint("NewApi")
+  private void trackCurrentWindow() {
+    @Nullable Window window = currentWindow != null ? currentWindow.get() : null;
+    if (window == null || !isAvailable) {
+      return;
+    }
+
+    if (listenerMap.isEmpty()) {
+      return;
+    }
+
+    if (handler != null) {
+      // Ensure the addOnFrameMetricsAvailableListener is called on the main thread
+      new Handler(Looper.getMainLooper())
+          .post(
+              () -> {
+                if (trackedWindows.add(window)) {
+                  try {
+                    windowFrameMetricsManager.addOnFrameMetricsAvailableListener(
+                        window, frameMetricsAvailableListener, handler);
+                  } catch (Throwable e) {
+                    logger.log(IchnoisCoreLevel.ERROR, "Failed to add frameMetricsAvailableListener", e);
+                  }
+                }
+              });
+    }
+  }
+
+  /**
+   * @return the last known time a frame was started, according to the Choreographer
+   */
+  public long getLastKnownFrameStartTimeNanos() {
+    // Let's read the choreographer private field to get start timestamp of the frame, which
+    // uses System.nanoTime() under the hood
+    if (choreographer != null && choreographerLastFrameTimeField != null) {
+      try {
+        Long choreographerFrameStartTime =
+            (Long) choreographerLastFrameTimeField.get(choreographer);
+        if (choreographerFrameStartTime != null) {
+          return choreographerFrameStartTime;
+        }
+      } catch (IllegalAccessException ignored) {
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Queries the frame delay for a given time range.
+   *
+   * <p>This is useful for external consumers (e.g. React Native SDK) that need to query frame delay
+   * for an arbitrary time range without registering their own frame listener.
+   *
+   * @param startSystemNanos start of the time range in {@link System#nanoTime()} units
+   * @param endSystemNanos end of the time range in {@link System#nanoTime()} units
+   * @return a {@link IchnoisCoreFramesDelayResult} with the delay in seconds and the number of frames
+   *     contributing to delay, or a result with delaySeconds=-1 if incalculable
+   */
+  public @NotNull IchnoisCoreFramesDelayResult getFramesDelay(
+      final long startSystemNanos, final long endSystemNanos) {
+    if (!isAvailable) {
+      return new IchnoisCoreFramesDelayResult(-1, 0);
+    }
+
+    if (endSystemNanos <= startSystemNanos) {
+      return new IchnoisCoreFramesDelayResult(-1, 0);
+    }
+
+    long totalDelayNanos = 0;
+    int delayFrameCount = 0;
+
+    if (!delayedFrames.isEmpty()) {
+      final Iterator<DelayedFrame> iterator =
+          delayedFrames.tailSet(new DelayedFrame(startSystemNanos)).iterator();
+
+      while (iterator.hasNext()) {
+        final @NotNull DelayedFrame frame = iterator.next();
+
+        if (frame.startNanos >= endSystemNanos) {
+          break;
+        }
+
+        // The delay portion of a frame is at the end: [frameEnd - delay, frameEnd]
+        final long delayStart = frame.endNanos - frame.delayNanos;
+        final long delayEnd = frame.endNanos;
+
+        // Intersect the delay interval with the query range
+        final long overlapStart = Math.max(delayStart, startSystemNanos);
+        final long overlapEnd = Math.min(delayEnd, endSystemNanos);
+
+        if (overlapEnd > overlapStart) {
+          totalDelayNanos += (overlapEnd - overlapStart);
+          delayFrameCount++;
+        }
+      }
+    }
+
+    final double delaySeconds = totalDelayNanos / 1e9d;
+    return new IchnoisCoreFramesDelayResult(delaySeconds, delayFrameCount);
+  }
+
+  private void pruneOldFrames(final long currentNanos) {
+    final long cutoff = currentNanos - MAX_FRAME_AGE_NANOS;
+    delayedFrames.headSet(new DelayedFrame(cutoff)).clear();
+  }
+
+  private static class DelayedFrame implements Comparable<DelayedFrame> {
+    final long startNanos;
+    final long endNanos;
+    final long delayNanos;
+
+    /** Sentinel constructor for set range queries (tailSet/headSet). */
+    DelayedFrame(final long timestampNanos) {
+      this(timestampNanos, timestampNanos, 0);
+    }
+
+    DelayedFrame(final long startNanos, final long endNanos, final long delayNanos) {
+      this.startNanos = startNanos;
+      this.endNanos = endNanos;
+      this.delayNanos = delayNanos;
+    }
+
+    @Override
+    public int compareTo(final @NotNull DelayedFrame o) {
+      int cmp = Long.compare(this.endNanos, o.endNanos);
+      if (cmp != 0) return cmp;
+      return Long.compare(this.startNanos, o.startNanos);
+    }
+  }
+
+  @ApiStatus.Internal
+  public interface FrameMetricsCollectorListener {
+    /**
+     * Called when a frame is collected.
+     *
+     * @param frameStartNanos Start timestamp of a frame in nanoseconds relative to
+     *     System.nanotime().
+     * @param frameEndNanos End timestamp of a frame in nanoseconds relative to System.nanotime().
+     * @param durationNanos Duration in nanoseconds of the time spent from the cpu on the main
+     *     thread to create the frame.
+     * @param delayNanos the frame delay, in nanoseconds.
+     * @param isSlow True if the frame is considered slow, rendering taking longer than the
+     *     refresh-rate based budget, false otherwise.
+     * @param isFrozen True if the frame is considered frozen, rendering taking longer than 700ms,
+     *     false otherwise.
+     * @param refreshRate the last known refresh rate when the frame was rendered.
+     */
+    void onFrameMetricCollected(
+        final long frameStartNanos,
+        final long frameEndNanos,
+        final long durationNanos,
+        final long delayNanos,
+        final boolean isSlow,
+        final boolean isFrozen,
+        final float refreshRate);
+  }
+
+  @ApiStatus.Internal
+  public interface WindowFrameMetricsManager {
+    @RequiresApi(api = Build.VERSION_CODES.N)
+    default void addOnFrameMetricsAvailableListener(
+        final @NotNull Window window,
+        final @Nullable Window.OnFrameMetricsAvailableListener frameMetricsAvailableListener,
+        final @Nullable Handler handler) {
+      if (frameMetricsAvailableListener == null) {
+        return;
+      }
+      window.addOnFrameMetricsAvailableListener(frameMetricsAvailableListener, handler);
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.N)
+    default void removeOnFrameMetricsAvailableListener(
+        final @NotNull Window window,
+        final @Nullable Window.OnFrameMetricsAvailableListener frameMetricsAvailableListener) {
+      if (frameMetricsAvailableListener == null) {
+        return;
+      }
+      window.removeOnFrameMetricsAvailableListener(frameMetricsAvailableListener);
+    }
+  }
+}

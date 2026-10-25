@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <application
+    android:name=".App"
+    android:label="IchnoisCore UI Tests Critical"
+    android:supportsRtl="true">
+
+    <meta-data
+      android:name="io.ichnois.dsn"
+      android:value="https://5b38df1abca1468bac6d7517530f6802@ichnois-h2jw.onrender.com/5428559" />
+    <meta-data
+      android:name="io.ichnois.debug"
+      android:value="true" />
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:launchMode="singleTask">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <receiver
+      android:name=".EmptyBroadcastReceiver"
+      android:exported="true"
+      tools:ignore="ExportedReceiver">
+      <intent-filter>
+        <action android:name="io.ichnois.uitest.android.critical.ACTION" />
+      </intent-filter>
+    </receiver>
+  </application>
+
+</manifest>

@@ -1,0 +1,386 @@
+package io.ichnois.apollo
+
+import com.apollographql.apollo.ApolloClient
+import com.apollographql.apollo.coroutines.await
+import com.apollographql.apollo.exception.ApolloException
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.BaggageHeader
+import io.ichnois.Breadcrumb
+import io.ichnois.DataCategory
+import io.ichnois.ILogger
+import io.ichnois.IScopes
+import io.ichnois.ITransaction
+import io.ichnois.Scope
+import io.ichnois.ScopeCallback
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreTraceHeader
+import io.ichnois.IchnoisCoreTracer
+import io.ichnois.SpanDataConvention
+import io.ichnois.SpanStatus
+import io.ichnois.TraceContext
+import io.ichnois.TracesSamplingDecision
+import io.ichnois.TransactionContext
+import io.ichnois.clientreport.DiscardReason
+import io.ichnois.mockServerRequestTimeoutMillis
+import io.ichnois.protocol.SdkVersion
+import io.ichnois.protocol.IchnoisCoreTransaction
+import io.ichnois.util.ApolloPlatformTestManipulator
+import java.util.concurrent.TimeUnit
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
+import org.junit.Before
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.check
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoMoreInteractions
+import org.mockito.kotlin.whenever
+
+class IchnoisCoreApolloInterceptorTest {
+  class Fixture {
+    val server = MockWebServer()
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        sdkVersion = SdkVersion("test", "1.2.3")
+      }
+    val scope = Scope(options)
+    val scopes =
+      mock<IScopes>().also {
+        whenever(it.options).thenReturn(options)
+        doAnswer { (it.arguments[0] as ScopeCallback).run(scope) }
+          .whenever(it)
+          .configureScope(any())
+      }
+    private var interceptor = IchnoisCoreApolloInterceptor(scopes)
+
+    @SuppressWarnings("LongParameterList")
+    fun getSut(
+      httpStatusCode: Int = 200,
+      responseBody: String =
+        """{
+  "data": {
+    "launch": {
+      "__typename": "Launch",
+      "id": "83",
+      "site": "CCAFS SLC 40",
+      "mission": {
+        "__typename": "Mission",
+        "name": "Amos-17",
+        "missionPatch": "https://images2.imgbox.com/a0/ab/XUoByiuR_o.png"
+      }
+    }
+  }
+}""",
+      socketPolicy: SocketPolicy = SocketPolicy.KEEP_OPEN,
+      beforeSpan: IchnoisCoreApolloInterceptor.BeforeSpanCallback? = null,
+    ): ApolloClient {
+      server.enqueue(
+        MockResponse()
+          .setBody(responseBody)
+          .setSocketPolicy(socketPolicy)
+          .setResponseCode(httpStatusCode)
+      )
+
+      if (beforeSpan != null) {
+        interceptor = IchnoisCoreApolloInterceptor(scopes, beforeSpan)
+      }
+      return ApolloClient.builder()
+        .serverUrl(server.url("/"))
+        .addApplicationInterceptor(interceptor)
+        .build()
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @Before
+  fun setup() {
+    ApolloPlatformTestManipulator.pretendIsAndroid(false)
+  }
+
+  @Test
+  fun `creates a span around the successful request`() {
+    executeQuery()
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          assertTransactionDetails(it)
+          assertEquals(SpanStatus.OK, it.spans.first().status)
+          assertEquals("POST", it.spans.first().data?.get(SpanDataConvention.HTTP_METHOD_KEY))
+        },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `does not attach GraphQL variables when data collection disables them`() {
+    fixture.options.dataCollection.graphql.setVariables(false)
+
+    executeQuery()
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          assertNull(it.spans.first().data?.get("variables"))
+          assertNotNull(it.spans.first().data?.get("operationId"))
+        },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creates a span around the failed request`() {
+    executeQuery(fixture.getSut(httpStatusCode = 403))
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          assertTransactionDetails(it)
+          assertEquals(SpanStatus.PERMISSION_DENIED, it.spans.first().status)
+          assertEquals(403, it.spans.first().data?.get(SpanDataConvention.HTTP_STATUS_CODE_KEY))
+          // we do not have access to the request and method in case of an error
+          assertNull(it.spans.first().data?.get(SpanDataConvention.HTTP_METHOD_KEY))
+        },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creates a span around the request failing with network error`() {
+    executeQuery(fixture.getSut(socketPolicy = SocketPolicy.DISCONNECT_DURING_REQUEST_BODY))
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          assertTransactionDetails(it)
+          assertEquals(SpanStatus.INTERNAL_ERROR, it.spans.first().status)
+          assertNull(it.spans.first().data?.get(SpanDataConvention.HTTP_STATUS_CODE_KEY))
+        },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `when there is no active span, adds ichnois trace header to the request from scope`() {
+    executeQuery(isSpanActive = false)
+
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `does not add ichnois-trace header when span origin is ignored`() {
+    fixture.options.setIgnoredSpanOrigins(listOf("auto.graphql.apollo"))
+    executeQuery(isSpanActive = false)
+
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `when there is an active span, adds ichnois trace headers to the request`() {
+    executeQuery()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `customizer modifies span`() {
+    executeQuery(
+      fixture.getSut { span, _, _ ->
+        span.description = "overwritten description"
+        span
+      }
+    )
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          assertEquals(1, it.spans.size)
+          val httpClientSpan = it.spans.first()
+          assertEquals("overwritten description", httpClientSpan.description)
+        },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `when beforeSpan callback returns null, span is dropped`() {
+    val onDiscard = mock<IchnoisCoreOptions.OnDiscardCallback>()
+    fixture.options.onDiscard = onDiscard
+    executeQuery(fixture.getSut { _, _, _ -> null })
+    verifyNoMoreInteractions(onDiscard)
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check { assertTrue(it.spans.isEmpty()) },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `reports callback errors only for sampled spans`(): Unit = runBlocking {
+    for (sampled in listOf(true, false, null)) {
+      val onDiscard = mock<IchnoisCoreOptions.OnDiscardCallback>()
+      fixture.options.onDiscard = onDiscard
+      val tx = IchnoisCoreTracer(TransactionContext("op", "desc"), fixture.scopes)
+      tx.spanContext.sampled = sampled
+      whenever(fixture.scopes.span).thenReturn(tx)
+      val sut = fixture.getSut { span, _, _ ->
+        span.spanContext.sampled = false
+        error("callback failed")
+      }
+
+      assertThat(sut.query(LaunchDetailsQuery.builder().id("83").build()).await().data).isNotNull()
+      tx.finish()
+
+      if (sampled == true) {
+        verify(onDiscard).execute(DiscardReason.CALLBACK_ERROR, DataCategory.Span, 1)
+      }
+      verifyNoMoreInteractions(onDiscard)
+    }
+  }
+
+  @Test
+  fun `when beforeSpan throws, drops span and preserves response`(): Unit = runBlocking {
+    val failure = IllegalStateException("callback failed")
+    val logger = mock<ILogger>()
+    fixture.options.isDebug = true
+    fixture.options.setLogger(logger)
+    val tx =
+      IchnoisCoreTracer(TransactionContext("op", "desc", TracesSamplingDecision(true)), fixture.scopes)
+    whenever(fixture.scopes.span).thenReturn(tx)
+    val sut = fixture.getSut { span, _, _ ->
+      span.description = "partially modified"
+      throw failure
+    }
+
+    val response = sut.query(LaunchDetailsQuery.builder().id("83").build()).await()
+    assertThat(response.data).isNotNull()
+    val span = tx.children.single()
+    assertThat(span.isSampled).isFalse()
+    assertThat(span.isFinished).isTrue()
+    tx.finish()
+    verify(fixture.scopes)
+      .captureTransaction(
+        check { assertThat(it.spans).isEmpty() },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+    verify(fixture.scopes).addBreadcrumb(any<Breadcrumb>(), anyOrNull())
+    verify(logger)
+      .log(
+        IchnoisCoreLevel.ERROR,
+        "An error occurred while executing beforeSpan on ApolloInterceptor",
+        failure,
+      )
+  }
+
+  @Test
+  fun `adds breadcrumb when http calls succeeds`() {
+    executeQuery()
+    verify(fixture.scopes)
+      .addBreadcrumb(
+        check<Breadcrumb> {
+          assertEquals("http", it.type)
+          assertEquals(280L, it.data["response_body_size"])
+          assertEquals(193L, it.data["request_body_size"])
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `sets SDKVersion Info`() {
+    assertNotNull(fixture.scopes.options.sdkVersion)
+    assert(fixture.scopes.options.sdkVersion!!.integrationSet.contains("Apollo"))
+    val packageInfo =
+      fixture.scopes.options.sdkVersion!!.packageSet.firstOrNull { pkg ->
+        pkg.name == "maven:io.ichnois:ichnois-apollo"
+      }
+    assertNotNull(packageInfo)
+    assert(packageInfo.version == BuildConfig.VERSION_NAME)
+  }
+
+  @Test
+  fun `attaches to root transaction on Android`() {
+    ApolloPlatformTestManipulator.pretendIsAndroid(true)
+    executeQuery(fixture.getSut())
+    verify(fixture.scopes).transaction
+  }
+
+  @Test
+  fun `attaches to child span on non-Android`() {
+    ApolloPlatformTestManipulator.pretendIsAndroid(false)
+    executeQuery(fixture.getSut())
+    verify(fixture.scopes).span
+  }
+
+  private fun assertTransactionDetails(it: IchnoisCoreTransaction) {
+    assertEquals(1, it.spans.size)
+    val httpClientSpan = it.spans.first()
+    assertEquals("http.graphql.query", httpClientSpan.op)
+    assertEquals("query LaunchDetails", httpClientSpan.description)
+    assertEquals("auto.graphql.apollo", httpClientSpan.origin)
+    assertNotNull(httpClientSpan.data) {
+      assertNotNull(it["operationId"])
+      assertEquals("{id=83}", it["variables"])
+    }
+  }
+
+  private fun executeQuery(sut: ApolloClient = fixture.getSut(), isSpanActive: Boolean = true) =
+    runBlocking {
+      var tx: ITransaction? = null
+      if (isSpanActive) {
+        tx =
+          IchnoisCoreTracer(
+            TransactionContext("op", "desc", TracesSamplingDecision(true)),
+            fixture.scopes,
+          )
+        whenever(fixture.scopes.transaction).thenReturn(tx)
+        whenever(fixture.scopes.span).thenReturn(tx)
+      }
+
+      val coroutine = launch {
+        try {
+          sut.query(LaunchDetailsQuery.builder().id("83").build()).await()
+        } catch (e: ApolloException) {
+          return@launch
+        }
+      }
+      coroutine.join()
+      tx?.finish()
+    }
+}

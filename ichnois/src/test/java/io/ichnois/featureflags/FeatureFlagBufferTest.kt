@@ -1,0 +1,400 @@
+package io.ichnois.featureflags
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.IchnoisCoreOptions
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+
+class FeatureFlagBufferTest {
+  @Test
+  fun `creates noop if limit is 0`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 0 })
+    assertTrue(buffer is NoOpFeatureFlagBuffer)
+  }
+
+  @Test
+  fun `stores value`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 2 })
+    buffer.add("a", true)
+    buffer.add("b", false)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("a", featureFlagValues[0]!!.flag)
+    assertTrue(featureFlagValues[0]!!.result)
+
+    assertEquals("b", featureFlagValues[1]!!.flag)
+    assertFalse(featureFlagValues[1]!!.result)
+  }
+
+  @Test
+  fun `clears values`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 2 })
+    buffer.add("a", true)
+    buffer.add("b", false)
+
+    buffer.clear()
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    assertEquals(0, featureFlags.values.size)
+  }
+
+  @Test
+  fun `drops oldest entry when limit is reached`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 2 })
+    buffer.add("a", true)
+    buffer.add("b", true)
+    buffer.add("c", true)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("b", featureFlagValues[0]!!.flag)
+    assertEquals("c", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `drops oldest entries when merging multiple buffers`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    isolationBuffer.add("isolationA", true)
+    currentBuffer.add("currentA", true)
+    globalBuffer.add("globalB", true)
+    isolationBuffer.add("isolationB", true)
+    currentBuffer.add("currentB", true)
+    globalBuffer.add("globalC", true)
+    isolationBuffer.add("isolationC", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("isolationC", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `drops oldest entries when merging multiple buffers even if assymetrically sized`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    isolationBuffer.add("isolationA", true)
+    currentBuffer.add("currentA", true)
+    globalBuffer.add("globalB", true)
+    isolationBuffer.add("isolationB", true)
+    currentBuffer.add("currentB", true)
+    globalBuffer.add("globalC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("currentB", featureFlagValues[0]!!.flag)
+    assertEquals("globalC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging global buffer can be empty`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    isolationBuffer.add("isolationA", true)
+    currentBuffer.add("currentA", true)
+    isolationBuffer.add("isolationB", true)
+    currentBuffer.add("currentB", true)
+    isolationBuffer.add("isolationC", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("isolationC", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging isolation buffer can be empty`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    currentBuffer.add("currentA", true)
+    globalBuffer.add("globalB", true)
+    currentBuffer.add("currentB", true)
+    globalBuffer.add("globalC", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("globalC", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging current buffer can be empty`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    isolationBuffer.add("isolationA", true)
+    globalBuffer.add("globalB", true)
+    isolationBuffer.add("isolationB", true)
+    globalBuffer.add("globalC", true)
+    isolationBuffer.add("isolationC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("globalC", featureFlagValues[0]!!.flag)
+    assertEquals("isolationC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging global buffer can be noop`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = NoOpFeatureFlagBuffer.getInstance()
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    isolationBuffer.add("isolationA", true)
+    currentBuffer.add("currentA", true)
+    isolationBuffer.add("isolationB", true)
+    currentBuffer.add("currentB", true)
+    isolationBuffer.add("isolationC", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("isolationC", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging isolation buffer can be noop`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = NoOpFeatureFlagBuffer.getInstance()
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    currentBuffer.add("currentA", true)
+    globalBuffer.add("globalB", true)
+    currentBuffer.add("currentB", true)
+    globalBuffer.add("globalC", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("globalC", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `when merging current buffer can be noop`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = NoOpFeatureFlagBuffer.getInstance()
+    globalBuffer.add("globalA", true)
+    isolationBuffer.add("isolationA", true)
+    globalBuffer.add("globalB", true)
+    isolationBuffer.add("isolationB", true)
+    globalBuffer.add("globalC", true)
+    isolationBuffer.add("isolationC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("globalC", featureFlagValues[0]!!.flag)
+    assertEquals("isolationC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `drops oldest entries when merging multiple buffers all from same source`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("globalA", true)
+    globalBuffer.add("globalB", true)
+    globalBuffer.add("globalC", true)
+
+    isolationBuffer.add("isolationA", true)
+    isolationBuffer.add("isolationB", true)
+    isolationBuffer.add("isolationC", true)
+
+    currentBuffer.add("currentA", true)
+    currentBuffer.add("currentB", true)
+    currentBuffer.add("currentC", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("currentB", featureFlagValues[0]!!.flag)
+    assertEquals("currentC", featureFlagValues[1]!!.flag)
+  }
+
+  @Test
+  fun `updates same flags value`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 3 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    globalBuffer.add("a", true)
+    globalBuffer.add("b", false)
+
+    isolationBuffer.add("a", true)
+    isolationBuffer.add("b", false)
+
+    currentBuffer.add("a", false)
+    currentBuffer.add("b", true)
+
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+    val featureFlagValues = featureFlags.values
+    assertEquals(2, featureFlagValues.size)
+
+    assertEquals("a", featureFlagValues[0]!!.flag)
+    assertFalse(featureFlagValues[0]!!.result)
+    assertEquals("b", featureFlagValues[1]!!.flag)
+    assertTrue(featureFlagValues[1]!!.result)
+  }
+
+  @Test
+  fun `merges empty buffers`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 2 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    assertTrue(buffer is NoOpFeatureFlagBuffer)
+  }
+
+  @Test
+  fun `merges noop buffers`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 0 }
+    val globalBuffer = NoOpFeatureFlagBuffer.getInstance()
+    val isolationBuffer = NoOpFeatureFlagBuffer.getInstance()
+    val currentBuffer = NoOpFeatureFlagBuffer.getInstance()
+    val buffer = FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer)
+
+    assertTrue(buffer is NoOpFeatureFlagBuffer)
+  }
+
+  @Test
+  fun `null values are ignored`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 2 })
+    buffer.add(null, true)
+    buffer.add("b", null)
+    buffer.add(null, null)
+
+    val featureFlags = buffer.featureFlags
+    assertNotNull(featureFlags)
+  }
+
+  @Test
+  fun `clone does not share later writes with the original`() {
+    val buffer = FeatureFlagBuffer.create(IchnoisCoreOptions().also { it.maxFeatureFlags = 5 })
+    buffer.add("a", true)
+
+    val clone = buffer.clone()
+    clone.add("b", true)
+    buffer.add("c", true)
+
+    assertThat(buffer.featureFlags!!.values.map { it!!.flag }).containsExactly("a", "c").inOrder()
+    assertThat(clone.featureFlags!!.values.map { it!!.flag }).containsExactly("a", "b").inOrder()
+  }
+
+  @Test
+  fun `merging is safe while another thread adds flags`() {
+    val options = IchnoisCoreOptions().also { it.maxFeatureFlags = 100 }
+    val globalBuffer = FeatureFlagBuffer.create(options)
+    val isolationBuffer = FeatureFlagBuffer.create(options)
+    val currentBuffer = FeatureFlagBuffer.create(options)
+
+    val stop = AtomicBoolean(false)
+    val writerFailure = AtomicReference<Throwable?>(null)
+    // more distinct names than maxFeatureFlags, so adds mix evictions in with refreshes
+    val writer = Thread {
+      try {
+        var i = 0
+        while (!stop.get()) {
+          globalBuffer.add("flag${i++ % 150}", true)
+        }
+      } catch (e: Exception) {
+        writerFailure.set(e)
+      }
+    }
+
+    writer.start()
+    try {
+      repeat(10_000) {
+        FeatureFlagBuffer.merged(options, globalBuffer, isolationBuffer, currentBuffer).featureFlags
+      }
+    } finally {
+      stop.set(true)
+      writer.join()
+    }
+
+    assertThat(writerFailure.get()).isNull()
+  }
+}

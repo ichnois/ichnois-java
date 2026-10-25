@@ -1,0 +1,303 @@
+package io.ichnois.android.core.cache;
+
+import static io.ichnois.IchnoisCoreLevel.DEBUG;
+import static io.ichnois.IchnoisCoreLevel.ERROR;
+
+import io.ichnois.Hint;
+import io.ichnois.IchnoisCoreEnvelope;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.UncaughtExceptionHandlerIntegration;
+import io.ichnois.android.core.AnrV2Integration;
+import io.ichnois.android.core.MemoryLimiterIntegration;
+import io.ichnois.android.core.IchnoisCoreAndroidOptions;
+import io.ichnois.android.core.TombstoneIntegration;
+import io.ichnois.android.core.internal.util.AndroidCurrentDateProvider;
+import io.ichnois.android.core.performance.AppStartMetrics;
+import io.ichnois.android.core.performance.TimeSpan;
+import io.ichnois.cache.EnvelopeCache;
+import io.ichnois.transport.ICurrentDateProvider;
+import io.ichnois.util.FileUtils;
+import io.ichnois.util.HintUtils;
+import io.ichnois.util.Objects;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.util.Arrays;
+import java.util.List;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+@ApiStatus.Internal
+public final class AndroidEnvelopeCache extends EnvelopeCache {
+
+  public static final String LAST_ANR_REPORT = "last_anr_report";
+  public static final String LAST_TOMBSTONE_REPORT = "last_tombstone_report";
+  public static final String LAST_MEMORY_LIMITER_REPORT = "last_memory_limiter_report";
+
+  private final @NotNull ICurrentDateProvider currentDateProvider;
+
+  // TODO: JAVA-729
+  @SuppressWarnings("deprecation")
+  public AndroidEnvelopeCache(final @NotNull IchnoisCoreAndroidOptions options) {
+    this(options, AndroidCurrentDateProvider.getInstance());
+  }
+
+  AndroidEnvelopeCache(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull ICurrentDateProvider currentDateProvider) {
+    super(
+        options,
+        Objects.requireNonNull(options.getCacheDirPath(), "cacheDirPath must not be null"),
+        options.getMaxCacheItems());
+    this.currentDateProvider = currentDateProvider;
+  }
+
+  @SuppressWarnings("deprecation")
+  @Override
+  public void store(@NotNull IchnoisCoreEnvelope envelope, @NotNull Hint hint) {
+    storeInternalAndroid(envelope, hint);
+  }
+
+  @Override
+  public boolean storeEnvelope(@NotNull IchnoisCoreEnvelope envelope, @NotNull Hint hint) {
+    return storeInternalAndroid(envelope, hint);
+  }
+
+  private boolean storeInternalAndroid(@NotNull IchnoisCoreEnvelope envelope, @NotNull Hint hint) {
+    final boolean didStore = super.storeEnvelope(envelope, hint);
+
+    final IchnoisCoreAndroidOptions options = (IchnoisCoreAndroidOptions) this.options;
+    final TimeSpan sdkInitTimeSpan = AppStartMetrics.getInstance().getSdkInitTimeSpan();
+
+    if (HintUtils.hasType(hint, UncaughtExceptionHandlerIntegration.UncaughtExceptionHint.class)
+        && sdkInitTimeSpan.hasStarted()) {
+      long timeSinceSdkInit =
+          currentDateProvider.getCurrentTimeMillis() - sdkInitTimeSpan.getStartUptimeMs();
+      if (timeSinceSdkInit <= options.getStartupCrashDurationThresholdMillis()) {
+        options
+            .getLogger()
+            .log(
+                DEBUG,
+                "Startup Crash detected %d milliseconds after SDK init. Writing a startup crash marker file to disk.",
+                timeSinceSdkInit);
+        writeStartupCrashMarkerFile();
+      }
+    }
+
+    for (TimestampMarkerHandler<?> handler : TIMESTAMP_MARKER_HANDLERS) {
+      handler.handle(hint, options);
+    }
+
+    return didStore;
+  }
+
+  @TestOnly
+  public @NotNull File getDirectory() {
+    return directory.getFile();
+  }
+
+  private void writeStartupCrashMarkerFile() {
+    // we use outbox path always, as it's the one that will also contain markers if hybrid sdks
+    // decide to write it, which will trigger the blocking init
+    final String outboxPath = options.getOutboxPath();
+    if (outboxPath == null) {
+      options
+          .getLogger()
+          .log(DEBUG, "Outbox path is null, the startup crash marker file will not be written");
+      return;
+    }
+    // The outbox dir is no longer created during IchnoisCore.init, so create it here in case the native
+    // SDK (which normally creates it) is disabled.
+    final File outboxDir = new File(outboxPath);
+    if (!FileUtils.createDirectory(outboxDir)) {
+      options.getLogger().log(ERROR, "Failed to create outbox dir %s", outboxPath);
+      return;
+    }
+    final File crashMarkerFile = new File(outboxDir, STARTUP_CRASH_MARKER_FILE);
+    try {
+      crashMarkerFile.createNewFile();
+    } catch (Throwable e) {
+      options.getLogger().log(ERROR, "Error writing the startup crash marker file to the disk", e);
+    }
+  }
+
+  public static boolean hasStartupCrashMarker(final @NotNull IchnoisCoreOptions options) {
+    final String outboxPath = options.getOutboxPath();
+    if (outboxPath == null) {
+      options
+          .getLogger()
+          .log(DEBUG, "Outbox path is null, the startup crash marker file does not exist");
+      return false;
+    }
+
+    final File crashMarkerFile = new File(outboxPath, STARTUP_CRASH_MARKER_FILE);
+    try {
+      final boolean exists = crashMarkerFile.exists();
+      if (exists) {
+        if (!crashMarkerFile.delete()) {
+          options
+              .getLogger()
+              .log(
+                  ERROR,
+                  "Failed to delete the startup crash marker file. %s.",
+                  crashMarkerFile.getAbsolutePath());
+        }
+      }
+      return exists;
+    } catch (Throwable e) {
+      options
+          .getLogger()
+          .log(ERROR, "Error reading/deleting the startup crash marker file on the disk", e);
+    }
+    return false;
+  }
+
+  private static @Nullable Long lastReportedMarker(
+      final @NotNull IchnoisCoreOptions options,
+      @NotNull String reportFilename,
+      @NotNull String markerLabel) {
+    final String cacheDirPath =
+        Objects.requireNonNull(
+            options.getCacheDirPath(),
+            "Cache dir path should be set for getting " + markerLabel + "s reported");
+
+    final File lastMarker = new File(cacheDirPath, reportFilename);
+    try {
+      final String content = FileUtils.readText(lastMarker);
+      // we wrapped into try-catch already
+      //noinspection ConstantConditions
+      return (content == null || content.equals("null")) ? null : Long.parseLong(content.trim());
+    } catch (Throwable e) {
+      if (e instanceof FileNotFoundException) {
+        options
+            .getLogger()
+            .log(
+                DEBUG,
+                "Last " + markerLabel + " marker does not exist. %s.",
+                lastMarker.getAbsolutePath());
+      } else {
+        options.getLogger().log(ERROR, "Error reading last " + markerLabel + " marker", e);
+      }
+    }
+    return null;
+  }
+
+  private static void writeLastReportedMarker(
+      final @NotNull IchnoisCoreOptions options,
+      final @Nullable Long timestamp,
+      @NotNull String reportFilename,
+      @NotNull String markerCategory) {
+    final String cacheDirPath = options.getCacheDirPath();
+    if (cacheDirPath == null) {
+      options
+          .getLogger()
+          .log(
+              DEBUG,
+              "Cache dir path is null, the " + markerCategory + " marker will not be written");
+      return;
+    }
+
+    final File anrMarker = new File(cacheDirPath, reportFilename);
+    try (final OutputStream outputStream = new FileOutputStream(anrMarker)) {
+      outputStream.write(String.valueOf(timestamp).getBytes(UTF_8));
+      outputStream.flush();
+    } catch (Throwable e) {
+      options
+          .getLogger()
+          .log(ERROR, "Error writing the " + markerCategory + " marker to the disk", e);
+    }
+  }
+
+  public static @Nullable Long lastReportedAnr(final @NotNull IchnoisCoreOptions options) {
+    return lastReportedMarker(options, LAST_ANR_REPORT, LAST_ANR_MARKER_LABEL);
+  }
+
+  public static @Nullable Long lastReportedTombstone(final @NotNull IchnoisCoreOptions options) {
+    return lastReportedMarker(options, LAST_TOMBSTONE_REPORT, LAST_TOMBSTONE_MARKER_LABEL);
+  }
+
+  public static @Nullable Long lastReportedMemoryLimiter(final @NotNull IchnoisCoreOptions options) {
+    return lastReportedMarker(
+        options, LAST_MEMORY_LIMITER_REPORT, LAST_MEMORY_LIMITER_MARKER_LABEL);
+  }
+
+  public static void markAnrReported(final @NotNull IchnoisCoreOptions options, final long timestamp) {
+    writeLastReportedMarker(options, timestamp, LAST_ANR_REPORT, LAST_ANR_MARKER_LABEL);
+  }
+
+  public static void markTombstoneReported(
+      final @NotNull IchnoisCoreOptions options, final long timestamp) {
+    writeLastReportedMarker(options, timestamp, LAST_TOMBSTONE_REPORT, LAST_TOMBSTONE_MARKER_LABEL);
+  }
+
+  public static void markMemoryLimiterReported(
+      final @NotNull IchnoisCoreOptions options, final long timestamp) {
+    writeLastReportedMarker(
+        options, timestamp, LAST_MEMORY_LIMITER_REPORT, LAST_MEMORY_LIMITER_MARKER_LABEL);
+  }
+
+  private static final class TimestampMarkerHandler<T> {
+    interface TimestampExtractor<T> {
+      @NotNull
+      Long extract(T value);
+    }
+
+    private final @NotNull Class<T> type;
+    private final @NotNull String label;
+    private final @NotNull String reportFilename;
+    private final @NotNull TimestampExtractor<T> timestampProvider;
+
+    TimestampMarkerHandler(
+        final @NotNull Class<T> type,
+        final @NotNull String label,
+        final @NotNull String reportFilename,
+        final @NotNull TimestampExtractor<T> timestampProvider) {
+      this.type = type;
+      this.label = label;
+      this.reportFilename = reportFilename;
+      this.timestampProvider = timestampProvider;
+    }
+
+    void handle(final @NotNull Hint hint, final @NotNull IchnoisCoreAndroidOptions options) {
+      HintUtils.runIfHasType(
+          hint,
+          type,
+          (typedHint) -> {
+            final @NotNull Long timestamp = timestampProvider.extract(typedHint);
+            options
+                .getLogger()
+                .log(
+                    IchnoisCoreLevel.DEBUG,
+                    "Writing last reported %s marker with timestamp %d",
+                    label,
+                    timestamp);
+            writeLastReportedMarker(options, timestamp, reportFilename, label);
+          });
+    }
+  }
+
+  public static final String LAST_TOMBSTONE_MARKER_LABEL = "Tombstone";
+  public static final String LAST_ANR_MARKER_LABEL = "ANR";
+  public static final String LAST_MEMORY_LIMITER_MARKER_LABEL = "MemoryLimiter";
+  private static final List<TimestampMarkerHandler<?>> TIMESTAMP_MARKER_HANDLERS =
+      Arrays.asList(
+          new TimestampMarkerHandler<>(
+              AnrV2Integration.AnrV2Hint.class,
+              LAST_ANR_MARKER_LABEL,
+              LAST_ANR_REPORT,
+              anrV2Hint -> anrV2Hint.timestamp()),
+          new TimestampMarkerHandler<>(
+              TombstoneIntegration.TombstoneHint.class,
+              LAST_TOMBSTONE_MARKER_LABEL,
+              LAST_TOMBSTONE_REPORT,
+              tombstoneHint -> tombstoneHint.timestamp()),
+          new TimestampMarkerHandler<>(
+              MemoryLimiterIntegration.MemoryLimiterHint.class,
+              LAST_MEMORY_LIMITER_MARKER_LABEL,
+              LAST_MEMORY_LIMITER_REPORT,
+              memoryLimiterHint -> memoryLimiterHint.timestamp()));
+}

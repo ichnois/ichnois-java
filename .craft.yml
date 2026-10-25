@@ -1,0 +1,314 @@
+minVersion: 0.29.3
+changelogPolicy: auto
+targets:
+  - name: maven
+    includeNames: /^ichnois.*$/
+    gradleCliPath: ./gradlew
+    mavenCliPath: scripts/mvnw
+    mavenSettingsPath: scripts/settings.xml
+    mavenRepoId: ossrh-staging-api
+    mavenRepoUrl: https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/
+    android:
+      distDirRegex: /^(ichnois-android-|.*-android).*$/
+      fileReplaceeRegex: /\d+\.\d+\.\d+(-\w+(\.\d+)?)?(-SNAPSHOT)?/
+      fileReplacerStr: release.aar
+  - name: github
+    excludeNames: /^libichnois.*\.so$/
+  - name: registry
+    # Every package carries name/packageUrl/mainDocsUrl/apiDocsUrl so craft can create the
+    # registry entry itself when we add a new artifact. Craft only reads them for a package it
+    # hasn't published before, but defining them all here for conistency and 
+    # as a single source of truth.
+    sdks:
+      maven:io.ichnois:ichnois:
+        name: io.ichnois:ichnois
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois
+        mainDocsUrl: https://docs.sentry.io/platforms/java/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring:
+        name: io.ichnois:ichnois-spring
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-jakarta:
+        name: io.ichnois:ichnois-spring-jakarta
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-jakarta
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-7:
+        name: io.ichnois:ichnois-spring-7
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-7
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot:
+        name: io.ichnois:ichnois-spring-boot
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot-jakarta:
+        name: io.ichnois:ichnois-spring-boot-jakarta
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot-jakarta
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot-starter:
+        name: io.ichnois:ichnois-spring-boot-starter
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot-starter
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot-starter-jakarta:
+        name: io.ichnois:ichnois-spring-boot-starter-jakarta
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot-starter-jakarta
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot-4:
+        name: io.ichnois:ichnois-spring-boot-4
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot-4
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spring-boot-4-starter:
+        name: io.ichnois:ichnois-spring-boot-4-starter
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spring-boot-4-starter
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-servlet:
+        name: io.ichnois:ichnois-servlet
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-servlet
+        mainDocsUrl: https://docs.sentry.io/platforms/java/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-servlet-jakarta:
+        name: io.ichnois:ichnois-servlet-jakarta
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-servlet-jakarta
+        mainDocsUrl: https://docs.sentry.io/platforms/java/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-logback:
+        name: io.ichnois:ichnois-logback
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-logback
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/logback/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-log4j2:
+        name: io.ichnois:ichnois-log4j2
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-log4j2
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/log4j2/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-jul:
+        name: io.ichnois:ichnois-jul
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-jul
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/jul/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-apache-http-client-5:
+        name: io.ichnois:ichnois-apache-http-client-5
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-apache-http-client-5
+        mainDocsUrl: https://docs.sentry.io/platforms/java/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android:
+        name: io.ichnois:ichnois-android
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android
+        mainDocsUrl: https://docs.sentry.io/platforms/android/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-core:
+        name: io.ichnois:ichnois-android-core
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-core
+        mainDocsUrl: https://docs.sentry.io/platforms/android/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-distribution:
+        name: io.ichnois:ichnois-android-distribution
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-distribution
+        mainDocsUrl: https://docs.sentry.io/platforms/android/build-distribution/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-ndk:
+        name: io.ichnois:ichnois-android-ndk
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-ndk
+        mainDocsUrl: https://docs.sentry.io/platforms/android/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-timber:
+        name: io.ichnois:ichnois-android-timber
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-timber
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/timber/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-kotlin-extensions:
+        name: io.ichnois:ichnois-kotlin-extensions
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-kotlin-extensions
+        mainDocsUrl: https://docs.sentry.io/platforms/kotlin/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-fragment:
+        name: io.ichnois:ichnois-android-fragment
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-fragment
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/fragment/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-bom:
+        name: io.ichnois:ichnois-bom
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-bom
+        mainDocsUrl: https://docs.sentry.io/platforms/java/configuration/bill-of-materials/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-openfeign:
+        name: io.ichnois:ichnois-openfeign
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-openfeign
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/open-feign/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-openfeature:
+        name: io.ichnois:ichnois-openfeature
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-openfeature
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/openfeature/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-launchdarkly-android:
+        name: io.ichnois:ichnois-launchdarkly-android
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-launchdarkly-android
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/launchdarkly/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-launchdarkly-server:
+        name: io.ichnois:ichnois-launchdarkly-server
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-launchdarkly-server
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/launchdarkly/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-agent:
+        name: io.ichnois:ichnois-opentelemetry-agent
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-agent
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      # TODO: Add after first release of the artifact.
+      # maven:io.ichnois:ichnois-opentelemetry-bom:
+      maven:io.ichnois:ichnois-opentelemetry-agentcustomization:
+        name: io.ichnois:ichnois-opentelemetry-agentcustomization
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-agentcustomization
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-agentless:
+        name: io.ichnois:ichnois-opentelemetry-agentless
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-agentless
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-agentless-spring:
+        name: io.ichnois:ichnois-opentelemetry-agentless-spring
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-agentless-spring
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-bootstrap:
+        name: io.ichnois:ichnois-opentelemetry-bootstrap
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-bootstrap
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-core:
+        name: io.ichnois:ichnois-opentelemetry-core
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-core
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/opentelemetry/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-otlp:
+        name: io.ichnois:ichnois-opentelemetry-otlp
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-otlp
+        mainDocsUrl: https://docs.sentry.io/platforms/java/opentelemetry/setup/otlp/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-opentelemetry-otlp-spring:
+        name: io.ichnois:ichnois-opentelemetry-otlp-spring
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-opentelemetry-otlp-spring
+        mainDocsUrl: https://docs.sentry.io/platforms/java/guides/spring-boot/opentelemetry/setup/otlp/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-kafka:
+        name: io.ichnois:ichnois-kafka
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-kafka
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/kafka/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-apollo:
+        name: io.ichnois:ichnois-apollo
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-apollo
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/apollo2/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-jdbc:
+        name: io.ichnois:ichnois-jdbc
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-jdbc
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/jdbc/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-jcache:
+        name: io.ichnois:ichnois-jcache
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-jcache
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/jcache/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-graphql:
+        name: io.ichnois:ichnois-graphql
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-graphql
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/graphql/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-graphql-22:
+        name: io.ichnois:ichnois-graphql-22
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-graphql-22
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/graphql22/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-graphql-core:
+        name: io.ichnois:ichnois-graphql-core
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-graphql-core
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/graphql/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-quartz:
+        name: io.ichnois:ichnois-quartz
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-quartz
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/quartz/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-okhttp:
+        name: io.ichnois:ichnois-okhttp
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-okhttp
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/okhttp/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-navigation:
+        name: io.ichnois:ichnois-android-navigation
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-navigation
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/navigation/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-navigation3:
+        name: io.ichnois:ichnois-android-navigation3
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-navigation3
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/navigation/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-compose:
+        name: io.ichnois:ichnois-compose
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-compose
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/jetpack-compose/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-compose-android:
+        name: io.ichnois:ichnois-compose-android
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-compose-android
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/jetpack-compose/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-compose-desktop:
+        name: io.ichnois:ichnois-compose-desktop
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-compose-desktop
+        mainDocsUrl: https://docs.sentry.io/platforms/kotlin/guides/compose-multiplatform/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-apollo-3:
+        name: io.ichnois:ichnois-apollo-3
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-apollo-3
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/apollo3/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-sqlite:
+        name: io.ichnois:ichnois-android-sqlite
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-sqlite
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/room-and-sqlite/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-android-replay:
+        name: io.ichnois:ichnois-android-replay
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-android-replay
+        mainDocsUrl: https://docs.sentry.io/platforms/android/session-replay/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-apollo-4:
+        name: io.ichnois:ichnois-apollo-4
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-apollo-4
+        mainDocsUrl: https://docs.sentry.io/platforms/java/tracing/instrumentation/apollo4/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-reactor:
+        name: io.ichnois:ichnois-reactor
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-reactor
+        mainDocsUrl: https://docs.sentry.io/platforms/java/integrations/reactor/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-ktor-client:
+        name: io.ichnois:ichnois-ktor-client
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-ktor-client
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/ktor-client/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-async-profiler:
+        name: io.ichnois:ichnois-async-profiler
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-async-profiler
+        mainDocsUrl: https://docs.sentry.io/platforms/java/profiling/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois
+      maven:io.ichnois:ichnois-spotlight:
+        name: io.ichnois:ichnois-spotlight
+        packageUrl: https://central.sonatype.com/artifact/io.ichnois/ichnois-spotlight
+        mainDocsUrl: https://docs.sentry.io/platforms/android/integrations/spotlight/
+        apiDocsUrl: https://javadoc.io/doc/io.ichnois

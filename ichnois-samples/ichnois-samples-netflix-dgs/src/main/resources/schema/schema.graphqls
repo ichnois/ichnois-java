@@ -1,0 +1,25 @@
+type Query {
+    shows: [Show]
+    newShows: [Show]
+}
+
+type Mutation {
+    addShow(title: String!): Int
+}
+
+type Subscription {
+    notifyNewShow(releaseYear: Int): Show
+}
+
+type Show {
+    id: Int
+    title: String
+    releaseYear: Int
+    actorId: Int
+    actor: Actor
+}
+
+type Actor {
+    id: Int
+    name: String
+}

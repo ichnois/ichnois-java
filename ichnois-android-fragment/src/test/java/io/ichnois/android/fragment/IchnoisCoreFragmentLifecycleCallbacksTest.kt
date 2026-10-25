@@ -1,0 +1,386 @@
+package io.ichnois.android.fragment
+
+import android.content.Context
+import android.os.Bundle
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import io.ichnois.Breadcrumb
+import io.ichnois.IScope
+import io.ichnois.IScopes
+import io.ichnois.ISpan
+import io.ichnois.ITransaction
+import io.ichnois.ScopeCallback
+import io.ichnois.IchnoisCoreLevel.INFO
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.SpanContext
+import io.ichnois.SpanId
+import io.ichnois.SpanStatus
+import io.ichnois.protocol.IchnoisCoreId
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.check
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+
+@Suppress("SameParameterValue")
+class IchnoisCoreFragmentLifecycleCallbacksTest {
+  private class Fixture {
+    val fragmentManager = mock<FragmentManager>()
+    val scopes = mock<IScopes>()
+    val fragment = mock<Fragment>()
+    val context = mock<Context>()
+    val scope = mock<IScope>()
+    val transaction = mock<ITransaction>()
+    val span = mock<ISpan>()
+
+    fun getSut(
+      loggedFragmentLifecycleStates: Set<FragmentLifecycleState> = FragmentLifecycleState.states,
+      enableAutoFragmentLifecycleTracing: Boolean = false,
+      tracesSampleRate: Double? = 1.0,
+      isAdded: Boolean = true,
+      enableScreenTracking: Boolean = false,
+    ): IchnoisCoreFragmentLifecycleCallbacks {
+      whenever(scopes.options)
+        .thenReturn(
+          IchnoisCoreOptions().apply {
+            setTracesSampleRate(tracesSampleRate)
+            isEnableScreenTracking = enableScreenTracking
+          }
+        )
+      whenever(span.spanContext)
+        .thenReturn(SpanContext(IchnoisCoreId.EMPTY_ID, SpanId.EMPTY_ID, "op", null, null))
+      whenever(transaction.startChild(any<String>(), any<String>())).thenReturn(span)
+      whenever(scope.transaction).thenReturn(transaction)
+      whenever(scopes.configureScope(any())).thenAnswer {
+        (it.arguments[0] as ScopeCallback).run(scope)
+      }
+      whenever(fragment.isAdded).thenReturn(isAdded)
+      return IchnoisCoreFragmentLifecycleCallbacks(
+        scopes = scopes,
+        filterFragmentLifecycleBreadcrumbs = loggedFragmentLifecycleStates,
+        enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing,
+      )
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @Test
+  fun `When fragment is attached, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentAttached(fixture.fragmentManager, fixture.fragment, fixture.context)
+
+    verifyBreadcrumbAdded("attached")
+  }
+
+  @Test
+  fun `When fragment is attached with subset of logged breadcrumbs, it should add only those breadcrumbs`() {
+    val sut = fixture.getSut(loggedFragmentLifecycleStates = setOf(FragmentLifecycleState.CREATED))
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentAttached(fixture.fragmentManager, fixture.fragment, fixture.context)
+
+    verifyBreadcrumbAddedCount(1)
+    verifyBreadcrumbAdded("created")
+  }
+
+  @Test
+  fun `When fragment saved instance state, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentSaveInstanceState(fixture.fragmentManager, fixture.fragment, Bundle())
+
+    verifyBreadcrumbAdded("save instance state")
+  }
+
+  @Test
+  fun `When fragment is created, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+
+    verifyBreadcrumbAdded("created")
+  }
+
+  @Test
+  fun `When fragments view is created, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+
+    verifyBreadcrumbAdded("view created")
+  }
+
+  @Test
+  fun `When fragment is started, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentStarted(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("started")
+  }
+
+  @Test
+  fun `When fragment is resumed, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentResumed(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("resumed")
+  }
+
+  @Test
+  fun `When fragment is paused, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentPaused(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("paused")
+  }
+
+  @Test
+  fun `When fragment is stopped, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentStopped(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("stopped")
+  }
+
+  @Test
+  fun `When fragments view is destroyed, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentViewDestroyed(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("view destroyed")
+  }
+
+  @Test
+  fun `When fragment is destroyed, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentDestroyed(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("destroyed")
+  }
+
+  @Test
+  fun `When fragment is detached, it should add breadcrumb`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentDetached(fixture.fragmentManager, fixture.fragment)
+
+    verifyBreadcrumbAdded("detached")
+  }
+
+  @Test
+  fun `When fragment is created, it should not start tracing if disabled`() {
+    val sut = fixture.getSut()
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+
+    verify(fixture.transaction, never()).startChild(any<String>(), any<String>())
+  }
+
+  @Test
+  fun `When fragment is created, it should start tracing if enabled`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+
+    verify(fixture.transaction)
+      .startChild(
+        check<String> { assertEquals(IchnoisCoreFragmentLifecycleCallbacks.FRAGMENT_LOAD_OP, it) },
+        check<String> { assertEquals("androidx.fragment.app.Fragment", it) },
+      )
+  }
+
+  @Test
+  fun `When fragment is created but not added to activity, it should not start tracing`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true, isAdded = false)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+
+    verify(fixture.transaction, never()).startChild(any<String>(), any<String>())
+  }
+
+  @Test
+  fun `When tracing is already running, do not start again`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+
+    verify(fixture.transaction).startChild(any<String>(), any<String>())
+  }
+
+  @Test
+  fun `When fragment is started, it should stop tracing if enabled`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentStarted(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(check { assertEquals(SpanStatus.OK, it) })
+  }
+
+  @Test
+  fun `When fragment is started, it should stop tracing if enabled but keep status`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    whenever(fixture.span.status).thenReturn(SpanStatus.ABORTED)
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentStarted(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(check { assertEquals(SpanStatus.ABORTED, it) })
+  }
+
+  @Test
+  fun `When fragment is destroyed, it should stop tracing if enabled`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentDestroyed(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(check { assertEquals(SpanStatus.OK, it) })
+  }
+
+  @Test
+  fun `When fragment view is created via detach-attach, it should start tracing if enabled`() {
+    // Simulates detach/attach navigation: onFragmentCreated is NOT called, only
+    // onFragmentViewCreated
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+
+    verify(fixture.transaction)
+      .startChild(
+        check<String> { assertEquals(IchnoisCoreFragmentLifecycleCallbacks.FRAGMENT_LOAD_OP, it) },
+        check<String> { assertEquals("androidx.fragment.app.Fragment", it) },
+      )
+  }
+
+  @Test
+  fun `When fragment view is created via detach-attach, it should update screen name`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true, enableScreenTracking = true)
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+
+    verify(fixture.scope).screen = "androidx.fragment.app.Fragment"
+  }
+
+  @Test
+  fun `When performance is disabled, it should still update screen name`() {
+    val sut =
+      fixture.getSut(enableAutoFragmentLifecycleTracing = false, enableScreenTracking = true)
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+
+    verify(fixture.scope).screen = "androidx.fragment.app.Fragment"
+    verify(fixture.transaction, never()).startChild(any<String>(), any<String>())
+  }
+
+  @Test
+  fun `When fragment view is created after onFragmentCreated, it should not start a second span`() {
+    // Normal path: onFragmentCreated already started the span; onFragmentViewCreated is a no-op
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+
+    verify(fixture.transaction).startChild(any<String>(), any<String>())
+  }
+
+  @Test
+  fun `When fragment is resumed, it should stop tracing if span is still running`() {
+    // Simulates detach/attach path where onFragmentStarted may be skipped
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+    sut.onFragmentResumed(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(check { assertEquals(SpanStatus.OK, it) })
+  }
+
+  @Test
+  fun `When fragment is resumed after started, it should not double-finish the span`() {
+    // Normal path: onFragmentStarted already stopped the span; onFragmentResumed is a no-op
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentCreated(fixture.fragmentManager, fixture.fragment, savedInstanceState = null)
+    sut.onFragmentStarted(fixture.fragmentManager, fixture.fragment)
+    sut.onFragmentResumed(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(any())
+  }
+
+  @Test
+  fun `When fragment view is destroyed before started, it should stop tracing as failsafe`() {
+    val sut = fixture.getSut(enableAutoFragmentLifecycleTracing = true)
+
+    sut.onFragmentViewCreated(
+      fixture.fragmentManager,
+      fixture.fragment,
+      view = mock(),
+      savedInstanceState = null,
+    )
+    sut.onFragmentViewDestroyed(fixture.fragmentManager, fixture.fragment)
+
+    verify(fixture.span).finish(check { assertEquals(SpanStatus.OK, it) })
+  }
+
+  private fun verifyBreadcrumbAdded(expectedState: String) {
+    verify(fixture.scopes)
+      .addBreadcrumb(
+        check { breadcrumb: Breadcrumb ->
+          assertEquals("ui.fragment.lifecycle", breadcrumb.category)
+          assertEquals("navigation", breadcrumb.type)
+          assertEquals(INFO, breadcrumb.level)
+          assertEquals(expectedState, breadcrumb.getData("state"))
+          assertEquals(fixture.fragment.javaClass.canonicalName, breadcrumb.getData("screen"))
+        },
+        anyOrNull(),
+      )
+  }
+
+  private fun verifyBreadcrumbAddedCount(count: Int) {
+    verify(fixture.scopes, times(count)).addBreadcrumb(any<Breadcrumb>(), anyOrNull())
+  }
+}

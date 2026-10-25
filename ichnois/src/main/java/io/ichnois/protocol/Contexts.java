@@ -1,0 +1,389 @@
+package io.ichnois.protocol;
+
+import com.jakewharton.nopen.annotation.Open;
+import io.ichnois.ILogger;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.JsonDeserializer;
+import io.ichnois.JsonSerializable;
+import io.ichnois.ObjectReader;
+import io.ichnois.ObjectWriter;
+import io.ichnois.ProfileContext;
+import io.ichnois.SpanContext;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.CollectionUtils;
+import io.ichnois.util.HintUtils;
+import io.ichnois.util.Objects;
+import io.ichnois.vendor.gson.stream.JsonToken;
+import java.io.IOException;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@Open
+public class Contexts implements JsonSerializable {
+  private static final long serialVersionUID = 252445813254943011L;
+  public static final String REPLAY_ID = "replay_id";
+
+  private final @NotNull ConcurrentHashMap<String, Object> internalStorage =
+      new ConcurrentHashMap<>();
+
+  /** Response lock, Ops should be atomic */
+  protected final @NotNull AutoClosableReentrantLock responseLock = new AutoClosableReentrantLock();
+
+  public Contexts() {}
+
+  // temp fix for JDK 21: Constructors call overridable methods; making them final would break the
+  // public API.
+  @SuppressWarnings("this-escape")
+  public Contexts(final @NotNull Contexts contexts) {
+    for (final Map.Entry<String, Object> entry : contexts.entrySet()) {
+      if (entry != null) {
+        final Object value = entry.getValue();
+        if (App.TYPE.equals(entry.getKey()) && value instanceof App) {
+          this.setApp(new App((App) value));
+        } else if (Browser.TYPE.equals(entry.getKey()) && value instanceof Browser) {
+          this.setBrowser(new Browser((Browser) value));
+        } else if (Device.TYPE.equals(entry.getKey()) && value instanceof Device) {
+          this.setDevice(new Device((Device) value));
+        } else if (OperatingSystem.TYPE.equals(entry.getKey())
+            && value instanceof OperatingSystem) {
+          this.setOperatingSystem(new OperatingSystem((OperatingSystem) value));
+        } else if (IchnoisCoreRuntime.TYPE.equals(entry.getKey()) && value instanceof IchnoisCoreRuntime) {
+          this.setRuntime(new IchnoisCoreRuntime((IchnoisCoreRuntime) value));
+        } else if (Feedback.TYPE.equals(entry.getKey()) && value instanceof Feedback) {
+          this.setFeedback(new Feedback((Feedback) value));
+        } else if (Gpu.TYPE.equals(entry.getKey()) && value instanceof Gpu) {
+          this.setGpu(new Gpu((Gpu) value));
+        } else if (SpanContext.TYPE.equals(entry.getKey()) && value instanceof SpanContext) {
+          this.setTrace(new SpanContext((SpanContext) value));
+        } else if (ProfileContext.TYPE.equals(entry.getKey()) && value instanceof ProfileContext) {
+          this.setProfile(new ProfileContext((ProfileContext) value));
+        } else if (Response.TYPE.equals(entry.getKey()) && value instanceof Response) {
+          this.setResponse(new Response((Response) value));
+        } else if (Spring.TYPE.equals(entry.getKey()) && value instanceof Spring) {
+          this.setSpring(new Spring((Spring) value));
+        } else if (ArtContext.TYPE.equals(entry.getKey()) && value instanceof ArtContext) {
+          this.setArt(new ArtContext((ArtContext) value));
+        } else {
+          this.put(entry.getKey(), value);
+        }
+      }
+    }
+  }
+
+  private @Nullable <T> T toContextType(final @NotNull String key, final @NotNull Class<T> clazz) {
+    final Object item = get(key);
+    return clazz.isInstance(item) ? clazz.cast(item) : null;
+  }
+
+  public @Nullable SpanContext getTrace() {
+    return toContextType(SpanContext.TYPE, SpanContext.class);
+  }
+
+  public void setTrace(final @NotNull SpanContext traceContext) {
+    Objects.requireNonNull(traceContext, "traceContext is required");
+    this.put(SpanContext.TYPE, traceContext);
+  }
+
+  public @Nullable ProfileContext getProfile() {
+    return toContextType(ProfileContext.TYPE, ProfileContext.class);
+  }
+
+  public void setProfile(final @Nullable ProfileContext profileContext) {
+    Objects.requireNonNull(profileContext, "profileContext is required");
+    this.put(ProfileContext.TYPE, profileContext);
+  }
+
+  public @Nullable App getApp() {
+    return toContextType(App.TYPE, App.class);
+  }
+
+  public void setApp(final @NotNull App app) {
+    this.put(App.TYPE, app);
+  }
+
+  public @Nullable Browser getBrowser() {
+    return toContextType(Browser.TYPE, Browser.class);
+  }
+
+  public void setBrowser(final @NotNull Browser browser) {
+    this.put(Browser.TYPE, browser);
+  }
+
+  public @Nullable Device getDevice() {
+    return toContextType(Device.TYPE, Device.class);
+  }
+
+  public void setDevice(final @NotNull Device device) {
+    this.put(Device.TYPE, device);
+  }
+
+  public @Nullable OperatingSystem getOperatingSystem() {
+    return toContextType(OperatingSystem.TYPE, OperatingSystem.class);
+  }
+
+  public void setOperatingSystem(final @NotNull OperatingSystem operatingSystem) {
+    this.put(OperatingSystem.TYPE, operatingSystem);
+  }
+
+  public @Nullable IchnoisCoreRuntime getRuntime() {
+    return toContextType(IchnoisCoreRuntime.TYPE, IchnoisCoreRuntime.class);
+  }
+
+  public void setRuntime(final @NotNull IchnoisCoreRuntime runtime) {
+    this.put(IchnoisCoreRuntime.TYPE, runtime);
+  }
+
+  public @Nullable Feedback getFeedback() {
+    return toContextType(Feedback.TYPE, Feedback.class);
+  }
+
+  public void setFeedback(final @NotNull Feedback feedback) {
+    this.put(Feedback.TYPE, feedback);
+  }
+
+  public @Nullable Gpu getGpu() {
+    return toContextType(Gpu.TYPE, Gpu.class);
+  }
+
+  public void setGpu(final @NotNull Gpu gpu) {
+    this.put(Gpu.TYPE, gpu);
+  }
+
+  public @Nullable Response getResponse() {
+    return toContextType(Response.TYPE, Response.class);
+  }
+
+  public void withResponse(HintUtils.IchnoisCoreConsumer<Response> callback) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = responseLock.acquire()) {
+      final @Nullable Response response = getResponse();
+      if (response != null) {
+        callback.accept(response);
+      } else {
+        final @NotNull Response newResponse = new Response();
+        setResponse(newResponse);
+        callback.accept(newResponse);
+      }
+    }
+  }
+
+  public void setResponse(final @NotNull Response response) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = responseLock.acquire()) {
+      this.put(Response.TYPE, response);
+    }
+  }
+
+  public @Nullable Spring getSpring() {
+    return toContextType(Spring.TYPE, Spring.class);
+  }
+
+  public void setSpring(final @NotNull Spring spring) {
+    this.put(Spring.TYPE, spring);
+  }
+
+  public @Nullable ArtContext getArt() {
+    return toContextType(ArtContext.TYPE, ArtContext.class);
+  }
+
+  public void setArt(final @NotNull ArtContext art) {
+    this.put(ArtContext.TYPE, art);
+  }
+
+  public @Nullable FeatureFlags getFeatureFlags() {
+    return toContextType(FeatureFlags.TYPE, FeatureFlags.class);
+  }
+
+  public void setFeatureFlags(final @NotNull FeatureFlags featureFlags) {
+    this.put(FeatureFlags.TYPE, featureFlags);
+  }
+
+  public int size() {
+    // since this used to extend map
+    return internalStorage.size();
+  }
+
+  public int getSize() {
+    // for kotlin .size
+    return size();
+  }
+
+  public boolean isEmpty() {
+    return internalStorage.isEmpty();
+  }
+
+  public boolean containsKey(final @Nullable Object key) {
+    if (key == null) {
+      return false;
+    }
+    return internalStorage.containsKey(key);
+  }
+
+  public @Nullable Object get(final @Nullable Object key) {
+    if (key == null) {
+      return null;
+    }
+    return internalStorage.get(key);
+  }
+
+  public @Nullable Object put(final @Nullable String key, final @Nullable Object value) {
+    if (key == null) {
+      return null;
+    }
+    if (value == null) {
+      return internalStorage.remove(key);
+    } else {
+      return internalStorage.put(key, value);
+    }
+  }
+
+  public @Nullable Object set(final @Nullable String key, final @Nullable Object value) {
+    return put(key, value);
+  }
+
+  public @Nullable Object remove(final @Nullable Object key) {
+    if (key == null) {
+      return null;
+    }
+    return internalStorage.remove(key);
+  }
+
+  public void clear() {
+    internalStorage.clear();
+  }
+
+  // temp fix for JDK 21: ConcurrentHashMap.keySet() compiled against JDK 8+ returns KeySetView,
+  // which crashes on Android
+  // < 24.
+  @SuppressWarnings("JdkObsolete")
+  public @NotNull Enumeration<String> keys() {
+    return internalStorage.keys();
+  }
+
+  public @NotNull Set<Map.Entry<String, Object>> entrySet() {
+    return internalStorage.entrySet();
+  }
+
+  public void putAll(final @Nullable Map<? extends String, ? extends Object> m) {
+    if (m == null) {
+      return;
+    }
+
+    final @NotNull Map<String, Object> tmpMap = new HashMap<>();
+
+    for (final @NotNull Map.Entry<? extends String, ?> entry : m.entrySet()) {
+      if (entry.getKey() != null && entry.getValue() != null) {
+        tmpMap.put(entry.getKey(), entry.getValue());
+      }
+    }
+
+    internalStorage.putAll(tmpMap);
+  }
+
+  public void putAll(final @Nullable Contexts contexts) {
+    if (contexts == null) {
+      return;
+    }
+    internalStorage.putAll(contexts.internalStorage);
+  }
+
+  @Override
+  public boolean equals(final @Nullable Object obj) {
+    if (obj instanceof Contexts) {
+      final @NotNull Contexts otherContexts = (Contexts) obj;
+      return internalStorage.equals(otherContexts.internalStorage);
+    }
+
+    return false;
+  }
+
+  @Override
+  public int hashCode() {
+    return internalStorage.hashCode();
+  }
+
+  // region json
+
+  @Override
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
+      throws IOException {
+    writer.beginObject();
+    // Serialize in alphabetical order to keep determinism.
+    final String[] sortedKeys = CollectionUtils.toSortedStringArray(keys(), internalStorage.size());
+    for (final String key : sortedKeys) {
+      final Object value = get(key);
+      if (value != null) {
+        writer.name(key).value(logger, value);
+      }
+    }
+    writer.endObject();
+  }
+
+  public static final class Deserializer implements JsonDeserializer<Contexts> {
+
+    @Override
+    public @NotNull Contexts deserialize(
+        final @NotNull ObjectReader reader, final @NotNull ILogger logger) throws Exception {
+      final Contexts contexts = new Contexts();
+      reader.beginObject();
+      while (reader.peek() == JsonToken.NAME) {
+        final String nextName = reader.nextName();
+        switch (nextName) {
+          case App.TYPE:
+            contexts.setApp(new App.Deserializer().deserialize(reader, logger));
+            break;
+          case Browser.TYPE:
+            contexts.setBrowser(new Browser.Deserializer().deserialize(reader, logger));
+            break;
+          case Device.TYPE:
+            contexts.setDevice(new Device.Deserializer().deserialize(reader, logger));
+            break;
+          case Gpu.TYPE:
+            contexts.setGpu(new Gpu.Deserializer().deserialize(reader, logger));
+            break;
+          case OperatingSystem.TYPE:
+            contexts.setOperatingSystem(
+                new OperatingSystem.Deserializer().deserialize(reader, logger));
+            break;
+          case IchnoisCoreRuntime.TYPE:
+            contexts.setRuntime(new IchnoisCoreRuntime.Deserializer().deserialize(reader, logger));
+            break;
+          case Feedback.TYPE:
+            contexts.setFeedback(new Feedback.Deserializer().deserialize(reader, logger));
+            break;
+          case SpanContext.TYPE:
+            contexts.setTrace(new SpanContext.Deserializer().deserialize(reader, logger));
+            break;
+          case ProfileContext.TYPE:
+            contexts.setProfile(new ProfileContext.Deserializer().deserialize(reader, logger));
+            break;
+          case Response.TYPE:
+            contexts.setResponse(new Response.Deserializer().deserialize(reader, logger));
+            break;
+          case Spring.TYPE:
+            contexts.setSpring(new Spring.Deserializer().deserialize(reader, logger));
+            break;
+          case ArtContext.TYPE:
+            contexts.setArt(new ArtContext.Deserializer().deserialize(reader, logger));
+            break;
+          case FeatureFlags.TYPE:
+            contexts.setFeatureFlags(new FeatureFlags.Deserializer().deserialize(reader, logger));
+            break;
+          default:
+            Object object = reader.nextObjectOrNull();
+            if (object != null) {
+              contexts.put(nextName, object);
+            }
+            break;
+        }
+      }
+      reader.endObject();
+      return contexts;
+    }
+  }
+
+  // endregion
+}

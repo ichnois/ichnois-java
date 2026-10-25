@@ -1,0 +1,137 @@
+package io.ichnois.spring
+
+import io.ichnois.Hint
+import io.ichnois.IScopes
+import io.ichnois.IchnoisCoreEvent
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.TransactionContext.DEFAULT_TRANSACTION_NAME
+import io.ichnois.exception.ExceptionMechanismException
+import io.ichnois.spring.tracing.TransactionNameProvider
+import javax.servlet.http.HttpServletRequest
+import javax.servlet.http.HttpServletResponse
+import kotlin.test.Test
+import org.assertj.core.api.Assertions.assertThat
+import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+
+class IchnoisCoreExceptionResolverTest {
+  private val scopes = mock<IScopes>()
+  private val transactionNameProvider = mock<TransactionNameProvider>()
+  private val options = IchnoisCoreOptions()
+
+  private val request = mock<HttpServletRequest>()
+  private val response = mock<HttpServletResponse>()
+
+  init {
+    whenever(scopes.options).thenReturn(options)
+  }
+
+  @Test
+  fun `when handles exception, sets wrapped exception for event`() {
+    val eventCaptor = argumentCaptor<IchnoisCoreEvent>()
+    whenever(scopes.captureEvent(eventCaptor.capture(), any<Hint>())).thenReturn(null)
+    val expectedCause = RuntimeException("test")
+
+    IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1)
+      .resolveException(request, response, null, expectedCause)
+
+    assertThat(eventCaptor.firstValue.throwable).isEqualTo(expectedCause)
+    assertThat(eventCaptor.firstValue.throwableMechanism)
+      .isInstanceOf(ExceptionMechanismException::class.java)
+    with(eventCaptor.firstValue.throwableMechanism as ExceptionMechanismException) {
+      assertThat(exceptionMechanism.isHandled).isFalse
+      assertThat(exceptionMechanism.type).isEqualTo(IchnoisCoreExceptionResolver.MECHANISM_TYPE)
+      assertThat(throwable).isEqualTo(expectedCause)
+      assertThat(thread).isEqualTo(Thread.currentThread())
+      assertThat(isSnapshot).isFalse
+    }
+  }
+
+  @Test
+  fun `when handles exception, sets fatal level for event`() {
+    val eventCaptor = argumentCaptor<IchnoisCoreEvent>()
+    whenever(scopes.captureEvent(eventCaptor.capture(), any<Hint>())).thenReturn(null)
+
+    IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1)
+      .resolveException(request, response, null, RuntimeException("test"))
+
+    assertThat(eventCaptor.firstValue.level).isEqualTo(IchnoisCoreLevel.FATAL)
+  }
+
+  @Test
+  fun `when handles exception, sets transaction name for event`() {
+    val expectedTransactionName = "test-transaction"
+    whenever(transactionNameProvider.provideTransactionName(any()))
+      .thenReturn(expectedTransactionName)
+    val eventCaptor = argumentCaptor<IchnoisCoreEvent>()
+    whenever(scopes.captureEvent(eventCaptor.capture(), any<Hint>())).thenReturn(null)
+
+    IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1)
+      .resolveException(request, response, null, RuntimeException("test"))
+
+    assertThat(eventCaptor.firstValue.transaction).isEqualTo(expectedTransactionName)
+    verify(transactionNameProvider).provideTransactionName(request)
+  }
+
+  @Test
+  fun `when transaction name provider fails, captures event with safe fallback`() {
+    val failure = RuntimeException("provider failed")
+    whenever(transactionNameProvider.provideTransactionName(any())).thenThrow(failure)
+    val eventCaptor = argumentCaptor<IchnoisCoreEvent>()
+    whenever(scopes.captureEvent(eventCaptor.capture(), any<Hint>())).thenReturn(null)
+
+    IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1)
+      .resolveException(request, response, null, RuntimeException("request failed"))
+
+    assertThat(eventCaptor.firstValue.transaction).isEqualTo(DEFAULT_TRANSACTION_NAME)
+  }
+
+  @Test
+  fun `when handles exception, provides spring resolver hint`() {
+    val hintCaptor = argumentCaptor<Hint>()
+    whenever(scopes.captureEvent(any(), hintCaptor.capture())).thenReturn(null)
+
+    IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1)
+      .resolveException(request, response, null, RuntimeException("test"))
+
+    with(hintCaptor.firstValue) {
+      assertThat(get("springResolver:request")).isEqualTo(request)
+      assertThat(get("springResolver:response")).isEqualTo(response)
+    }
+  }
+
+  @Test
+  fun `when custom create event method provided, uses it to capture event`() {
+    val expectedEvent = IchnoisCoreEvent()
+    val eventCaptor = argumentCaptor<IchnoisCoreEvent>()
+    whenever(scopes.captureEvent(eventCaptor.capture(), any<Hint>())).thenReturn(null)
+    val resolver =
+      object : IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1) {
+        override fun createEvent(request: HttpServletRequest, ex: Exception) = expectedEvent
+      }
+
+    resolver.resolveException(request, response, null, RuntimeException("test"))
+
+    assertThat(eventCaptor.firstValue).isEqualTo(expectedEvent)
+  }
+
+  @Test
+  fun `when custom create hint method provided, uses it to capture event`() {
+    val expectedHint = Hint()
+    val hintCaptor = argumentCaptor<Hint>()
+    whenever(scopes.captureEvent(any(), hintCaptor.capture())).thenReturn(null)
+    val resolver =
+      object : IchnoisCoreExceptionResolver(scopes, transactionNameProvider, 1) {
+        override fun createHint(request: HttpServletRequest, response: HttpServletResponse) =
+          expectedHint
+      }
+
+    resolver.resolveException(request, response, null, RuntimeException("test"))
+
+    assertThat(hintCaptor.firstValue).isEqualTo(expectedHint)
+  }
+}

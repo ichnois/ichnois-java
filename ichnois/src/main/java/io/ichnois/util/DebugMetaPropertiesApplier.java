@@ -1,0 +1,198 @@
+package io.ichnois.util;
+
+import io.ichnois.IchnoisCoreIntegrationPackageStorage;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import java.util.List;
+import java.util.Properties;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class DebugMetaPropertiesApplier {
+
+  public static @NotNull String DEBUG_META_PROPERTIES_FILENAME = "ichnois-debug-meta.properties";
+
+  public static void apply(
+      final @NotNull IchnoisCoreOptions options, final @Nullable List<Properties> debugMetaProperties) {
+    if (debugMetaProperties != null) {
+      applyToOptions(options, debugMetaProperties);
+      applyBuildTool(options, debugMetaProperties);
+      applyDistributionOptions(options, debugMetaProperties);
+    }
+  }
+
+  public static void applyToOptions(
+      final @NotNull IchnoisCoreOptions options, final @Nullable List<Properties> debugMetaProperties) {
+    if (debugMetaProperties != null) {
+      applyBundleIds(options, debugMetaProperties);
+      applyProguardUuid(options, debugMetaProperties);
+    }
+  }
+
+  private static void applyBundleIds(
+      final @NotNull IchnoisCoreOptions options, final @NotNull List<Properties> debugMetaProperties) {
+    if (options.getBundleIds().isEmpty()) {
+      for (Properties properties : debugMetaProperties) {
+        final @Nullable String bundleIdStrings = properties.getProperty("io.ichnois.bundle-ids");
+        options.getLogger().log(IchnoisCoreLevel.DEBUG, "Bundle IDs found: %s", bundleIdStrings);
+        if (bundleIdStrings != null) {
+          final @NotNull String[] bundleIds = bundleIdStrings.split(",", -1);
+          for (final String bundleId : bundleIds) {
+            options.addBundleId(bundleId);
+          }
+        }
+      }
+    }
+  }
+
+  private static void applyProguardUuid(
+      final @NotNull IchnoisCoreOptions options, final @NotNull List<Properties> debugMetaProperties) {
+    if (options.getProguardUuid() == null) {
+      for (Properties properties : debugMetaProperties) {
+        final @Nullable String proguardUuid = getProguardUuid(properties);
+        if (proguardUuid != null) {
+          options.getLogger().log(IchnoisCoreLevel.DEBUG, "Proguard UUID found: %s", proguardUuid);
+          options.setProguardUuid(proguardUuid);
+          break;
+        }
+      }
+    }
+  }
+
+  private static void applyBuildTool(
+      final @NotNull IchnoisCoreOptions options, @NotNull List<Properties> debugMetaProperties) {
+    for (Properties properties : debugMetaProperties) {
+      final @Nullable String buildTool = getBuildTool(properties);
+      if (buildTool != null) {
+        @Nullable String buildToolVersion = getBuildToolVersion(properties);
+        if (buildToolVersion == null) {
+          buildToolVersion = "unknown";
+        }
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.DEBUG, "Build tool found: %s, version %s", buildTool, buildToolVersion);
+        IchnoisCoreIntegrationPackageStorage.getInstance().addPackage(buildTool, buildToolVersion);
+        break;
+      }
+    }
+  }
+
+  public static @Nullable String getProguardUuid(final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.ProguardUuids");
+  }
+
+  public static @Nullable String getBuildTool(final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.build-tool");
+  }
+
+  public static @Nullable String getBuildToolVersion(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.build-tool-version");
+  }
+
+  private static void applyDistributionOptions(
+      final @NotNull IchnoisCoreOptions options, final @NotNull List<Properties> debugMetaProperties) {
+    for (Properties properties : debugMetaProperties) {
+      final @Nullable String orgSlug = getDistributionOrgSlug(properties);
+      final @Nullable String projectSlug = getDistributionProjectSlug(properties);
+      final @Nullable String orgAuthToken = getDistributionAuthToken(properties);
+      final @Nullable String buildConfiguration = getDistributionBuildConfiguration(properties);
+      final @Nullable String installGroupsOverride =
+          getDistributionInstallGroupsOverride(properties);
+
+      if (orgSlug != null
+          || projectSlug != null
+          || orgAuthToken != null
+          || buildConfiguration != null
+          || installGroupsOverride != null) {
+        final @NotNull IchnoisCoreOptions.DistributionOptions distributionOptions =
+            options.getDistribution();
+
+        if (orgSlug != null && !orgSlug.isEmpty() && distributionOptions.orgSlug.isEmpty()) {
+          options.getLogger().log(IchnoisCoreLevel.DEBUG, "Distribution org slug found: %s", orgSlug);
+          distributionOptions.orgSlug = orgSlug;
+        }
+
+        if (projectSlug != null
+            && !projectSlug.isEmpty()
+            && distributionOptions.projectSlug.isEmpty()) {
+          options
+              .getLogger()
+              .log(IchnoisCoreLevel.DEBUG, "Distribution project slug found: %s", projectSlug);
+          distributionOptions.projectSlug = projectSlug;
+        }
+
+        if (orgAuthToken != null
+            && !orgAuthToken.isEmpty()
+            && distributionOptions.orgAuthToken.isEmpty()) {
+          options.getLogger().log(IchnoisCoreLevel.DEBUG, "Distribution org auth token found");
+          distributionOptions.orgAuthToken = orgAuthToken;
+        }
+
+        if (buildConfiguration != null
+            && !buildConfiguration.isEmpty()
+            && distributionOptions.buildConfiguration == null) {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.DEBUG,
+                  "Distribution build configuration found: %s",
+                  buildConfiguration);
+          distributionOptions.buildConfiguration = buildConfiguration;
+        }
+
+        if (installGroupsOverride != null
+            && !installGroupsOverride.isEmpty()
+            && distributionOptions.installGroupsOverride == null) {
+          final @NotNull String[] groups = installGroupsOverride.split(",", -1);
+          final @NotNull List<String> groupList = new java.util.ArrayList<>();
+          for (final String group : groups) {
+            final String trimmedGroup = group.trim();
+            if (!trimmedGroup.isEmpty()) {
+              groupList.add(trimmedGroup);
+            }
+          }
+          if (!groupList.isEmpty()) {
+            options
+                .getLogger()
+                .log(
+                    IchnoisCoreLevel.DEBUG, "Distribution install groups override found: %s", groupList);
+            distributionOptions.installGroupsOverride = groupList;
+          }
+        }
+
+        // We only process the first properties file that contains distribution options
+        // to maintain consistency with other properties like proguardUuid
+        break;
+      }
+    }
+  }
+
+  private static @Nullable String getDistributionOrgSlug(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.distribution.org-slug");
+  }
+
+  private static @Nullable String getDistributionProjectSlug(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.distribution.project-slug");
+  }
+
+  private static @Nullable String getDistributionAuthToken(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.distribution.auth-token");
+  }
+
+  private static @Nullable String getDistributionBuildConfiguration(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.distribution.build-configuration");
+  }
+
+  private static @Nullable String getDistributionInstallGroupsOverride(
+      final @NotNull Properties debugMetaProperties) {
+    return debugMetaProperties.getProperty("io.ichnois.distribution.install-groups-override");
+  }
+}

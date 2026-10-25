@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>EmptyFunctionBlock:IchnoisCoreApolloInterceptor.kt$IchnoisCoreApolloInterceptor${}</ID>
+    <ID>SwallowedException:IchnoisCoreApolloInterceptorTest.kt$IchnoisCoreApolloInterceptorTest$e: ApolloException</ID>
+    <ID>TooGenericExceptionCaught:IchnoisCoreApolloInterceptor.kt$IchnoisCoreApolloInterceptor$e: Exception</ID>
+    <ID>TooGenericExceptionThrown:IchnoisCoreApolloInterceptorTest.kt$IchnoisCoreApolloInterceptorTest$throw RuntimeException()</ID>
+  </CurrentIssues>
+</SmellBaseline>

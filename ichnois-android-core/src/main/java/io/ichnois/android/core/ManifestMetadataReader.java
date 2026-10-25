@@ -1,0 +1,1156 @@
+package io.ichnois.android.core;
+
+import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.os.Bundle;
+import io.ichnois.DataCollection;
+import io.ichnois.HttpBodyType;
+import io.ichnois.ILogger;
+import io.ichnois.InitPriority;
+import io.ichnois.KeyValueCollectionBehavior;
+import io.ichnois.ProfileLifecycle;
+import io.ichnois.ScreenshotStrategyType;
+import io.ichnois.IchnoisCoreFeedbackOptions;
+import io.ichnois.IchnoisCoreIntegrationPackageStorage;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreReplayOptions;
+import io.ichnois.protocol.SdkVersion;
+import io.ichnois.util.Objects;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/** Class responsible for reading values from manifest and setting them to the options */
+final class ManifestMetadataReader {
+
+  // Populated by the IchnoisCore Android Gradle plugin from the merged manifest at build time.
+  static @Nullable Map<String, Object> manifestMetadata;
+
+  static final String DSN = "io.ichnois.dsn";
+  static final String DEBUG = "io.ichnois.debug";
+  static final String DEBUG_LEVEL = "io.ichnois.debug.level";
+  static final String SAMPLE_RATE = "io.ichnois.sample-rate";
+  static final String ANR_ENABLE = "io.ichnois.anr.enable";
+  static final String ANR_REPORT_DEBUG = "io.ichnois.anr.report-debug";
+  static final String ANR_TIMEOUT_INTERVAL_MILLIS = "io.ichnois.anr.timeout-interval-millis";
+  static final String ANR_ATTACH_THREAD_DUMPS = "io.ichnois.anr.attach-thread-dumps";
+  static final String ANR_REPORT_HISTORICAL = "io.ichnois.anr.report-historical";
+
+  static final String NDK_APP_HANG_TRACKING_ENABLE = "io.ichnois.ndk.app-hang.enable";
+
+  static final String NDK_APP_HANG_TIMEOUT_INTERVAL_MILLIS =
+      "io.ichnois.ndk.app-hang.timeout-interval-millis";
+
+  static final String TOMBSTONE_ENABLE = "io.ichnois.tombstone.enable";
+  static final String TOMBSTONE_ATTACH_RAW = "io.ichnois.tombstone.attach-raw";
+  static final String TOMBSTONE_REPORT_HISTORICAL = "io.ichnois.tombstone.report-historical";
+  static final String TOMBSTONE_MERGE_TIME_THRESHOLD_MILLIS =
+      "io.ichnois.tombstone.merge-time-threshold-millis";
+  static final String MEMORY_LIMITER_ENABLE = "io.ichnois.memory-limiter.enable";
+  static final String MEMORY_LIMITER_REPORT_HISTORICAL =
+      "io.ichnois.memory-limiter.report-historical";
+
+  static final String AUTO_INIT = "io.ichnois.auto-init";
+  static final String NDK_ENABLE = "io.ichnois.ndk.enable";
+  static final String NDK_SCOPE_SYNC_ENABLE = "io.ichnois.ndk.scope-sync.enable";
+  static final String NDK_SDK_NAME = "io.ichnois.ndk.sdk-name";
+  static final String RELEASE = "io.ichnois.release";
+  static final String DIST = "io.ichnois.dist";
+  static final String ENVIRONMENT = "io.ichnois.environment";
+  static final String SDK_NAME = "io.ichnois.sdk.name";
+  static final String SDK_VERSION = "io.ichnois.sdk.version";
+
+  static final String AUTO_SESSION_TRACKING_ENABLE = "io.ichnois.auto-session-tracking.enable";
+  static final String SESSION_TRACKING_TIMEOUT_INTERVAL_MILLIS =
+      "io.ichnois.session-tracking.timeout-interval-millis";
+
+  static final String BREADCRUMBS_ACTIVITY_LIFECYCLE_ENABLE =
+      "io.ichnois.breadcrumbs.activity-lifecycle";
+  static final String BREADCRUMBS_APP_LIFECYCLE_ENABLE = "io.ichnois.breadcrumbs.app-lifecycle";
+  static final String BREADCRUMBS_SYSTEM_EVENTS_ENABLE = "io.ichnois.breadcrumbs.system-events";
+  static final String BREADCRUMBS_NETWORK_EVENTS_ENABLE = "io.ichnois.breadcrumbs.network-events";
+  static final String BREADCRUMBS_APP_COMPONENTS_ENABLE = "io.ichnois.breadcrumbs.app-components";
+  static final String BREADCRUMBS_USER_INTERACTION_ENABLE =
+      "io.ichnois.breadcrumbs.user-interaction";
+
+  static final String UNCAUGHT_EXCEPTION_HANDLER_ENABLE =
+      "io.ichnois.uncaught-exception-handler.enable";
+
+  static final String TRACES_SAMPLE_RATE = "io.ichnois.traces.sample-rate";
+  static final String TRACES_ACTIVITY_ENABLE = "io.ichnois.traces.activity.enable";
+  static final String TRACES_ACTIVITY_AUTO_FINISH_ENABLE =
+      "io.ichnois.traces.activity.auto-finish.enable";
+  static final String TRACES_UI_ENABLE = "io.ichnois.traces.user-interaction.enable";
+
+  static final String TTFD_ENABLE = "io.ichnois.traces.time-to-full-display.enable";
+
+  static final String PROFILES_SAMPLE_RATE = "io.ichnois.traces.profiling.sample-rate";
+
+  static final String PROFILE_SESSION_SAMPLE_RATE =
+      "io.ichnois.traces.profiling.session-sample-rate";
+
+  static final String PROFILE_LIFECYCLE = "io.ichnois.traces.profiling.lifecycle";
+
+  static final String PROFILER_START_ON_APP_START = "io.ichnois.traces.profiling.start-on-app-start";
+
+  @ApiStatus.Experimental static final String TRACE_SAMPLING = "io.ichnois.traces.trace-sampling";
+  static final String TRACE_PROPAGATION_TARGETS = "io.ichnois.traces.trace-propagation-targets";
+
+  static final String ATTACH_THREADS = "io.ichnois.attach-threads";
+  static final String PROGUARD_UUID = "io.ichnois.proguard-uuid";
+  static final String IDLE_TIMEOUT = "io.ichnois.traces.idle-timeout";
+
+  static final String ATTACH_SCREENSHOT = "io.ichnois.attach-screenshot";
+  static final String ATTACH_VIEW_HIERARCHY = "io.ichnois.attach-view-hierarchy";
+  static final String CLIENT_REPORTS_ENABLE = "io.ichnois.send-client-reports";
+  static final String COLLECT_ADDITIONAL_CONTEXT = "io.ichnois.additional-context";
+  static final String COLLECT_EXTERNAL_STORAGE_CONTEXT = "io.ichnois.external-storage-context";
+
+  static final String SEND_DEFAULT_PII = "io.ichnois.send-default-pii";
+
+  static final String DATA_COLLECTION_USER_INFO = "io.ichnois.data-collection.user-info";
+  static final String DATA_COLLECTION_HTTP_BODIES = "io.ichnois.data-collection.http-bodies";
+  static final String DATA_COLLECTION_COOKIES = "io.ichnois.data-collection.cookies";
+  static final String DATA_COLLECTION_HTTP_REQUEST_HEADERS =
+      "io.ichnois.data-collection.http-headers.request";
+  static final String DATA_COLLECTION_HTTP_RESPONSE_HEADERS =
+      "io.ichnois.data-collection.http-headers.response";
+  static final String DATA_COLLECTION_URL_QUERY_PARAMS =
+      "io.ichnois.data-collection.url-query-params";
+  static final String DATA_COLLECTION_GRAPHQL_DOCUMENT =
+      "io.ichnois.data-collection.graphql.document";
+  static final String DATA_COLLECTION_GRAPHQL_VARIABLES =
+      "io.ichnois.data-collection.graphql.variables";
+  static final String DATA_COLLECTION_DATABASE_QUERY_DATA =
+      "io.ichnois.data-collection.database-query-data";
+  static final String DATA_COLLECTION_FILE_PATHS = "io.ichnois.data-collection.file-paths";
+
+  static final String PERFORM_FRAMES_TRACKING = "io.ichnois.traces.frames-tracking";
+
+  static final String ICHNOIS_GRADLE_PLUGIN_INTEGRATIONS = "io.ichnois.gradle-plugin-integrations";
+
+  static final String ENABLE_ROOT_CHECK = "io.ichnois.enable-root-check";
+
+  static final String ENABLE_ICHNOIS = "io.ichnois.enabled";
+
+  static final String SEND_MODULES = "io.ichnois.send-modules";
+
+  static final String ENABLE_PERFORMANCE_V2 = "io.ichnois.performance-v2.enable";
+
+  static final String ENABLE_STANDALONE_APP_START_TRACING =
+      "io.ichnois.standalone-app-start-tracing.enable";
+
+  static final String ENABLE_APP_START_PROFILING = "io.ichnois.profiling.enable-app-start";
+
+  static final String ENABLE_LEGACY_PROFILING = "io.ichnois.profiling.enable-legacy-profiling";
+
+  static final String ENABLE_SCOPE_PERSISTENCE = "io.ichnois.enable-scope-persistence";
+
+  static final String REPLAYS_SESSION_SAMPLE_RATE = "io.ichnois.session-replay.session-sample-rate";
+
+  static final String REPLAYS_ERROR_SAMPLE_RATE = "io.ichnois.session-replay.on-error-sample-rate";
+
+  static final String REPLAYS_MASK_ALL_TEXT = "io.ichnois.session-replay.mask-all-text";
+
+  static final String REPLAYS_MASK_ALL_IMAGES = "io.ichnois.session-replay.mask-all-images";
+
+  static final String REPLAYS_DEBUG = "io.ichnois.session-replay.debug";
+  static final String REPLAYS_SCREENSHOT_STRATEGY = "io.ichnois.session-replay.screenshot-strategy";
+  static final String REPLAYS_CAPTURE_SURFACE_VIEWS =
+      "io.ichnois.session-replay.capture-surface-views";
+
+  static final String REPLAYS_NETWORK_DETAIL_ALLOW_URLS =
+      "io.ichnois.session-replay.network-detail-allow-urls";
+
+  static final String REPLAYS_NETWORK_DETAIL_DENY_URLS =
+      "io.ichnois.session-replay.network-detail-deny-urls";
+
+  static final String REPLAYS_NETWORK_CAPTURE_BODIES =
+      "io.ichnois.session-replay.network-capture-bodies";
+
+  static final String REPLAYS_NETWORK_REQUEST_HEADERS =
+      "io.ichnois.session-replay.network-request-headers";
+
+  static final String REPLAYS_NETWORK_RESPONSE_HEADERS =
+      "io.ichnois.session-replay.network-response-headers";
+
+  static final String FORCE_INIT = "io.ichnois.force-init";
+
+  static final String MAX_BREADCRUMBS = "io.ichnois.max-breadcrumbs";
+
+  static final String IGNORED_ERRORS = "io.ichnois.ignored-errors";
+
+  static final String IN_APP_INCLUDES = "io.ichnois.in-app-includes";
+
+  static final String IN_APP_EXCLUDES = "io.ichnois.in-app-excludes";
+
+  static final String ENABLE_LOGS = "io.ichnois.logs.enabled";
+
+  static final String ENABLE_METRICS = "io.ichnois.metrics.enabled";
+
+  static final String ENABLE_AUTO_TRACE_ID_GENERATION =
+      "io.ichnois.traces.enable-auto-id-generation";
+
+  static final String DEADLINE_TIMEOUT = "io.ichnois.traces.deadline-timeout";
+
+  static final String FEEDBACK_NAME_REQUIRED = "io.ichnois.feedback.is-name-required";
+
+  static final String FEEDBACK_SHOW_NAME = "io.ichnois.feedback.show-name";
+
+  static final String FEEDBACK_EMAIL_REQUIRED = "io.ichnois.feedback.is-email-required";
+
+  static final String FEEDBACK_SHOW_EMAIL = "io.ichnois.feedback.show-email";
+
+  static final String FEEDBACK_USE_ICHNOIS_USER = "io.ichnois.feedback.use-ichnois-user";
+
+  static final String FEEDBACK_SHOW_BRANDING = "io.ichnois.feedback.show-branding";
+
+  static final String STRICT_TRACE_CONTINUATION = "io.ichnois.strict-trace-continuation.enabled";
+  static final String ORG_ID = "io.ichnois.org-id";
+
+  static final String FEEDBACK_USE_SHAKE_GESTURE = "io.ichnois.feedback.use-shake-gesture";
+
+  static final String FEEDBACK_ENABLE_ATTACH_SCREENSHOT =
+      "io.ichnois.feedback.enable-attach-screenshot";
+
+  static final String SPOTLIGHT_ENABLE = "io.ichnois.spotlight.enable";
+
+  static final String SPOTLIGHT_CONNECTION_URL = "io.ichnois.spotlight.url";
+
+  static final String SCREENSHOT_MASK_ALL_TEXT = "io.ichnois.screenshot.mask-all-text";
+
+  static final String SCREENSHOT_MASK_ALL_IMAGES = "io.ichnois.screenshot.mask-all-images";
+
+  static final String ANR_PROFILING_SAMPLE_RATE = "io.ichnois.anr.profiling.sample-rate";
+
+  static final String ENABLE_ANR_FINGERPRINTING = "io.ichnois.anr.enable-fingerprinting";
+
+  /** ManifestMetadataReader ctor */
+  private ManifestMetadataReader() {}
+
+  /**
+   * Reads configurations from Manifest and sets it to the options
+   *
+   * @param context the application context
+   * @param options the IchnoisCoreAndroidOptions
+   */
+  @SuppressWarnings("deprecation")
+  static void applyMetadata(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    Objects.requireNonNull(context, "The application context is required.");
+    Objects.requireNonNull(options, "The options object is required.");
+
+    try {
+      final Object metadata = getMetadata(context, options.getLogger(), buildInfoProvider);
+      final ILogger logger = options.getLogger();
+
+      if (metadata != null) {
+        options.setDebug(readBool(metadata, logger, DEBUG, options.isDebug()));
+
+        if (options.isDebug()) {
+          final @Nullable String level =
+              readString(
+                  metadata,
+                  logger,
+                  DEBUG_LEVEL,
+                  options.getDiagnosticLevel().name().toLowerCase(Locale.ROOT));
+          if (level != null) {
+            options.setDiagnosticLevel(IchnoisCoreLevel.valueOf(level.toUpperCase(Locale.ROOT)));
+          }
+        }
+
+        options.setAnrEnabled(readBool(metadata, logger, ANR_ENABLE, options.isAnrEnabled()));
+        options.setTombstoneEnabled(
+            readBool(metadata, logger, TOMBSTONE_ENABLE, options.isTombstoneEnabled()));
+        options.setAttachRawTombstone(
+            readBool(metadata, logger, TOMBSTONE_ATTACH_RAW, options.isAttachRawTombstone()));
+        options.setReportHistoricalTombstones(
+            readBool(
+                metadata,
+                logger,
+                TOMBSTONE_REPORT_HISTORICAL,
+                options.isReportHistoricalTombstones()));
+        options.setTombstoneMergeTimeThresholdMillis(
+            readLong(
+                metadata,
+                logger,
+                TOMBSTONE_MERGE_TIME_THRESHOLD_MILLIS,
+                options.getTombstoneMergeTimeThresholdMillis()));
+        options.setMemoryLimiterEnabled(
+            readBool(metadata, logger, MEMORY_LIMITER_ENABLE, options.isMemoryLimiterEnabled()));
+        options.setReportHistoricalMemoryLimiterExits(
+            readBool(
+                metadata,
+                logger,
+                MEMORY_LIMITER_REPORT_HISTORICAL,
+                options.isReportHistoricalMemoryLimiterExits()));
+
+        // use enableAutoSessionTracking as fallback
+        options.setEnableAutoSessionTracking(
+            readBool(
+                metadata,
+                logger,
+                AUTO_SESSION_TRACKING_ENABLE,
+                options.isEnableAutoSessionTracking()));
+
+        if (options.getSampleRate() == null) {
+          final double sampleRate = readDouble(metadata, logger, SAMPLE_RATE);
+          if (sampleRate != -1) {
+            options.setSampleRate(sampleRate);
+          }
+        }
+
+        options.setAnrReportInDebug(
+            readBool(metadata, logger, ANR_REPORT_DEBUG, options.isAnrReportInDebug()));
+
+        options.setAnrTimeoutIntervalMillis(
+            readLong(
+                metadata,
+                logger,
+                ANR_TIMEOUT_INTERVAL_MILLIS,
+                options.getAnrTimeoutIntervalMillis()));
+
+        options.setAttachAnrThreadDump(
+            readBool(metadata, logger, ANR_ATTACH_THREAD_DUMPS, options.isAttachAnrThreadDump()));
+
+        options.setReportHistoricalAnrs(
+            readBool(metadata, logger, ANR_REPORT_HISTORICAL, options.isReportHistoricalAnrs()));
+
+        options.setEnableNdkAppHangTracking(
+            readBool(
+                metadata,
+                logger,
+                NDK_APP_HANG_TRACKING_ENABLE,
+                options.isEnableNdkAppHangTracking()));
+
+        options.setNdkAppHangTimeoutIntervalMillis(
+            readLong(
+                metadata,
+                logger,
+                NDK_APP_HANG_TIMEOUT_INTERVAL_MILLIS,
+                options.getNdkAppHangTimeoutIntervalMillis()));
+
+        final @Nullable String dsn = readString(metadata, logger, DSN, options.getDsn());
+        final boolean enabled = readBool(metadata, logger, ENABLE_ICHNOIS, options.isEnabled());
+
+        if (!enabled || (dsn != null && dsn.isEmpty())) {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.DEBUG,
+                  "IchnoisCore enabled flag set to false or DSN is empty: disabling ichnois-android");
+        } else if (dsn == null) {
+          options
+              .getLogger()
+              .log(IchnoisCoreLevel.FATAL, "DSN is required. Use empty string to disable SDK.");
+        }
+
+        options.setEnabled(enabled);
+        options.setDsn(dsn);
+
+        options.setEnableNdk(readBool(metadata, logger, NDK_ENABLE, options.isEnableNdk()));
+
+        options.setEnableScopeSync(
+            readBool(metadata, logger, NDK_SCOPE_SYNC_ENABLE, options.isEnableScopeSync()));
+
+        final @Nullable String nativeSdkName =
+            readString(metadata, logger, NDK_SDK_NAME, options.getNativeSdkName());
+        if (nativeSdkName != null) {
+          options.setNativeSdkName(nativeSdkName);
+        }
+
+        options.setRelease(readString(metadata, logger, RELEASE, options.getRelease()));
+
+        options.setDist(readString(metadata, logger, DIST, options.getDist()));
+
+        options.setEnvironment(readString(metadata, logger, ENVIRONMENT, options.getEnvironment()));
+
+        options.setSessionTrackingIntervalMillis(
+            readLong(
+                metadata,
+                logger,
+                SESSION_TRACKING_TIMEOUT_INTERVAL_MILLIS,
+                options.getSessionTrackingIntervalMillis()));
+
+        options.setMaxBreadcrumbs(
+            (int) readLong(metadata, logger, MAX_BREADCRUMBS, options.getMaxBreadcrumbs()));
+
+        options.setEnableActivityLifecycleBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_ACTIVITY_LIFECYCLE_ENABLE,
+                options.isEnableActivityLifecycleBreadcrumbs()));
+
+        options.setEnableAppLifecycleBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_APP_LIFECYCLE_ENABLE,
+                options.isEnableAppLifecycleBreadcrumbs()));
+
+        options.setEnableSystemEventBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_SYSTEM_EVENTS_ENABLE,
+                options.isEnableSystemEventBreadcrumbs()));
+
+        options.setEnableAppComponentBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_APP_COMPONENTS_ENABLE,
+                options.isEnableAppComponentBreadcrumbs()));
+
+        options.setEnableUserInteractionBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_USER_INTERACTION_ENABLE,
+                options.isEnableUserInteractionBreadcrumbs()));
+
+        options.setEnableNetworkEventBreadcrumbs(
+            readBool(
+                metadata,
+                logger,
+                BREADCRUMBS_NETWORK_EVENTS_ENABLE,
+                options.isEnableNetworkEventBreadcrumbs()));
+
+        options.setEnableUncaughtExceptionHandler(
+            readBool(
+                metadata,
+                logger,
+                UNCAUGHT_EXCEPTION_HANDLER_ENABLE,
+                options.isEnableUncaughtExceptionHandler()));
+
+        options.setAttachThreads(
+            readBool(metadata, logger, ATTACH_THREADS, options.isAttachThreads()));
+
+        options.setAttachScreenshot(
+            readBool(metadata, logger, ATTACH_SCREENSHOT, options.isAttachScreenshot()));
+
+        options.setAttachViewHierarchy(
+            readBool(metadata, logger, ATTACH_VIEW_HIERARCHY, options.isAttachViewHierarchy()));
+
+        options.setSendClientReports(
+            readBool(metadata, logger, CLIENT_REPORTS_ENABLE, options.isSendClientReports()));
+
+        final boolean isAutoInitEnabled = readBool(metadata, logger, AUTO_INIT, true);
+        if (isAutoInitEnabled) {
+          options.setInitPriority(InitPriority.LOW);
+        }
+
+        options.setForceInit(readBool(metadata, logger, FORCE_INIT, options.isForceInit()));
+
+        options.setCollectAdditionalContext(
+            readBool(
+                metadata,
+                logger,
+                COLLECT_ADDITIONAL_CONTEXT,
+                options.isCollectAdditionalContext()));
+
+        options.setCollectExternalStorageContext(
+            readBool(
+                metadata,
+                logger,
+                COLLECT_EXTERNAL_STORAGE_CONTEXT,
+                options.isCollectExternalStorageContext()));
+
+        if (options.getTracesSampleRate() == null) {
+          final double tracesSampleRate = readDouble(metadata, logger, TRACES_SAMPLE_RATE);
+          if (tracesSampleRate != -1) {
+            options.setTracesSampleRate(tracesSampleRate);
+          }
+        }
+
+        options.setTraceSampling(
+            readBool(metadata, logger, TRACE_SAMPLING, options.isTraceSampling()));
+
+        options.setEnableAutoActivityLifecycleTracing(
+            readBool(
+                metadata,
+                logger,
+                TRACES_ACTIVITY_ENABLE,
+                options.isEnableAutoActivityLifecycleTracing()));
+
+        options.setEnableActivityLifecycleTracingAutoFinish(
+            readBool(
+                metadata,
+                logger,
+                TRACES_ACTIVITY_AUTO_FINISH_ENABLE,
+                options.isEnableActivityLifecycleTracingAutoFinish()));
+
+        if (options.getProfilesSampleRate() == null) {
+          final double profilesSampleRate = readDouble(metadata, logger, PROFILES_SAMPLE_RATE);
+          if (profilesSampleRate != -1) {
+            options.setProfilesSampleRate(profilesSampleRate);
+          }
+        }
+
+        if (options.getProfileSessionSampleRate() == null) {
+          final double profileSessionSampleRate =
+              readDouble(metadata, logger, PROFILE_SESSION_SAMPLE_RATE);
+          if (profileSessionSampleRate != -1) {
+            options.setProfileSessionSampleRate(profileSessionSampleRate);
+          }
+        }
+
+        final @Nullable String profileLifecycle =
+            readString(
+                metadata,
+                logger,
+                PROFILE_LIFECYCLE,
+                options.getProfileLifecycle().name().toLowerCase(Locale.ROOT));
+        if (profileLifecycle != null) {
+          options.setProfileLifecycle(
+              ProfileLifecycle.valueOf(profileLifecycle.toUpperCase(Locale.ROOT)));
+        }
+
+        options.setStartProfilerOnAppStart(
+            readBool(
+                metadata,
+                logger,
+                PROFILER_START_ON_APP_START,
+                options.isStartProfilerOnAppStart()));
+
+        options.setEnableUserInteractionTracing(
+            readBool(metadata, logger, TRACES_UI_ENABLE, options.isEnableUserInteractionTracing()));
+
+        options.setEnableTimeToFullDisplayTracing(
+            readBool(metadata, logger, TTFD_ENABLE, options.isEnableTimeToFullDisplayTracing()));
+
+        final long idleTimeout = readLong(metadata, logger, IDLE_TIMEOUT, -1);
+        if (idleTimeout != -1) {
+          options.setIdleTimeout(idleTimeout);
+        }
+
+        @Nullable
+        List<String> tracePropagationTargets =
+            readList(metadata, logger, TRACE_PROPAGATION_TARGETS);
+
+        if (containsKey(metadata, TRACE_PROPAGATION_TARGETS) && tracePropagationTargets == null) {
+          options.setTracePropagationTargets(Collections.emptyList());
+        } else if (tracePropagationTargets != null) {
+          options.setTracePropagationTargets(tracePropagationTargets);
+        }
+
+        options.setEnableFramesTracking(readBool(metadata, logger, PERFORM_FRAMES_TRACKING, true));
+
+        options.setProguardUuid(
+            readString(metadata, logger, PROGUARD_UUID, options.getProguardUuid()));
+
+        SdkVersion sdkInfo = options.getSdkVersion();
+        if (sdkInfo == null) {
+          // Is already set by the Options constructor, let's use an empty default otherwise.
+          sdkInfo = new SdkVersion("", "");
+        }
+        sdkInfo.setName(readStringNotNull(metadata, logger, SDK_NAME, sdkInfo.getName()));
+        sdkInfo.setVersion(readStringNotNull(metadata, logger, SDK_VERSION, sdkInfo.getVersion()));
+        options.setSdkVersion(sdkInfo);
+
+        options.setSendDefaultPii(
+            readBool(metadata, logger, SEND_DEFAULT_PII, options.isSendDefaultPii()));
+
+        // sdkInfo.addIntegration();
+
+        @Nullable
+        List<String> integrationsFromGradlePlugin =
+            readList(metadata, logger, ICHNOIS_GRADLE_PLUGIN_INTEGRATIONS);
+        if (integrationsFromGradlePlugin != null) {
+          for (String integration : integrationsFromGradlePlugin) {
+            IchnoisCoreIntegrationPackageStorage.getInstance().addIntegration(integration);
+          }
+        }
+
+        options.setEnableRootCheck(
+            readBool(metadata, logger, ENABLE_ROOT_CHECK, options.isEnableRootCheck()));
+
+        options.setSendModules(readBool(metadata, logger, SEND_MODULES, options.isSendModules()));
+
+        options.setEnablePerformanceV2(
+            readBool(metadata, logger, ENABLE_PERFORMANCE_V2, options.isEnablePerformanceV2()));
+
+        options.setEnableStandaloneAppStartTracing(
+            readBool(
+                metadata,
+                logger,
+                ENABLE_STANDALONE_APP_START_TRACING,
+                options.isEnableStandaloneAppStartTracing()));
+
+        options.setEnableAppStartProfiling(
+            readBool(
+                metadata, logger, ENABLE_APP_START_PROFILING, options.isEnableAppStartProfiling()));
+
+        options.setEnableLegacyProfiling(
+            readBool(metadata, logger, ENABLE_LEGACY_PROFILING, options.isEnableLegacyProfiling()));
+
+        options.setEnableScopePersistence(
+            readBool(
+                metadata, logger, ENABLE_SCOPE_PERSISTENCE, options.isEnableScopePersistence()));
+
+        options.setEnableAutoTraceIdGeneration(
+            readBool(
+                metadata,
+                logger,
+                ENABLE_AUTO_TRACE_ID_GENERATION,
+                options.isEnableAutoTraceIdGeneration()));
+
+        options.setDeadlineTimeout(
+            readLong(metadata, logger, DEADLINE_TIMEOUT, options.getDeadlineTimeout()));
+
+        if (options.getSessionReplay().getSessionSampleRate() == null) {
+          final double sessionSampleRate =
+              readDouble(metadata, logger, REPLAYS_SESSION_SAMPLE_RATE);
+          if (sessionSampleRate != -1) {
+            options.getSessionReplay().setSessionSampleRate(sessionSampleRate);
+          }
+        }
+
+        if (options.getSessionReplay().getOnErrorSampleRate() == null) {
+          final double onErrorSampleRate = readDouble(metadata, logger, REPLAYS_ERROR_SAMPLE_RATE);
+          if (onErrorSampleRate != -1) {
+            options.getSessionReplay().setOnErrorSampleRate(onErrorSampleRate);
+          }
+        }
+
+        options
+            .getSessionReplay()
+            .setMaskAllText(readBool(metadata, logger, REPLAYS_MASK_ALL_TEXT, true));
+
+        options
+            .getSessionReplay()
+            .setMaskAllImages(readBool(metadata, logger, REPLAYS_MASK_ALL_IMAGES, true));
+
+        options.getSessionReplay().setDebug(readBool(metadata, logger, REPLAYS_DEBUG, false));
+
+        final @Nullable String screenshotStrategyRaw =
+            readString(metadata, logger, REPLAYS_SCREENSHOT_STRATEGY, null);
+        if (screenshotStrategyRaw != null) {
+          if ("canvas".equals(screenshotStrategyRaw.toLowerCase(Locale.ROOT))) {
+            options.getSessionReplay().setScreenshotStrategy(ScreenshotStrategyType.CANVAS);
+          } else {
+            // always default to PIXEL_COPY
+            options.getSessionReplay().setScreenshotStrategy(ScreenshotStrategyType.PIXEL_COPY);
+          }
+        }
+
+        options
+            .getSessionReplay()
+            .setCaptureSurfaceViews(
+                readBool(
+                    metadata,
+                    logger,
+                    REPLAYS_CAPTURE_SURFACE_VIEWS,
+                    options.getSessionReplay().isCaptureSurfaceViews()));
+
+        // Network Details Configuration
+        if (options.getSessionReplay().getNetworkDetailAllowUrls().isEmpty()) {
+          final @Nullable List<String> allowUrls =
+              readList(metadata, logger, REPLAYS_NETWORK_DETAIL_ALLOW_URLS);
+          if (allowUrls != null && !allowUrls.isEmpty()) {
+            final List<String> filteredUrls = new ArrayList<>();
+            for (String url : allowUrls) {
+              final String trimmedUrl = url.trim();
+              if (!trimmedUrl.isEmpty()) {
+                filteredUrls.add(trimmedUrl);
+              }
+            }
+            if (!filteredUrls.isEmpty()) {
+              options.getSessionReplay().setNetworkDetailAllowUrls(filteredUrls);
+            }
+          }
+        }
+
+        if (options.getSessionReplay().getNetworkDetailDenyUrls().isEmpty()) {
+          final @Nullable List<String> denyUrls =
+              readList(metadata, logger, REPLAYS_NETWORK_DETAIL_DENY_URLS);
+          if (denyUrls != null && !denyUrls.isEmpty()) {
+            final List<String> filteredUrls = new ArrayList<>();
+            for (String url : denyUrls) {
+              final String trimmedUrl = url.trim();
+              if (!trimmedUrl.isEmpty()) {
+                filteredUrls.add(trimmedUrl);
+              }
+            }
+            if (!filteredUrls.isEmpty()) {
+              options.getSessionReplay().setNetworkDetailDenyUrls(filteredUrls);
+            }
+          }
+        }
+
+        options
+            .getSessionReplay()
+            .setNetworkCaptureBodies(
+                readBool(
+                    metadata,
+                    logger,
+                    REPLAYS_NETWORK_CAPTURE_BODIES,
+                    options.getSessionReplay().isNetworkCaptureBodies() /* defaultValue */));
+
+        if (options.getSessionReplay().getNetworkRequestHeaders().size()
+            == IchnoisCoreReplayOptions.getNetworkDetailsDefaultHeaders().size()) { // Only has defaults
+          final @Nullable List<String> requestHeaders =
+              readList(metadata, logger, REPLAYS_NETWORK_REQUEST_HEADERS);
+          if (requestHeaders != null) {
+            final List<String> filteredHeaders = new ArrayList<>();
+            for (String header : requestHeaders) {
+              final String trimmedHeader = header.trim();
+              if (!trimmedHeader.isEmpty()) {
+                filteredHeaders.add(trimmedHeader);
+              }
+            }
+            if (!filteredHeaders.isEmpty()) {
+              options.getSessionReplay().setNetworkRequestHeaders(filteredHeaders);
+            }
+          }
+        }
+
+        if (options.getSessionReplay().getNetworkResponseHeaders().size()
+            == IchnoisCoreReplayOptions.getNetworkDetailsDefaultHeaders().size()) { // Only has defaults
+          final @Nullable List<String> responseHeaders =
+              readList(metadata, logger, REPLAYS_NETWORK_RESPONSE_HEADERS);
+          if (responseHeaders != null && !responseHeaders.isEmpty()) {
+            final List<String> filteredHeaders = new ArrayList<>();
+            for (String header : responseHeaders) {
+              final String trimmedHeader = header.trim();
+              if (!trimmedHeader.isEmpty()) {
+                filteredHeaders.add(trimmedHeader);
+              }
+            }
+            if (!filteredHeaders.isEmpty()) {
+              options.getSessionReplay().setNetworkResponseHeaders(filteredHeaders);
+            }
+          }
+        }
+
+        options.setIgnoredErrors(readList(metadata, logger, IGNORED_ERRORS));
+
+        final @Nullable List<String> includes = readList(metadata, logger, IN_APP_INCLUDES);
+        if (includes != null && !includes.isEmpty()) {
+          for (final @NotNull String include : includes) {
+            options.addInAppInclude(include);
+          }
+        }
+
+        final @Nullable List<String> excludes = readList(metadata, logger, IN_APP_EXCLUDES);
+        if (excludes != null && !excludes.isEmpty()) {
+          for (final @NotNull String exclude : excludes) {
+            options.addInAppExclude(exclude);
+          }
+        }
+
+        options
+            .getLogs()
+            .setEnabled(readBool(metadata, logger, ENABLE_LOGS, options.getLogs().isEnabled()));
+
+        options
+            .getMetrics()
+            .setEnabled(
+                readBool(metadata, logger, ENABLE_METRICS, options.getMetrics().isEnabled()));
+
+        final @NotNull IchnoisCoreFeedbackOptions feedbackOptions = options.getFeedbackOptions();
+        feedbackOptions.setNameRequired(
+            readBool(metadata, logger, FEEDBACK_NAME_REQUIRED, feedbackOptions.isNameRequired()));
+        feedbackOptions.setShowName(
+            readBool(metadata, logger, FEEDBACK_SHOW_NAME, feedbackOptions.isShowName()));
+        feedbackOptions.setEmailRequired(
+            readBool(metadata, logger, FEEDBACK_EMAIL_REQUIRED, feedbackOptions.isEmailRequired()));
+        feedbackOptions.setShowEmail(
+            readBool(metadata, logger, FEEDBACK_SHOW_EMAIL, feedbackOptions.isShowEmail()));
+        feedbackOptions.setUseIchnoisCoreUser(
+            readBool(
+                metadata, logger, FEEDBACK_USE_ICHNOIS_USER, feedbackOptions.isUseIchnoisCoreUser()));
+        feedbackOptions.setShowBranding(
+            readBool(metadata, logger, FEEDBACK_SHOW_BRANDING, feedbackOptions.isShowBranding()));
+        feedbackOptions.setUseShakeGesture(
+            readBool(
+                metadata, logger, FEEDBACK_USE_SHAKE_GESTURE, feedbackOptions.isUseShakeGesture()));
+        feedbackOptions.setEnableAttachScreenshot(
+            readBool(
+                metadata,
+                logger,
+                FEEDBACK_ENABLE_ATTACH_SCREENSHOT,
+                feedbackOptions.isEnableAttachScreenshot()));
+
+        options.setStrictTraceContinuation(
+            readBool(
+                metadata, logger, STRICT_TRACE_CONTINUATION, options.isStrictTraceContinuation()));
+
+        final @Nullable String orgId = readString(metadata, logger, ORG_ID, null);
+        if (orgId != null) {
+          options.setOrgId(orgId);
+        }
+
+        options.setEnableSpotlight(
+            readBool(metadata, logger, SPOTLIGHT_ENABLE, options.isEnableSpotlight()));
+
+        final @Nullable String spotlightUrl =
+            readString(metadata, logger, SPOTLIGHT_CONNECTION_URL, null);
+        if (spotlightUrl != null) {
+          options.setSpotlightConnectionUrl(spotlightUrl);
+        }
+
+        // Screenshot masking options (default to false for backwards compatibility)
+        options
+            .getScreenshot()
+            .setMaskAllText(readBool(metadata, logger, SCREENSHOT_MASK_ALL_TEXT, false));
+        options
+            .getScreenshot()
+            .setMaskAllImages(readBool(metadata, logger, SCREENSHOT_MASK_ALL_IMAGES, false));
+
+        if (options.getAnrProfilingSampleRate() == null) {
+          final double anrProfilingSampleRate =
+              readDouble(metadata, logger, ANR_PROFILING_SAMPLE_RATE);
+          if (anrProfilingSampleRate != -1) {
+            options.setAnrProfilingSampleRate(anrProfilingSampleRate);
+          }
+        }
+
+        options.setEnableAnrFingerprinting(
+            readBool(
+                metadata, logger, ENABLE_ANR_FINGERPRINTING, options.isEnableAnrFingerprinting()));
+
+        final @Nullable DataCollection dataCollection =
+            readDataCollection(metadata, logger, options.getDataCollection());
+        if (dataCollection != null) {
+          mergeDataCollection(options.getDataCollection(), dataCollection);
+        }
+      }
+      options
+          .getLogger()
+          .log(IchnoisCoreLevel.INFO, "Retrieving configuration from AndroidManifest.xml");
+    } catch (Throwable e) {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.ERROR, "Failed to read configuration from android manifest metadata.", e);
+    }
+  }
+
+  private static @Nullable DataCollection readDataCollection(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull DataCollection currentDataCollection) {
+    final @NotNull DataCollection dataCollection = new DataCollection();
+
+    if (containsKey(metadata, DATA_COLLECTION_USER_INFO)) {
+      dataCollection.setUserInfo(readBool(metadata, logger, DATA_COLLECTION_USER_INFO, false));
+    }
+
+    if (containsKey(metadata, DATA_COLLECTION_HTTP_BODIES)) {
+      dataCollection.setHttpBodies(readHttpBodyTypes(metadata, logger));
+    }
+
+    final @Nullable KeyValueCollectionBehavior cookies =
+        readKeyValueCollectionBehavior(
+            metadata, logger, DATA_COLLECTION_COOKIES, currentDataCollection.getCookies());
+    if (cookies != null) {
+      dataCollection.setCookies(cookies);
+    }
+
+    final @Nullable KeyValueCollectionBehavior requestHeaders =
+        readKeyValueCollectionBehavior(
+            metadata,
+            logger,
+            DATA_COLLECTION_HTTP_REQUEST_HEADERS,
+            currentDataCollection.getHttpHeaders().getRequest());
+    if (requestHeaders != null) {
+      dataCollection.getHttpHeaders().setRequest(requestHeaders);
+    }
+
+    final @Nullable KeyValueCollectionBehavior responseHeaders =
+        readKeyValueCollectionBehavior(
+            metadata,
+            logger,
+            DATA_COLLECTION_HTTP_RESPONSE_HEADERS,
+            currentDataCollection.getHttpHeaders().getResponse());
+    if (responseHeaders != null) {
+      dataCollection.getHttpHeaders().setResponse(responseHeaders);
+    }
+
+    final @Nullable KeyValueCollectionBehavior urlQueryParams =
+        readKeyValueCollectionBehavior(
+            metadata,
+            logger,
+            DATA_COLLECTION_URL_QUERY_PARAMS,
+            currentDataCollection.getUrlQueryParams());
+    if (urlQueryParams != null) {
+      dataCollection.setUrlQueryParams(urlQueryParams);
+    }
+
+    if (containsKey(metadata, DATA_COLLECTION_GRAPHQL_DOCUMENT)) {
+      dataCollection
+          .getGraphql()
+          .setDocument(readBool(metadata, logger, DATA_COLLECTION_GRAPHQL_DOCUMENT, false));
+    }
+
+    if (containsKey(metadata, DATA_COLLECTION_GRAPHQL_VARIABLES)) {
+      dataCollection
+          .getGraphql()
+          .setVariables(readBool(metadata, logger, DATA_COLLECTION_GRAPHQL_VARIABLES, false));
+    }
+
+    if (containsKey(metadata, DATA_COLLECTION_DATABASE_QUERY_DATA)) {
+      dataCollection.setDatabaseQueryData(
+          readBool(metadata, logger, DATA_COLLECTION_DATABASE_QUERY_DATA, false));
+    }
+
+    if (containsKey(metadata, DATA_COLLECTION_FILE_PATHS)) {
+      dataCollection.setFilePaths(readBool(metadata, logger, DATA_COLLECTION_FILE_PATHS, false));
+    }
+
+    return dataCollection.isExplicitlyConfigured() ? dataCollection : null;
+  }
+
+  private static void mergeDataCollection(
+      final @NotNull DataCollection target, final @NotNull DataCollection source) {
+    if (source.getUserInfo() != null) {
+      target.setUserInfo(source.getUserInfo());
+    }
+    if (source.getHttpBodies() != null) {
+      target.setHttpBodies(source.getHttpBodies());
+    }
+    if (source.getCookies() != null) {
+      target.setCookies(source.getCookies());
+    }
+    if (source.getHttpHeaders().getRequest() != null) {
+      target.getHttpHeaders().setRequest(source.getHttpHeaders().getRequest());
+    }
+    if (source.getHttpHeaders().getResponse() != null) {
+      target.getHttpHeaders().setResponse(source.getHttpHeaders().getResponse());
+    }
+    if (source.getUrlQueryParams() != null) {
+      target.setUrlQueryParams(source.getUrlQueryParams());
+    }
+    if (source.getGraphql().getDocument() != null) {
+      target.getGraphql().setDocument(source.getGraphql().getDocument());
+    }
+    if (source.getGraphql().getVariables() != null) {
+      target.getGraphql().setVariables(source.getGraphql().getVariables());
+    }
+    if (source.getDatabaseQueryData() != null) {
+      target.setDatabaseQueryData(source.getDatabaseQueryData());
+    }
+    if (source.getFilePaths() != null) {
+      target.setFilePaths(source.getFilePaths());
+    }
+  }
+
+  private static @NotNull Set<HttpBodyType> readHttpBodyTypes(
+      final @NotNull Object metadata, final @NotNull ILogger logger) {
+    final @Nullable List<String> bodyTypes =
+        readList(metadata, logger, DATA_COLLECTION_HTTP_BODIES);
+    if (bodyTypes == null || (bodyTypes.size() == 1 && bodyTypes.get(0).isEmpty())) {
+      return Collections.emptySet();
+    }
+
+    final @NotNull Set<HttpBodyType> result = EnumSet.noneOf(HttpBodyType.class);
+    for (final String bodyType : bodyTypes) {
+      result.add(HttpBodyType.valueOf(bodyType.toUpperCase(Locale.ROOT)));
+    }
+    return result;
+  }
+
+  private static @Nullable KeyValueCollectionBehavior readKeyValueCollectionBehavior(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull String key,
+      final @Nullable KeyValueCollectionBehavior currentBehavior) {
+    final @NotNull String modeKey = key + ".mode";
+    final @NotNull String termsKey = key + ".terms";
+    if (!containsKey(metadata, modeKey) && !containsKey(metadata, termsKey)) {
+      return null;
+    }
+
+    final @NotNull KeyValueCollectionBehavior behavior = new KeyValueCollectionBehavior();
+    if (currentBehavior != null) {
+      behavior.setMode(currentBehavior.getMode());
+      behavior.setTerms(currentBehavior.getTerms());
+    }
+    if (containsKey(metadata, modeKey)) {
+      final @Nullable String mode = readString(metadata, logger, modeKey, null);
+      if (mode != null) {
+        behavior.setMode(KeyValueCollectionBehavior.Mode.valueOf(mode.toUpperCase(Locale.ROOT)));
+      }
+    }
+    if (containsKey(metadata, termsKey)) {
+      final @Nullable List<String> terms = readList(metadata, logger, termsKey);
+      behavior.setTerms(terms == null ? Collections.<String>emptyList() : terms);
+    }
+    return behavior;
+  }
+
+  private static boolean readBool(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull String key,
+      final boolean defaultValue) {
+    final boolean value;
+    if (metadata instanceof Bundle) {
+      value = ((Bundle) metadata).getBoolean(key, defaultValue);
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value = raw instanceof Boolean ? (Boolean) raw : defaultValue;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    return value;
+  }
+
+  private static @Nullable String readString(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull String key,
+      final @Nullable String defaultValue) {
+    final String value;
+    if (metadata instanceof Bundle) {
+      value = ((Bundle) metadata).getString(key, defaultValue);
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value = raw instanceof String ? (String) raw : defaultValue;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    return value;
+  }
+
+  private static @NotNull String readStringNotNull(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull String key,
+      final @NotNull String defaultValue) {
+    final String value;
+    if (metadata instanceof Bundle) {
+      value = ((Bundle) metadata).getString(key, defaultValue);
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value = raw instanceof String ? (String) raw : defaultValue;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    return value;
+  }
+
+  private static @Nullable List<String> readList(
+      final @NotNull Object metadata, final @NotNull ILogger logger, final @NotNull String key) {
+    final String value;
+    if (metadata instanceof Bundle) {
+      value = ((Bundle) metadata).getString(key);
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value = raw instanceof String ? (String) raw : null;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    if (value != null) {
+      return Arrays.asList(value.split(",", -1));
+    } else {
+      return null;
+    }
+  }
+
+  private static double readDouble(
+      final @NotNull Object metadata, final @NotNull ILogger logger, final @NotNull String key) {
+    final double value;
+    if (metadata instanceof Bundle) {
+      // manifest meta-data only reads float
+      double bundleValue = ((Float) ((Bundle) metadata).getFloat(key, -1)).doubleValue();
+      if (bundleValue == -1) {
+        bundleValue = ((Integer) ((Bundle) metadata).getInt(key, -1)).doubleValue();
+      }
+      value = bundleValue;
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value =
+          raw instanceof Float
+              ? ((Float) raw).doubleValue()
+              : raw instanceof Integer ? ((Integer) raw).doubleValue() : -1;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    return value;
+  }
+
+  private static long readLong(
+      final @NotNull Object metadata,
+      final @NotNull ILogger logger,
+      final @NotNull String key,
+      final long defaultValue) {
+    final long value;
+    if (metadata instanceof Bundle) {
+      // manifest meta-data only reads int if the value is not big enough
+      value = ((Bundle) metadata).getInt(key, (int) defaultValue);
+    } else {
+      final Object raw = ((Map<?, ?>) metadata).get(key);
+      value = raw instanceof Integer ? (Integer) raw : defaultValue;
+    }
+    if (logger.isEnabled(IchnoisCoreLevel.DEBUG)) {
+      logger.log(IchnoisCoreLevel.DEBUG, key + " read: " + value);
+    }
+    return value;
+  }
+
+  /**
+   * Checks if auto init is enabled or disabled
+   *
+   * @param context the application context
+   * @param logger the Logger interface
+   * @return true if auto init is enabled or false otherwise
+   */
+  static boolean isAutoInit(final @NotNull Context context, final @NotNull ILogger logger) {
+    Objects.requireNonNull(context, "The application context is required.");
+
+    boolean autoInit = true;
+    try {
+      final Object metadata = getMetadata(context, logger, null);
+      if (metadata != null) {
+        autoInit = readBool(metadata, logger, AUTO_INIT, true);
+      }
+    } catch (Throwable e) {
+      logger.log(IchnoisCoreLevel.ERROR, "Failed to read auto-init from android manifest metadata.", e);
+    }
+    return autoInit;
+  }
+
+  /**
+   * Returns build-time metadata when available, otherwise metadata attached to the given Context.
+   *
+   * @param context the application context
+   * @return metadata as a Map or PackageManager Bundle
+   */
+  private static @Nullable Object getMetadata(
+      final @NotNull Context context,
+      final @NotNull ILogger logger,
+      final @Nullable BuildInfoProvider buildInfoProvider) {
+    final @Nullable Map<String, Object> injected = manifestMetadata;
+    if (injected != null) {
+      return injected;
+    }
+    final ApplicationInfo app =
+        ContextUtils.getApplicationInfo(
+            context, buildInfoProvider != null ? buildInfoProvider : new BuildInfoProvider(logger));
+    return app != null ? app.metaData : null;
+  }
+
+  private static boolean containsKey(final @NotNull Object metadata, final @NotNull String key) {
+    return metadata instanceof Bundle
+        ? ((Bundle) metadata).containsKey(key)
+        : ((Map<?, ?>) metadata).containsKey(key);
+  }
+}

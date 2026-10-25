@@ -1,0 +1,4 @@
+<resources>
+  <string name="app_name">IchnoisCore Sample Debug</string>
+  <string name="build_type">DEBUG</string>
+</resources>

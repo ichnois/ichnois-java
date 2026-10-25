@@ -1,0 +1,741 @@
+package io.ichnois;
+
+import static io.ichnois.util.FileUtils.readBytesFromFile;
+import static io.ichnois.vendor.Base64.NO_PADDING;
+import static io.ichnois.vendor.Base64.NO_WRAP;
+
+import io.ichnois.clientreport.ClientReport;
+import io.ichnois.exception.IchnoisCoreEnvelopeException;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.protocol.profiling.IchnoisCoreProfile;
+import io.ichnois.util.FileUtils;
+import io.ichnois.util.JsonSerializationUtils;
+import io.ichnois.util.Objects;
+import io.ichnois.vendor.Base64;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Reader;
+import java.io.Writer;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.Charset;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class IchnoisCoreEnvelopeItem {
+
+  // Profiles bigger than 50 MB will be dropped by the backend, so we drop bigger ones
+  private static final long MAX_PROFILE_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
+
+  @SuppressWarnings("CharsetObjectCanBeUsed")
+  private static final Charset UTF_8 = Charset.forName("UTF-8");
+
+  private static final int WRITER_BUFFER_SIZE = 512;
+
+  private final IchnoisCoreEnvelopeItemHeader header;
+  // Either dataFactory is set or data needs to be set.
+  private final @Nullable Callable<byte[]> dataFactory;
+  // TODO: Can we have a slice or a reader here instead?
+  private @Nullable byte[] data;
+
+  IchnoisCoreEnvelopeItem(final @NotNull IchnoisCoreEnvelopeItemHeader header, final byte[] data) {
+    this.header = Objects.requireNonNull(header, "IchnoisCoreEnvelopeItemHeader is required.");
+    this.data = data;
+    this.dataFactory = null;
+  }
+
+  IchnoisCoreEnvelopeItem(
+      final @NotNull IchnoisCoreEnvelopeItemHeader header,
+      final @Nullable Callable<byte[]> dataFactory) {
+    this.header = Objects.requireNonNull(header, "IchnoisCoreEnvelopeItemHeader is required.");
+    this.dataFactory = Objects.requireNonNull(dataFactory, "DataFactory is required.");
+    this.data = null;
+  }
+
+  // TODO: Should be a Stream
+  // dataFactory is a Callable which returns theoretically a nullable result. Our implementations
+  // always provide non-null values.
+  @SuppressWarnings("NullAway")
+  public @NotNull byte[] getData() throws Exception {
+    if (data == null && dataFactory != null) {
+      data = dataFactory.call();
+    }
+    return data;
+  }
+
+  public @NotNull IchnoisCoreEnvelopeItemHeader getHeader() {
+    return header;
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromSession(
+      final @NotNull ISerializer serializer, final @NotNull Session session) throws IOException {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(session, "Session is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(session, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.Session, () -> cachedItem.getBytes().length, "application/json", null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public @Nullable IchnoisCoreEvent getEvent(final @NotNull ISerializer serializer) throws Exception {
+    if (header == null || header.getType() != IchnoisCoreItemType.Event) {
+      return null;
+    }
+    try (final Reader eventReader =
+        new BufferedReader(new InputStreamReader(new ByteArrayInputStream(getData()), UTF_8))) {
+      return serializer.deserialize(eventReader, IchnoisCoreEvent.class);
+    }
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromEvent(
+      final @NotNull ISerializer serializer, final @NotNull IchnoisCoreBaseEvent event) {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(event, "IchnoisCoreEvent is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(event, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.resolve(event),
+            () -> cachedItem.getBytes().length,
+            "application/json",
+            null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public @Nullable IchnoisCoreTransaction getTransaction(final @NotNull ISerializer serializer)
+      throws Exception {
+    if (header == null || header.getType() != IchnoisCoreItemType.Transaction) {
+      return null;
+    }
+    try (final Reader eventReader =
+        new BufferedReader(new InputStreamReader(new ByteArrayInputStream(getData()), UTF_8))) {
+      return serializer.deserialize(eventReader, IchnoisCoreTransaction.class);
+    }
+  }
+
+  public @Nullable IchnoisCoreLogEvents getLogs(final @NotNull ISerializer serializer) throws Exception {
+    if (header == null || header.getType() != IchnoisCoreItemType.Log) {
+      return null;
+    }
+    try (final Reader eventReader =
+        new BufferedReader(new InputStreamReader(new ByteArrayInputStream(getData()), UTF_8))) {
+      return serializer.deserialize(eventReader, IchnoisCoreLogEvents.class);
+    }
+  }
+
+  public @Nullable IchnoisCoreMetricsEvents getMetrics(final @NotNull ISerializer serializer)
+      throws Exception {
+    if (header == null || header.getType() != IchnoisCoreItemType.TraceMetric) {
+      return null;
+    }
+    try (final Reader eventReader =
+        new BufferedReader(new InputStreamReader(new ByteArrayInputStream(getData()), UTF_8))) {
+      return serializer.deserialize(eventReader, IchnoisCoreMetricsEvents.class);
+    }
+  }
+
+  @Deprecated
+  public static IchnoisCoreEnvelopeItem fromUserFeedback(
+      final @NotNull ISerializer serializer, final @NotNull UserFeedback userFeedback) {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(userFeedback, "UserFeedback is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(userFeedback, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.UserFeedback,
+            () -> cachedItem.getBytes().length,
+            "application/json",
+            null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static IchnoisCoreEnvelopeItem fromCheckIn(
+      final @NotNull ISerializer serializer, final @NotNull CheckIn checkIn) {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(checkIn, "CheckIn is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(checkIn, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.CheckIn, () -> cachedItem.getBytes().length, "application/json", null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static IchnoisCoreEnvelopeItem fromAttachment(
+      final @NotNull ISerializer serializer,
+      final @NotNull ILogger logger,
+      final @NotNull Attachment attachment,
+      final long maxAttachmentSize) {
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              if (attachment.getBytes() != null) {
+                final byte[] data = attachment.getBytes();
+                ensureAttachmentSizeLimit(data.length, maxAttachmentSize, attachment.getFilename());
+                return data;
+              } else if (attachment.getSerializable() != null) {
+                final JsonSerializable serializable = attachment.getSerializable();
+                @SuppressWarnings("NullableProblems")
+                final @Nullable byte[] data =
+                    JsonSerializationUtils.bytesFrom(serializer, logger, serializable);
+
+                if (data != null) {
+                  ensureAttachmentSizeLimit(
+                      data.length, maxAttachmentSize, attachment.getFilename());
+                  return data;
+                }
+              } else if (attachment.getPathname() != null) {
+                return readBytesFromFile(attachment.getPathname(), maxAttachmentSize);
+              } else if (attachment.getByteProvider() != null) {
+                @SuppressWarnings("NullableProblems")
+                final @Nullable byte[] data = attachment.getByteProvider().call();
+                if (data != null) {
+                  ensureAttachmentSizeLimit(
+                      data.length, maxAttachmentSize, attachment.getFilename());
+                  return data;
+                }
+              }
+              throw new IchnoisCoreEnvelopeException(
+                  String.format(
+                      "Couldn't attach the attachment %s.\n"
+                          + "Please check that either bytes, serializable, path or provider is set.",
+                      attachment.getFilename()));
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.Attachment,
+            () -> cachedItem.getBytes().length,
+            attachment.getContentType(),
+            attachment.getFilename(),
+            attachment.getAttachmentType());
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  private static void ensureAttachmentSizeLimit(
+      final long size, final long maxAttachmentSize, final @NotNull String filename)
+      throws IchnoisCoreEnvelopeException {
+    if (size > maxAttachmentSize) {
+      throw new IchnoisCoreEnvelopeException(
+          String.format(
+              "Dropping attachment with filename '%s', because the "
+                  + "size of the passed bytes with %d bytes is bigger "
+                  + "than the maximum allowed attachment size of "
+                  + "%d bytes.",
+              filename, size, maxAttachmentSize));
+    }
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromProfileChunk(
+      final @NotNull ProfileChunk profileChunk, final @NotNull ISerializer serializer)
+      throws IchnoisCoreEnvelopeException {
+
+    return fromProfileChunk(profileChunk, serializer, NoOpProfileConverter.getInstance());
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromProfileChunk(
+      final @NotNull ProfileChunk profileChunk,
+      final @NotNull ISerializer serializer,
+      final @NotNull IProfileConverter profileConverter)
+      throws IchnoisCoreEnvelopeException {
+
+    final @Nullable File traceFile = profileChunk.getTraceFile();
+    // Using CachedItem, so we read the trace file in the background
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              if (traceFile != null) {
+                if (!traceFile.exists()) {
+                  throw new IchnoisCoreEnvelopeException(
+                      String.format(
+                          "Dropping profile chunk, because the file '%s' doesn't exists",
+                          traceFile.getName()));
+                }
+
+                if (ProfileChunk.PLATFORM_JAVA.equals(profileChunk.getPlatform())) {
+                  if (!NoOpProfileConverter.getInstance().equals(profileConverter)) {
+                    try {
+                      final IchnoisCoreProfile profile =
+                          profileConverter.convertFromFile(traceFile.getAbsolutePath());
+                      profileChunk.setIchnoisCoreProfile(profile);
+                    } catch (Exception e) {
+                      throw new IchnoisCoreEnvelopeException("Profile conversion failed", e);
+                    }
+                  } else {
+                    throw new IchnoisCoreEnvelopeException(
+                        "No ProfileConverter available, dropping chunk.");
+                  }
+                } else {
+                  // The payload of the profile item is a json including the trace file encoded with
+                  // base64
+                  final byte[] traceFileBytes =
+                      readBytesFromFile(traceFile.getPath(), MAX_PROFILE_CHUNK_SIZE);
+                  final @NotNull String base64Trace =
+                      Base64.encodeToString(traceFileBytes, NO_WRAP | NO_PADDING);
+                  if (base64Trace.isEmpty()) {
+                    throw new IchnoisCoreEnvelopeException("Profiling trace file is empty");
+                  }
+                  profileChunk.setSampledProfile(base64Trace);
+                }
+              }
+
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(profileChunk, writer);
+                return stream.toByteArray();
+              } catch (IOException e) {
+                throw new IchnoisCoreEnvelopeException(
+                    String.format("Failed to serialize profile chunk\n%s", e.getMessage()));
+              } finally {
+                // In any case we delete the trace file
+                if (traceFile != null) {
+                  traceFile.delete();
+                }
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.ProfileChunk,
+            () -> cachedItem.getBytes().length,
+            "application-json",
+            traceFile != null ? traceFile.getName() : null,
+            null,
+            profileChunk.getPlatform(),
+            null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromPerfettoProfileChunk(
+      final @NotNull ProfileChunk profileChunk, final @NotNull ISerializer serializer)
+      throws IchnoisCoreEnvelopeException {
+
+    final @Nullable File traceFile = profileChunk.getTraceFile();
+
+    if (traceFile == null || !traceFile.exists()) {
+      throw new IchnoisCoreEnvelopeException(
+          String.format(
+              "Dropping perfetto profile chunk, because the trace file '%s' doesn't exist",
+              traceFile != null ? traceFile.getName() : "null"));
+    }
+
+    // Perfetto profile chunks are serialized as [JSON metadata][raw .pftrace bytes] with no
+    // delimiter. The server needs meta_length in the envelope header to know where the JSON
+    // ends and the binary begins. meta_length is not known until the CachedItem payload lambda
+    // runs, so we track it here as an envelope serialization concern rather than on ProfileChunk.
+    final AtomicReference<Integer> metaLength = new AtomicReference<>(null);
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              // Serialize JSON metadata
+              final byte[] metadataBytes;
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer = new BufferedWriter(new OutputStreamWriter(stream, UTF_8))) {
+                serializer.serialize(profileChunk, writer);
+                writer.flush();
+                metadataBytes = stream.toByteArray();
+                metaLength.set(metadataBytes.length);
+              } catch (IOException e) {
+                throw new IchnoisCoreEnvelopeException(
+                    String.format(
+                        "Failed to serialize perfetto profile chunk\n%s", e.getMessage()));
+              }
+
+              // Read binary Perfetto trace
+              final byte[] traceBytes;
+              try {
+                traceBytes = readBytesFromFile(traceFile.getPath(), MAX_PROFILE_CHUNK_SIZE);
+              } catch (IOException e) {
+                throw new IchnoisCoreEnvelopeException(
+                    String.format("Failed to read perfetto trace file\n%s", e.getMessage()));
+              } finally {
+                traceFile.delete();
+              }
+
+              // Concatenate: [JSON metadata bytes][raw .pftrace binary bytes]
+              final byte[] payload = new byte[metadataBytes.length + traceBytes.length];
+              System.arraycopy(metadataBytes, 0, payload, 0, metadataBytes.length);
+              System.arraycopy(traceBytes, 0, payload, metadataBytes.length, traceBytes.length);
+
+              return payload;
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.ProfileChunk,
+            () -> cachedItem.getBytes().length,
+            profileChunk.getContentType(),
+            traceFile.getName(),
+            null,
+            profileChunk.getPlatform(),
+            null,
+            // avoid method refs on Android due to some issues with older AGP setups
+            // noinspection Convert2MethodRef
+            () -> metaLength.get());
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromProfilingTrace(
+      final @NotNull ProfilingTraceData profilingTraceData,
+      final long maxTraceFileSize,
+      final @NotNull ISerializer serializer)
+      throws IchnoisCoreEnvelopeException {
+
+    final @NotNull File traceFile = profilingTraceData.getTraceFile();
+    // Using CachedItem, so we read the trace file in the background
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              if (!traceFile.exists()) {
+                throw new IchnoisCoreEnvelopeException(
+                    String.format(
+                        "Dropping profiling trace data, because the file '%s' doesn't exists",
+                        traceFile.getName()));
+              }
+              // The payload of the profile item is a json including the trace file encoded with
+              // base64
+              final byte[] traceFileBytes =
+                  readBytesFromFile(traceFile.getPath(), maxTraceFileSize);
+              final @NotNull String base64Trace =
+                  Base64.encodeToString(traceFileBytes, NO_WRAP | NO_PADDING);
+              if (base64Trace.isEmpty()) {
+                throw new IchnoisCoreEnvelopeException("Profiling trace file is empty");
+              }
+              profilingTraceData.setSampledProfile(base64Trace);
+              profilingTraceData.readDeviceCpuFrequencies();
+
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(profilingTraceData, writer);
+                return stream.toByteArray();
+              } catch (IOException e) {
+                throw new IchnoisCoreEnvelopeException(
+                    String.format("Failed to serialize profiling trace data\n%s", e.getMessage()));
+              } finally {
+                // In any case we delete the trace file
+                traceFile.delete();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.Profile,
+            () -> cachedItem.getBytes().length,
+            "application-json",
+            traceFile.getName());
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static @NotNull IchnoisCoreEnvelopeItem fromClientReport(
+      final @NotNull ISerializer serializer, final @NotNull ClientReport clientReport)
+      throws IOException {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(clientReport, "ClientReport is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(clientReport, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.resolve(clientReport),
+            () -> cachedItem.getBytes().length,
+            "application/json",
+            null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  @Nullable
+  public ClientReport getClientReport(final @NotNull ISerializer serializer) throws Exception {
+    if (header == null || header.getType() != IchnoisCoreItemType.ClientReport) {
+      return null;
+    }
+    try (final Reader eventReader =
+        new BufferedReader(new InputStreamReader(new ByteArrayInputStream(getData()), UTF_8))) {
+      return serializer.deserialize(eventReader, ClientReport.class);
+    }
+  }
+
+  public static IchnoisCoreEnvelopeItem fromReplay(
+      final @NotNull ISerializer serializer,
+      final @NotNull ILogger logger,
+      final @NotNull IchnoisCoreReplayEvent replayEvent,
+      final @Nullable ReplayRecording replayRecording,
+      final boolean cleanupReplayFolder) {
+
+    final File replayVideo = replayEvent.getVideoFile();
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try {
+                try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                    final Writer writer =
+                        new BufferedWriter(
+                            new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                  // relay expects the payload to be in this exact order: [event,rrweb,video]
+                  final Map<String, byte[]> replayPayload = new LinkedHashMap<>();
+                  // first serialize replay event json bytes
+                  serializer.serialize(replayEvent, writer);
+                  replayPayload.put(IchnoisCoreItemType.ReplayEvent.getItemType(), stream.toByteArray());
+                  stream.reset();
+
+                  // next serialize replay recording
+                  if (replayRecording != null) {
+                    serializer.serialize(replayRecording, writer);
+                    replayPayload.put(
+                        IchnoisCoreItemType.ReplayRecording.getItemType(), stream.toByteArray());
+                    stream.reset();
+                  }
+
+                  // next serialize replay video bytes from given file
+                  if (replayVideo != null && replayVideo.exists()) {
+                    final byte[] videoBytes =
+                        readBytesFromFile(
+                            replayVideo.getPath(), IchnoisCoreReplayEvent.REPLAY_VIDEO_MAX_SIZE);
+                    if (videoBytes.length > 0) {
+                      replayPayload.put(IchnoisCoreItemType.ReplayVideo.getItemType(), videoBytes);
+                    }
+                  }
+
+                  return serializeToMsgpack(replayPayload);
+                }
+              } catch (Throwable t) {
+                logger.log(IchnoisCoreLevel.ERROR, "Could not serialize replay recording", t);
+                return null;
+              } finally {
+                if (replayVideo != null) {
+                  if (cleanupReplayFolder) {
+                    FileUtils.deleteRecursively(replayVideo.getParentFile());
+                  } else {
+                    replayVideo.delete();
+                  }
+                }
+              }
+            });
+
+    final IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.ReplayVideo, () -> cachedItem.getBytes().length, null, null);
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static IchnoisCoreEnvelopeItem fromLogs(
+      final @NotNull ISerializer serializer, final @NotNull IchnoisCoreLogEvents logEvents) {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(logEvents, "IchnoisCoreLogEvents is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(logEvents, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.Log,
+            () -> cachedItem.getBytes().length,
+            "application/vnd.ichnois.items.log+json",
+            null,
+            null,
+            null,
+            logEvents.getItems().size());
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  public static IchnoisCoreEnvelopeItem fromMetrics(
+      final @NotNull ISerializer serializer, final @NotNull IchnoisCoreMetricsEvents metricsEvents) {
+    Objects.requireNonNull(serializer, "ISerializer is required.");
+    Objects.requireNonNull(metricsEvents, "IchnoisCoreMetricsEvents is required.");
+
+    final CachedItem cachedItem =
+        new CachedItem(
+            () -> {
+              try (final ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                  final Writer writer =
+                      new BufferedWriter(
+                          new OutputStreamWriter(stream, UTF_8), WRITER_BUFFER_SIZE)) {
+                serializer.serialize(metricsEvents, writer);
+                return stream.toByteArray();
+              }
+            });
+
+    IchnoisCoreEnvelopeItemHeader itemHeader =
+        new IchnoisCoreEnvelopeItemHeader(
+            IchnoisCoreItemType.TraceMetric,
+            () -> cachedItem.getBytes().length,
+            "application/vnd.ichnois.items.trace-metric+json",
+            null,
+            null,
+            null,
+            metricsEvents.getItems().size());
+
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    return new IchnoisCoreEnvelopeItem(itemHeader, () -> cachedItem.getBytes());
+  }
+
+  private static class CachedItem {
+    private @Nullable byte[] bytes;
+    private final @Nullable Callable<byte[]> dataFactory;
+
+    CachedItem(final @Nullable Callable<byte[]> dataFactory) {
+      this.dataFactory = dataFactory;
+    }
+
+    @NotNull
+    byte[] getBytes() throws Exception {
+      if (bytes == null && dataFactory != null) {
+        bytes = dataFactory.call();
+      }
+      return orEmptyArray(bytes);
+    }
+
+    private static @NotNull byte[] orEmptyArray(final @Nullable byte[] bytes) {
+      return bytes != null ? bytes : new byte[] {};
+    }
+  }
+
+  @SuppressWarnings({"UnnecessaryParentheses"})
+  private static byte[] serializeToMsgpack(final @NotNull Map<String, byte[]> map)
+      throws IOException {
+    try (final ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+
+      // Write map header
+      baos.write((byte) (0x80 | map.size()));
+
+      // Iterate over the map and serialize each key-value pair
+      for (final Map.Entry<String, byte[]> entry : map.entrySet()) {
+        // Pack the key as a string
+        final byte[] keyBytes = entry.getKey().getBytes(UTF_8);
+        final int keyLength = keyBytes.length;
+        // string up to 255 chars
+        baos.write((byte) (0xd9));
+        baos.write((byte) (keyLength));
+        baos.write(keyBytes);
+
+        // Pack the value as a binary string
+        final byte[] valueBytes = entry.getValue();
+        final int valueLength = valueBytes.length;
+        // We will always use the 4 bytes data length for simplicity.
+        baos.write((byte) (0xc6));
+        baos.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(valueLength).array());
+        baos.write(valueBytes);
+      }
+
+      return baos.toByteArray();
+    }
+  }
+}

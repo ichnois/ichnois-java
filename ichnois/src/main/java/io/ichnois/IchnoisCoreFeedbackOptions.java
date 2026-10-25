@@ -1,0 +1,794 @@
+package io.ichnois;
+
+import io.ichnois.protocol.Feedback;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.util.LoadClass;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+public final class IchnoisCoreFeedbackOptions {
+  // User and Form
+  /** Requires the name field on the feedback form to be filled in. Defaults to false. */
+  private boolean isNameRequired = false;
+
+  /**
+   * Displays the name field on the feedback form. Ignored if isNameRequired is true. Defaults to
+   * true.
+   */
+  private boolean showName = true;
+
+  /** Requires the email field on the feedback form to be filled in. Defaults to false. */
+  private boolean isEmailRequired = false;
+
+  /**
+   * Displays the email field on the feedback form. Ignored if isEmailRequired is true. Defaults to
+   * true.
+   */
+  private boolean showEmail = true;
+
+  /**
+   * Sets the email and name fields to the corresponding IchnoisCore SDK user fields that were called
+   * with IchnoisCoreSDK.setUser. Defaults to true.
+   */
+  private boolean useIchnoisCoreUser = true;
+
+  /** Displays the IchnoisCore logo inside of the form. Defaults to true. */
+  private boolean showBranding = true;
+
+  /** Shows the feedback form when a shake gesture is detected. Defaults to {@code false}. */
+  private boolean useShakeGesture = false;
+
+  /**
+   * Displays a button on the feedback form that allows the user to attach a screenshot from the
+   * device gallery. Only supported on Android, and requires the androidx.activity dependency and a
+   * ComponentActivity host; the button is hidden otherwise. Defaults to true.
+   */
+  private boolean enableAttachScreenshot = true;
+
+  // Text Customization
+  /** The title of the feedback form. Defaults to "Report a Bug". */
+  private @NotNull CharSequence formTitle = "Report a Bug";
+
+  /** The label of the submit button. Defaults to "Send Bug Report". */
+  private @NotNull CharSequence submitButtonLabel = "Send Bug Report";
+
+  /** The label of the cancel button. Defaults to "Cancel". */
+  private @NotNull CharSequence cancelButtonLabel = "Cancel";
+
+  /** The label next to the name input field. Defaults to "Name". */
+  private @NotNull CharSequence nameLabel = "Name";
+
+  /** The placeholder in the name input field. Defaults to "Your Name". */
+  private @NotNull CharSequence namePlaceholder = "Your Name";
+
+  /** The label next to the email input field. Defaults to "Email". */
+  private @NotNull CharSequence emailLabel = "Email";
+
+  /** The placeholder in the email input field. Defaults to "your.email@example.org". */
+  private @NotNull CharSequence emailPlaceholder = "your.email@example.org";
+
+  /** The text to attach to the title label for a required field. Defaults to " (Required)". */
+  private @NotNull CharSequence isRequiredLabel = " (Required)";
+
+  /** The label of the feedback description input field. Defaults to "Description". */
+  private @NotNull CharSequence messageLabel = "Description";
+
+  /**
+   * The placeholder in the feedback description input field. Defaults to "What's the bug? What did
+   * you expect?".
+   */
+  private @NotNull CharSequence messagePlaceholder = "What's the bug? What did you expect?";
+
+  /**
+   * The message displayed after a successful feedback submission. Defaults to "Thank you for your
+   * report!".
+   */
+  private @NotNull CharSequence successMessageText = "Thank you for your report!";
+
+  /** The label of the button to attach a screenshot. Defaults to "Add a screenshot". */
+  private @NotNull CharSequence addScreenshotButtonLabel = "Add a screenshot";
+
+  /** The label of the button to remove an attached screenshot. Defaults to "Remove screenshot". */
+  private @NotNull CharSequence removeScreenshotButtonLabel = "Remove screenshot";
+
+  /**
+   * The message displayed when the selected screenshot exceeds the maximum attachment size.
+   * Defaults to "Screenshot is too large".
+   */
+  private @NotNull CharSequence screenshotTooLargeMessageText = "Screenshot is too large";
+
+  // Callbacks
+  /** Callback called when the feedback form is opened. */
+  private @Nullable Runnable onFormOpen;
+
+  /** Callback called when the feedback form is closed. */
+  private @Nullable Runnable onFormClose;
+
+  /** Callback called when feedback is successfully submitted via the prepared form. */
+  private @Nullable IchnoisCoreFeedbackCallback onSubmitSuccess;
+
+  /** Callback called when there is an error submitting feedback via the prepared form. */
+  private @Nullable IchnoisCoreFeedbackCallback onSubmitError;
+
+  private @NotNull IFormHandler iFormHandler;
+
+  private @NotNull IShakeController shakeController;
+
+  private @NotNull LoadClass loadClass;
+
+  IchnoisCoreFeedbackOptions(
+      final @NotNull IFormHandler iFormHandler,
+      final @NotNull IShakeController shakeController,
+      final @NotNull LoadClass loadClass) {
+    this.iFormHandler = iFormHandler;
+    this.shakeController = shakeController;
+    this.loadClass = loadClass;
+  }
+
+  /** Creates a copy of the passed {@link IchnoisCoreFeedbackOptions}. */
+  public IchnoisCoreFeedbackOptions(final @NotNull IchnoisCoreFeedbackOptions other) {
+    this.isNameRequired = other.isNameRequired;
+    this.showName = other.showName;
+    this.isEmailRequired = other.isEmailRequired;
+    this.showEmail = other.showEmail;
+    this.useIchnoisCoreUser = other.useIchnoisCoreUser;
+    this.showBranding = other.showBranding;
+    this.useShakeGesture = other.useShakeGesture;
+    this.enableAttachScreenshot = other.enableAttachScreenshot;
+    this.formTitle = other.formTitle;
+    this.submitButtonLabel = other.submitButtonLabel;
+    this.cancelButtonLabel = other.cancelButtonLabel;
+    this.nameLabel = other.nameLabel;
+    this.namePlaceholder = other.namePlaceholder;
+    this.emailLabel = other.emailLabel;
+    this.emailPlaceholder = other.emailPlaceholder;
+    this.isRequiredLabel = other.isRequiredLabel;
+    this.messageLabel = other.messageLabel;
+    this.messagePlaceholder = other.messagePlaceholder;
+    this.successMessageText = other.successMessageText;
+    this.addScreenshotButtonLabel = other.addScreenshotButtonLabel;
+    this.removeScreenshotButtonLabel = other.removeScreenshotButtonLabel;
+    this.screenshotTooLargeMessageText = other.screenshotTooLargeMessageText;
+    this.onFormOpen = other.onFormOpen;
+    this.onFormClose = other.onFormClose;
+    this.onSubmitSuccess = other.onSubmitSuccess;
+    this.onSubmitError = other.onSubmitError;
+    this.iFormHandler = other.iFormHandler;
+    this.shakeController = other.shakeController;
+    this.loadClass = other.loadClass;
+  }
+
+  /**
+   * Requires the name field on the feedback form to be filled in. Defaults to false.
+   *
+   * @return true if the name field is required
+   */
+  public boolean isNameRequired() {
+    return isNameRequired;
+  }
+
+  /**
+   * Sets whether the name field on the feedback form is required. Defaults to false.
+   *
+   * @param isNameRequired true if the name field is required
+   */
+  public void setNameRequired(final boolean isNameRequired) {
+    this.isNameRequired = isNameRequired;
+  }
+
+  /**
+   * Displays the name field on the feedback form. Ignored if isNameRequired is true. Defaults to
+   * true.
+   *
+   * @return true if the name field is shown
+   */
+  public boolean isShowName() {
+    return showName;
+  }
+
+  /**
+   * Sets whether the name field on the feedback form is shown. Ignored if isNameRequired is true.
+   * Defaults to true.
+   *
+   * @param showName true if the name field is shown
+   */
+  public void setShowName(final boolean showName) {
+    this.showName = showName;
+  }
+
+  /**
+   * Requires the email field on the feedback form to be filled in. Defaults to false.
+   *
+   * @return true if the email field is required
+   */
+  public boolean isEmailRequired() {
+    return isEmailRequired;
+  }
+
+  /**
+   * Sets whether the email field on the feedback form is required. Defaults to false.
+   *
+   * @param isEmailRequired true if the email field is required
+   */
+  public void setEmailRequired(boolean isEmailRequired) {
+    this.isEmailRequired = isEmailRequired;
+  }
+
+  /**
+   * Displays the email field on the feedback form. Ignored if isEmailRequired is true. Defaults to
+   * true.
+   *
+   * @return true if the email field is shown
+   */
+  public boolean isShowEmail() {
+    return showEmail;
+  }
+
+  /**
+   * Sets whether the email field on the feedback form is shown. Ignored if isEmailRequired is true.
+   * Defaults to true.
+   *
+   * @param showEmail true if the email field is shown
+   */
+  public void setShowEmail(final boolean showEmail) {
+    this.showEmail = showEmail;
+  }
+
+  /**
+   * Sets the email and name fields to the corresponding IchnoisCore SDK user fields that were called
+   * with IchnoisCoreSDK.setUser. Defaults to true.
+   *
+   * @return true if the email and name fields are set to the IchnoisCore SDK user fields
+   */
+  public boolean isUseIchnoisCoreUser() {
+    return useIchnoisCoreUser;
+  }
+
+  /**
+   * Sets whether the email and name fields are set to the corresponding IchnoisCore SDK user fields that
+   * were called with IchnoisCoreSDK.setUser. Defaults to true.
+   *
+   * @param useIchnoisCoreUser true if the email and name fields are set to the IchnoisCore SDK user fields
+   */
+  public void setUseIchnoisCoreUser(final boolean useIchnoisCoreUser) {
+    this.useIchnoisCoreUser = useIchnoisCoreUser;
+  }
+
+  /**
+   * Displays the IchnoisCore logo inside of the form. Defaults to true.
+   *
+   * @return true if the IchnoisCore logo is shown
+   */
+  public boolean isShowBranding() {
+    return showBranding;
+  }
+
+  /**
+   * Sets whether the IchnoisCore logo is shown inside of the form. Defaults to true.
+   *
+   * @param showBranding true if the IchnoisCore logo is shown
+   */
+  public void setShowBranding(final boolean showBranding) {
+    this.showBranding = showBranding;
+  }
+
+  /**
+   * Shows the feedback form when a shake gesture is detected. Defaults to {@code false}.
+   *
+   * @return true if shake gesture triggers the feedback form
+   */
+  public boolean isUseShakeGesture() {
+    return useShakeGesture;
+  }
+
+  /**
+   * Sets whether the feedback form is shown when a shake gesture is detected.
+   *
+   * @param useShakeGesture true to enable shake gesture triggering
+   */
+  public void setUseShakeGesture(final boolean useShakeGesture) {
+    this.useShakeGesture = useShakeGesture;
+  }
+
+  /**
+   * Displays a button on the feedback form that allows the user to attach a screenshot from the
+   * device gallery. Only supported on Android, and requires the androidx.activity dependency and a
+   * ComponentActivity host; the button is hidden otherwise. Defaults to true.
+   *
+   * @return true if the attach screenshot button is shown
+   */
+  public boolean isEnableAttachScreenshot() {
+    return enableAttachScreenshot;
+  }
+
+  /**
+   * Sets whether the attach screenshot button is shown on the feedback form. Only supported on
+   * Android, and requires the androidx.activity dependency and a ComponentActivity host; the button
+   * is hidden otherwise. Defaults to true.
+   *
+   * @param enableAttachScreenshot true if the attach screenshot button should be shown
+   */
+  public void setEnableAttachScreenshot(final boolean enableAttachScreenshot) {
+    this.enableAttachScreenshot = enableAttachScreenshot;
+  }
+
+  /**
+   * The title of the feedback form. Defaults to "Report a Bug".
+   *
+   * @return the title of the feedback form
+   */
+  public @NotNull CharSequence getFormTitle() {
+    return formTitle;
+  }
+
+  /**
+   * Sets the title of the feedback form.
+   *
+   * @param formTitle the title of the feedback form
+   */
+  public void setFormTitle(final @NotNull CharSequence formTitle) {
+    this.formTitle = formTitle;
+  }
+
+  /**
+   * The label of the submit button. Defaults to "Send Bug Report".
+   *
+   * @return the label of the submit button
+   */
+  public @NotNull CharSequence getSubmitButtonLabel() {
+    return submitButtonLabel;
+  }
+
+  /**
+   * Sets the label of the submit button. Defaults to "Send Bug Report".
+   *
+   * @param submitButtonLabel the label of the submit button
+   */
+  public void setSubmitButtonLabel(final @NotNull CharSequence submitButtonLabel) {
+    this.submitButtonLabel = submitButtonLabel;
+  }
+
+  /**
+   * The label of the cancel button. Defaults to "Cancel".
+   *
+   * @return the label of the cancel button
+   */
+  public @NotNull CharSequence getCancelButtonLabel() {
+    return cancelButtonLabel;
+  }
+
+  /**
+   * Sets the label of the cancel button.
+   *
+   * @param cancelButtonLabel the label of the cancel button
+   */
+  public void setCancelButtonLabel(final @NotNull CharSequence cancelButtonLabel) {
+    this.cancelButtonLabel = cancelButtonLabel;
+  }
+
+  /**
+   * The label next to the name input field. Defaults to "Name".
+   *
+   * @return the label next to the name input field
+   */
+  public @NotNull CharSequence getNameLabel() {
+    return nameLabel;
+  }
+
+  /**
+   * Sets the label next to the name input field.
+   *
+   * @param nameLabel the label next to the name input field
+   */
+  public void setNameLabel(final @NotNull CharSequence nameLabel) {
+    this.nameLabel = nameLabel;
+  }
+
+  /**
+   * The placeholder in the name input field. Defaults to "Your Name".
+   *
+   * @return the placeholder in the name input field
+   */
+  public @NotNull CharSequence getNamePlaceholder() {
+    return namePlaceholder;
+  }
+
+  /**
+   * Sets the placeholder in the name input field.
+   *
+   * @param namePlaceholder the placeholder in the name input field
+   */
+  public void setNamePlaceholder(final @NotNull CharSequence namePlaceholder) {
+    this.namePlaceholder = namePlaceholder;
+  }
+
+  /**
+   * The label next to the email input field. Defaults to "Email".
+   *
+   * @return the label next to the email input field
+   */
+  public @NotNull CharSequence getEmailLabel() {
+    return emailLabel;
+  }
+
+  /**
+   * Sets the label next to the email input field.
+   *
+   * @param emailLabel the label next to the email input field
+   */
+  public void setEmailLabel(final @NotNull CharSequence emailLabel) {
+    this.emailLabel = emailLabel;
+  }
+
+  /**
+   * The placeholder in the email input field. Defaults to "your.email@example.org".
+   *
+   * @return the placeholder in the email input field
+   */
+  public @NotNull CharSequence getEmailPlaceholder() {
+    return emailPlaceholder;
+  }
+
+  /**
+   * Sets the placeholder in the email input field.
+   *
+   * @param emailPlaceholder the placeholder in the email input field
+   */
+  public void setEmailPlaceholder(final @NotNull CharSequence emailPlaceholder) {
+    this.emailPlaceholder = emailPlaceholder;
+  }
+
+  /**
+   * The text to attach to the title label for a required field. Defaults to " (Required)".
+   *
+   * @return the text to attach to the title label for a required field
+   */
+  public @NotNull CharSequence getIsRequiredLabel() {
+    return isRequiredLabel;
+  }
+
+  /**
+   * Sets the text to attach to the title label for a required field.
+   *
+   * @param isRequiredLabel the text to attach to the title label for a required field
+   */
+  public void setIsRequiredLabel(final @NotNull CharSequence isRequiredLabel) {
+    this.isRequiredLabel = isRequiredLabel;
+  }
+
+  /**
+   * The label of the feedback description input field. Defaults to "Description".
+   *
+   * @return the label of the feedback description input field
+   */
+  public @NotNull CharSequence getMessageLabel() {
+    return messageLabel;
+  }
+
+  /**
+   * Sets the label of the feedback description input field.
+   *
+   * @param messageLabel the label of the feedback description input field
+   */
+  public void setMessageLabel(final @NotNull CharSequence messageLabel) {
+    this.messageLabel = messageLabel;
+  }
+
+  /**
+   * The placeholder in the feedback description input field. Defaults to "What's the bug? What did
+   * you expect?".
+   *
+   * @return the placeholder in the feedback description input field
+   */
+  public @NotNull CharSequence getMessagePlaceholder() {
+    return messagePlaceholder;
+  }
+
+  /**
+   * Sets the placeholder in the feedback description input field.
+   *
+   * @param messagePlaceholder the placeholder in the feedback description input field
+   */
+  public void setMessagePlaceholder(final @NotNull CharSequence messagePlaceholder) {
+    this.messagePlaceholder = messagePlaceholder;
+  }
+
+  /**
+   * The message displayed after a successful feedback submission. Defaults to "Thank you for your
+   * report!".
+   *
+   * @return the message displayed after a successful feedback submission
+   */
+  public @NotNull CharSequence getSuccessMessageText() {
+    return successMessageText;
+  }
+
+  /**
+   * Sets the message displayed after a successful feedback submission.
+   *
+   * @param successMessageText the message displayed after a successful feedback submission
+   */
+  public void setSuccessMessageText(final @NotNull CharSequence successMessageText) {
+    this.successMessageText = successMessageText;
+  }
+
+  /**
+   * The label of the button to attach a screenshot. Defaults to "Add a screenshot".
+   *
+   * @return the label of the button to attach a screenshot
+   */
+  public @NotNull CharSequence getAddScreenshotButtonLabel() {
+    return addScreenshotButtonLabel;
+  }
+
+  /**
+   * Sets the label of the button to attach a screenshot.
+   *
+   * @param addScreenshotButtonLabel the label of the button to attach a screenshot
+   */
+  public void setAddScreenshotButtonLabel(final @NotNull CharSequence addScreenshotButtonLabel) {
+    this.addScreenshotButtonLabel = addScreenshotButtonLabel;
+  }
+
+  /**
+   * The label of the button to remove an attached screenshot. Defaults to "Remove screenshot".
+   *
+   * @return the label of the button to remove an attached screenshot
+   */
+  public @NotNull CharSequence getRemoveScreenshotButtonLabel() {
+    return removeScreenshotButtonLabel;
+  }
+
+  /**
+   * Sets the label of the button to remove an attached screenshot.
+   *
+   * @param removeScreenshotButtonLabel the label of the button to remove an attached screenshot
+   */
+  public void setRemoveScreenshotButtonLabel(
+      final @NotNull CharSequence removeScreenshotButtonLabel) {
+    this.removeScreenshotButtonLabel = removeScreenshotButtonLabel;
+  }
+
+  /**
+   * The message displayed when the selected screenshot exceeds the maximum attachment size.
+   * Defaults to "Screenshot is too large".
+   *
+   * @return the message displayed when the selected screenshot is too large
+   */
+  public @NotNull CharSequence getScreenshotTooLargeMessageText() {
+    return screenshotTooLargeMessageText;
+  }
+
+  /**
+   * Sets the message displayed when the selected screenshot exceeds the maximum attachment size.
+   *
+   * @param screenshotTooLargeMessageText the message displayed when the selected screenshot is too
+   *     large
+   */
+  public void setScreenshotTooLargeMessageText(
+      final @NotNull CharSequence screenshotTooLargeMessageText) {
+    this.screenshotTooLargeMessageText = screenshotTooLargeMessageText;
+  }
+
+  // Callbacks
+  /**
+   * Callback called when the feedback form is opened.
+   *
+   * @return the callback to be called when the feedback form is opened
+   */
+  public @Nullable Runnable getOnFormOpen() {
+    return onFormOpen;
+  }
+
+  /**
+   * Sets the callback to be called when the feedback form is opened.
+   *
+   * @param onFormOpen the callback to be called when the feedback form is opened
+   */
+  public void setOnFormOpen(final @Nullable Runnable onFormOpen) {
+    this.onFormOpen = onFormOpen;
+  }
+
+  /**
+   * Callback called when the feedback form is closed.
+   *
+   * @return the callback to be called when the feedback form is closed
+   */
+  public @Nullable Runnable getOnFormClose() {
+    return onFormClose;
+  }
+
+  /**
+   * Sets the callback to be called when the feedback form is closed.
+   *
+   * @param onFormClose the callback to be called when the feedback form is closed
+   */
+  public void setOnFormClose(final @Nullable Runnable onFormClose) {
+    this.onFormClose = onFormClose;
+  }
+
+  /**
+   * Callback called when feedback is successfully submitted via the prepared form.
+   *
+   * @return the callback to be called when feedback is successfully submitted via the prepared form
+   */
+  public @Nullable IchnoisCoreFeedbackOptions.IchnoisCoreFeedbackCallback getOnSubmitSuccess() {
+    return onSubmitSuccess;
+  }
+
+  /**
+   * Sets the callback to be called when feedback is successfully submitted via the prepared form.
+   *
+   * @param onSubmitSuccess the callback to be called when feedback is successfully submitted via
+   *     the prepared form
+   */
+  public void setOnSubmitSuccess(
+      final @Nullable IchnoisCoreFeedbackOptions.IchnoisCoreFeedbackCallback onSubmitSuccess) {
+    this.onSubmitSuccess = onSubmitSuccess;
+  }
+
+  /**
+   * Callback called when there is an error submitting feedback via the prepared form.
+   *
+   * @return the callback to be called when there is an error submitting feedback via the prepared
+   *     form
+   */
+  public @Nullable IchnoisCoreFeedbackCallback getOnSubmitError() {
+    return onSubmitError;
+  }
+
+  /**
+   * Sets the callback to be called when there is an error submitting feedback via the prepared
+   * form.
+   *
+   * @param onSubmitError the callback to be called when there is an error submitting feedback via
+   *     the prepared form
+   */
+  public void setOnSubmitError(final @Nullable IchnoisCoreFeedbackCallback onSubmitError) {
+    this.onSubmitError = onSubmitError;
+  }
+
+  /**
+   * Sets the form handler to be used to show the feedback form.
+   *
+   * @param iFormHandler the form handler to be used to show the feedback form
+   */
+  @ApiStatus.Internal
+  public void setFormHandler(final @NotNull IFormHandler iFormHandler) {
+    this.iFormHandler = iFormHandler;
+  }
+
+  /**
+   * Gets the form handler to be used to show the feedback form.
+   *
+   * @return the form handler to be used to show the feedback form
+   */
+  @ApiStatus.Internal
+  public @NotNull IFormHandler getFormHandler() {
+    return iFormHandler;
+  }
+
+  /**
+   * Sets the controller to be used to enable/disable shake-to-report at runtime.
+   *
+   * @param shakeController the controller to be used to enable/disable shake-to-report at runtime
+   */
+  @ApiStatus.Internal
+  public void setShakeController(final @NotNull IShakeController shakeController) {
+    this.shakeController = shakeController;
+  }
+
+  /**
+   * Gets the controller to be used to enable/disable shake-to-report at runtime.
+   *
+   * @return the controller to be used to enable/disable shake-to-report at runtime
+   */
+  @ApiStatus.Internal
+  public @NotNull IShakeController getShakeController() {
+    return shakeController;
+  }
+
+  @Override
+  public String toString() {
+    return "IchnoisCoreFeedbackOptions{"
+        + "isNameRequired="
+        + isNameRequired
+        + ", showName="
+        + showName
+        + ", isEmailRequired="
+        + isEmailRequired
+        + ", showEmail="
+        + showEmail
+        + ", useIchnoisCoreUser="
+        + useIchnoisCoreUser
+        + ", showBranding="
+        + showBranding
+        + ", useShakeGesture="
+        + useShakeGesture
+        + ", enableScreenshot="
+        + enableAttachScreenshot
+        + ", formTitle='"
+        + formTitle
+        + '\''
+        + ", submitButtonLabel='"
+        + submitButtonLabel
+        + '\''
+        + ", cancelButtonLabel='"
+        + cancelButtonLabel
+        + '\''
+        + ", nameLabel='"
+        + nameLabel
+        + '\''
+        + ", namePlaceholder='"
+        + namePlaceholder
+        + '\''
+        + ", emailLabel='"
+        + emailLabel
+        + '\''
+        + ", emailPlaceholder='"
+        + emailPlaceholder
+        + '\''
+        + ", isRequiredLabel='"
+        + isRequiredLabel
+        + '\''
+        + ", messageLabel='"
+        + messageLabel
+        + '\''
+        + ", messagePlaceholder='"
+        + messagePlaceholder
+        + '\''
+        + ", addScreenshotButtonLabel='"
+        + addScreenshotButtonLabel
+        + '\''
+        + ", removeScreenshotButtonLabel='"
+        + removeScreenshotButtonLabel
+        + '\''
+        + ", screenshotTooLargeMessageText='"
+        + screenshotTooLargeMessageText
+        + '\''
+        + '}';
+  }
+
+  @ApiStatus.Internal
+  public @NotNull LoadClass getLoadClass() {
+    return loadClass;
+  }
+
+  @ApiStatus.Internal
+  public void setLoadClass(final @NotNull LoadClass loadClass) {
+    this.loadClass = loadClass;
+  }
+
+  public interface IchnoisCoreFeedbackCallback {
+    void call(final @NotNull Feedback feedback);
+  }
+
+  @ApiStatus.Internal
+  public interface IFormHandler {
+    void showForm(
+        final @Nullable IchnoisCoreId associatedEventId,
+        final @Nullable IchnoisCoreFeedbackOptions.OptionsConfigurator configurator);
+  }
+
+  /** Controls shake-to-report at runtime, overriding {@link #isUseShakeGesture()}. */
+  @ApiStatus.Internal
+  public interface IShakeController {
+    void enableOnShake();
+
+    void disableOnShake();
+
+    boolean isOnShakeEnabled();
+  }
+
+  /** Configuration callback for feedback options. */
+  public interface OptionsConfigurator {
+
+    /**
+     * configure the feedback options
+     *
+     * @param options the feedback options
+     */
+    void configure(final @NotNull IchnoisCoreFeedbackOptions options);
+  }
+}

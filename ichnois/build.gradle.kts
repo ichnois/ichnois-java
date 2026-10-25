@@ -1,0 +1,94 @@
+import net.ltgt.gradle.errorprone.errorprone
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+plugins {
+  `java-library`
+  id("io.ichnois.javadoc")
+  alias(libs.plugins.kotlin.jvm)
+  alias(libs.plugins.errorprone)
+  alias(libs.plugins.gradle.versions)
+  alias(libs.plugins.buildconfig)
+  id("io.ichnois.animalsniffer.android")
+}
+
+tasks.named<KotlinCompile>("compileKotlin") {
+  compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+}
+
+dependencies {
+  errorprone(libs.errorprone.core)
+  errorprone(libs.nopen.checker)
+  errorprone(libs.nullaway)
+  compileOnly(libs.jetbrains.annotations)
+  compileOnly(libs.nopen.annotations)
+  // tests
+  testImplementation(kotlin(Config.kotlinStdLib))
+  testImplementation(libs.awaitility.kotlin)
+  testImplementation(libs.google.truth)
+  testImplementation(libs.javafaker)
+  testImplementation(libs.kotlin.test.junit)
+  testImplementation(libs.mockito.kotlin)
+  testImplementation(libs.mockito.core)
+  testImplementation(libs.msgpack)
+  testImplementation(libs.okio)
+  testImplementation(projects.ichnoisTestSupport)
+}
+
+ichnoisAnimalSniffer {
+  // We manually check on Android if it's available (API 26+).
+  ignoreClasses("java.time.Instant")
+  // Uses java.util.function.Supplier, but must be manually invoked.
+  mainExcludes("**/io/ichnois/IchnoisCoreWrapper.class")
+}
+
+tasks {
+  test {
+    // java.lang open is needed by tests that reflectively rewrite Class names; it was previously
+    // provided implicitly by the jacoco test agent, which has been removed.
+    jvmArgs(
+      "--add-opens",
+      "java.base/java.util.concurrent=ALL-UNNAMED",
+      "--add-opens",
+      "java.base/java.lang=ALL-UNNAMED",
+    )
+    // IchnoisCoreEnvelopeItemTest."fromAttachment with file SecurityManager denies read access" installs
+    // a SecurityManager to simulate unreadable attachments; JDK 18+ refuses that without opt-in.
+    systemProperty("java.security.manager", "allow")
+    environment["ICHNOIS_TEST_PROPERTY"] = "\"some-value\""
+    environment["ICHNOIS_TEST_MAP_KEY1"] = "\"value1\""
+    environment["ICHNOIS_TEST_MAP_KEY2"] = "value2"
+  }
+}
+
+buildConfig {
+  useJavaOutput()
+  packageName("io.ichnois")
+  buildConfigField("String", "ICHNOIS_JAVA_SDK_NAME", "\"${Config.IchnoisCore.ICHNOIS_JAVA_SDK_NAME}\"")
+  buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+  dependsOn(tasks.generateBuildConfig)
+  options.errorprone {
+    check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
+    option("NullAway:AnnotatedPackages", "io.ichnois")
+  }
+  options.errorprone.errorproneArgs.add("-XepExcludedPaths:.*/io/ichnois/vendor/.*")
+}
+
+tasks.jar {
+  from(rootProject.file("THIRD_PARTY_NOTICES.md")) {
+    into("META-INF")
+    rename { "ICHNOIS_THIRD_PARTY_NOTICES.md" }
+  }
+  manifest {
+    attributes(
+      "IchnoisCore-Version-Name" to project.version,
+      "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_JAVA_SDK_NAME,
+      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois",
+      "Implementation-Vendor" to "IchnoisCore",
+      "Implementation-Title" to project.name,
+      "Implementation-Version" to project.version,
+    )
+  }
+}

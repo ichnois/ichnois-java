@@ -1,0 +1,176 @@
+public final class io/ichnois/opentelemetry/OpenTelemetryAttributesExtractor {
+	public fun <init> ()V
+	public fun extract (Lio/opentelemetry/sdk/trace/data/SpanData;Lio/ichnois/IScope;Lio/ichnois/IchnoisCoreOptions;)V
+	public fun extractUrl (Lio/opentelemetry/api/common/Attributes;Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/String;
+}
+
+public final class io/ichnois/opentelemetry/OpenTelemetryLinkErrorEventProcessor : io/ichnois/internal/eventprocessor/IchnoisCoreEventProcessor {
+	public fun <init> ()V
+	public fun getOrder ()Ljava/lang/Long;
+	public fun process (Lio/ichnois/IchnoisCoreEvent;Lio/ichnois/Hint;)Lio/ichnois/IchnoisCoreEvent;
+}
+
+public final class io/ichnois/opentelemetry/OtelInternalSpanDetectionUtil {
+	public fun <init> ()V
+	public static fun isIchnoisCoreRequest (Lio/ichnois/IScopes;Lio/opentelemetry/api/trace/SpanKind;Lio/opentelemetry/api/common/Attributes;)Z
+}
+
+public final class io/ichnois/opentelemetry/OtelSamplingUtil {
+	public fun <init> ()V
+	public static fun extractSamplingDecision (Lio/opentelemetry/api/common/Attributes;)Lio/ichnois/TracesSamplingDecision;
+}
+
+public final class io/ichnois/opentelemetry/OtelIchnoisCorePropagator : io/opentelemetry/context/propagation/TextMapPropagator {
+	public fun <init> ()V
+	public fun extract (Lio/opentelemetry/context/Context;Ljava/lang/Object;Lio/opentelemetry/context/propagation/TextMapGetter;)Lio/opentelemetry/context/Context;
+	public fun fields ()Ljava/util/Collection;
+	public fun inject (Lio/opentelemetry/context/Context;Ljava/lang/Object;Lio/opentelemetry/context/propagation/TextMapSetter;)V
+}
+
+public final class io/ichnois/opentelemetry/OtelIchnoisCoreSpanProcessor : io/opentelemetry/sdk/trace/SpanProcessor {
+	public fun <init> ()V
+	public fun isEndRequired ()Z
+	public fun isStartRequired ()Z
+	public fun onEnd (Lio/opentelemetry/sdk/trace/ReadableSpan;)V
+	public fun onStart (Lio/opentelemetry/context/Context;Lio/opentelemetry/sdk/trace/ReadWriteSpan;)V
+}
+
+public final class io/ichnois/opentelemetry/OtelSpanContext : io/ichnois/SpanContext {
+	public fun <init> (Lio/opentelemetry/sdk/trace/ReadWriteSpan;Lio/ichnois/TracesSamplingDecision;Lio/ichnois/opentelemetry/IOtelSpanWrapper;Lio/ichnois/SpanId;Lio/ichnois/Baggage;)V
+	public fun getOperation ()Ljava/lang/String;
+	public fun getStatus ()Lio/ichnois/SpanStatus;
+	public fun setOperation (Ljava/lang/String;)V
+	public fun setStatus (Lio/ichnois/SpanStatus;)V
+}
+
+public final class io/ichnois/opentelemetry/OtelSpanInfo {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/ichnois/protocol/TransactionNameSource;)V
+	public fun getDescription ()Ljava/lang/String;
+	public fun getOp ()Ljava/lang/String;
+	public fun getTransactionNameSource ()Lio/ichnois/protocol/TransactionNameSource;
+}
+
+public final class io/ichnois/opentelemetry/OtelSpanUtils {
+	public fun <init> ()V
+	public static fun maybeTransferOtelAttribute (Lio/opentelemetry/sdk/trace/data/SpanData;Lio/ichnois/ISpan;Lio/opentelemetry/api/common/AttributeKey;)V
+}
+
+public final class io/ichnois/opentelemetry/OtelSpanWrapper : io/ichnois/opentelemetry/IOtelSpanWrapper {
+	public fun <init> (Lio/opentelemetry/sdk/trace/ReadWriteSpan;Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreDate;Lio/ichnois/TracesSamplingDecision;Lio/ichnois/opentelemetry/IOtelSpanWrapper;Lio/ichnois/SpanId;Lio/ichnois/Baggage;)V
+	public fun addFeatureFlag (Ljava/lang/String;Ljava/lang/Boolean;)V
+	public fun finish ()V
+	public fun finish (Lio/ichnois/SpanStatus;)V
+	public fun finish (Lio/ichnois/SpanStatus;Lio/ichnois/IchnoisCoreDate;)V
+	public fun getContexts ()Lio/ichnois/protocol/Contexts;
+	public fun getData ()Ljava/util/Map;
+	public fun getData (Ljava/lang/String;)Ljava/lang/Object;
+	public fun getDescription ()Ljava/lang/String;
+	public fun getFinishDate ()Lio/ichnois/IchnoisCoreDate;
+	public fun getMeasurements ()Ljava/util/Map;
+	public fun getOpenTelemetrySpanAttributes ()Lio/opentelemetry/api/common/Attributes;
+	public fun getOperation ()Ljava/lang/String;
+	public fun getSamplingDecision ()Lio/ichnois/TracesSamplingDecision;
+	public fun getScopes ()Lio/ichnois/IScopes;
+	public fun getSpanContext ()Lio/ichnois/SpanContext;
+	public fun getStartDate ()Lio/ichnois/IchnoisCoreDate;
+	public fun getStatus ()Lio/ichnois/SpanStatus;
+	public fun getTag (Ljava/lang/String;)Ljava/lang/String;
+	public fun getTags ()Ljava/util/Map;
+	public fun getThrowable ()Ljava/lang/Throwable;
+	public fun getTraceId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun getTransactionName ()Ljava/lang/String;
+	public fun getTransactionNameSource ()Lio/ichnois/protocol/TransactionNameSource;
+	public fun isFinished ()Z
+	public fun isNoOp ()Z
+	public fun isProfileSampled ()Ljava/lang/Boolean;
+	public fun isSampled ()Ljava/lang/Boolean;
+	public fun makeCurrent ()Lio/ichnois/IIchnoisCoreLifecycleToken;
+	public fun setContext (Ljava/lang/String;Ljava/lang/Object;)V
+	public fun setData (Ljava/lang/String;Ljava/lang/Object;)V
+	public fun setDescription (Ljava/lang/String;)V
+	public fun setMeasurement (Ljava/lang/String;Ljava/lang/Number;)V
+	public fun setMeasurement (Ljava/lang/String;Ljava/lang/Number;Lio/ichnois/MeasurementUnit;)V
+	public fun setOperation (Ljava/lang/String;)V
+	public fun setStatus (Lio/ichnois/SpanStatus;)V
+	public fun setTag (Ljava/lang/String;Ljava/lang/String;)V
+	public fun setThrowable (Ljava/lang/Throwable;)V
+	public fun setTransactionName (Ljava/lang/String;)V
+	public fun setTransactionName (Ljava/lang/String;Lio/ichnois/protocol/TransactionNameSource;)V
+	public fun startChild (Lio/ichnois/SpanContext;Lio/ichnois/SpanOptions;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;Ljava/lang/String;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;Ljava/lang/String;Lio/ichnois/IchnoisCoreDate;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;Ljava/lang/String;Lio/ichnois/IchnoisCoreDate;Lio/ichnois/Instrumenter;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;Ljava/lang/String;Lio/ichnois/IchnoisCoreDate;Lio/ichnois/Instrumenter;Lio/ichnois/SpanOptions;)Lio/ichnois/ISpan;
+	public fun startChild (Ljava/lang/String;Ljava/lang/String;Lio/ichnois/SpanOptions;)Lio/ichnois/ISpan;
+	public fun storeInContext (Lio/opentelemetry/context/Context;)Lio/opentelemetry/context/Context;
+	public fun toBaggageHeader (Ljava/util/List;)Lio/ichnois/BaggageHeader;
+	public fun toIchnoisCoreTrace ()Lio/ichnois/IchnoisCoreTraceHeader;
+	public fun traceContext ()Lio/ichnois/TraceContext;
+	public fun updateEndDate (Lio/ichnois/IchnoisCoreDate;)Z
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCorePropagator : io/opentelemetry/context/propagation/TextMapPropagator {
+	public fun <init> ()V
+	public fun extract (Lio/opentelemetry/context/Context;Ljava/lang/Object;Lio/opentelemetry/context/propagation/TextMapGetter;)Lio/opentelemetry/context/Context;
+	public fun fields ()Ljava/util/Collection;
+	public fun inject (Lio/opentelemetry/context/Context;Ljava/lang/Object;Lio/opentelemetry/context/propagation/TextMapSetter;)V
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCoreSampler : io/opentelemetry/sdk/trace/samplers/Sampler {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun getDescription ()Ljava/lang/String;
+	public fun shouldSample (Lio/opentelemetry/context/Context;Ljava/lang/String;Ljava/lang/String;Lio/opentelemetry/api/trace/SpanKind;Lio/opentelemetry/api/common/Attributes;Ljava/util/List;)Lio/opentelemetry/sdk/trace/samplers/SamplingResult;
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCoreSamplingResult : io/opentelemetry/sdk/trace/samplers/SamplingResult {
+	public fun <init> (Lio/ichnois/TracesSamplingDecision;)V
+	public fun getAttributes ()Lio/opentelemetry/api/common/Attributes;
+	public fun getDecision ()Lio/opentelemetry/sdk/trace/samplers/SamplingDecision;
+	public fun getIchnoisCoreDecision ()Lio/ichnois/TracesSamplingDecision;
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCoreSpanExporter : io/opentelemetry/sdk/trace/export/SpanExporter {
+	public static final field TRACE_ORIGIN Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun export (Ljava/util/Collection;)Lio/opentelemetry/sdk/common/CompletableResultCode;
+	public fun flush ()Lio/opentelemetry/sdk/common/CompletableResultCode;
+	public fun shutdown ()Lio/opentelemetry/sdk/common/CompletableResultCode;
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCoreSpanProcessor : io/opentelemetry/sdk/trace/SpanProcessor {
+	public fun <init> ()V
+	public fun isEndRequired ()Z
+	public fun isStartRequired ()Z
+	public fun onEnd (Lio/opentelemetry/sdk/trace/ReadableSpan;)V
+	public fun onStart (Lio/opentelemetry/context/Context;Lio/opentelemetry/sdk/trace/ReadWriteSpan;)V
+}
+
+public final class io/ichnois/opentelemetry/SpanDescriptionExtractor {
+	public fun <init> ()V
+	public fun extractSpanInfo (Lio/opentelemetry/sdk/trace/data/SpanData;Lio/ichnois/opentelemetry/IOtelSpanWrapper;Lio/ichnois/IchnoisCoreOptions;)Lio/ichnois/opentelemetry/OtelSpanInfo;
+}
+
+public final class io/ichnois/opentelemetry/SpanNode {
+	public fun <init> (Ljava/lang/String;)V
+	public fun addChild (Lio/ichnois/opentelemetry/SpanNode;)V
+	public fun addChildren (Ljava/util/List;)V
+	public fun getChildren ()Ljava/util/List;
+	public fun getId ()Ljava/lang/String;
+	public fun getParentNode ()Lio/ichnois/opentelemetry/SpanNode;
+	public fun getSpan ()Lio/opentelemetry/sdk/trace/data/SpanData;
+	public fun setParentNode (Lio/ichnois/opentelemetry/SpanNode;)V
+	public fun setSpan (Lio/opentelemetry/sdk/trace/data/SpanData;)V
+}
+
+public final class io/ichnois/opentelemetry/TraceData {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lio/ichnois/IchnoisCoreTraceHeader;Lio/ichnois/Baggage;)V
+	public fun getBaggage ()Lio/ichnois/Baggage;
+	public fun getParentSpanId ()Ljava/lang/String;
+	public fun getIchnoisCoreTraceHeader ()Lio/ichnois/IchnoisCoreTraceHeader;
+	public fun getSpanId ()Ljava/lang/String;
+	public fun getTraceId ()Ljava/lang/String;
+}
+

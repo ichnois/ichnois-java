@@ -1,0 +1,1362 @@
+package io.ichnois
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.IchnoisCoreOptions.RequestSize
+import io.ichnois.logger.ILoggerBatchProcessorFactory
+import io.ichnois.test.getProperty
+import io.ichnois.time.MonotonicTicker
+import io.ichnois.time.TestMonotonicTicker
+import io.ichnois.util.LazyEvaluator
+import io.ichnois.util.StringUtils
+import java.io.File
+import java.net.Proxy
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+
+class IchnoisCoreOptionsTest {
+  @Test
+  fun `data collection is always present without being explicitly configured`() {
+    val options = IchnoisCoreOptions()
+
+    assertThat(options.dataCollection).isNotNull()
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isFalse()
+  }
+
+  @Test
+  fun `data collection getter returns the same instance`() {
+    val options = IchnoisCoreOptions()
+
+    assertThat(options.dataCollection).isSameInstanceAs(options.dataCollection)
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isFalse()
+  }
+
+  @Test
+  fun `setting a data collection override marks it explicitly configured`() {
+    val options = IchnoisCoreOptions()
+
+    options.dataCollection.setUserInfo(false)
+
+    assertThat(options.dataCollection.userInfo).isFalse()
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isTrue()
+  }
+
+  @Test
+  fun `setting an empty data collection preserves legacy mode`() {
+    val options = IchnoisCoreOptions()
+
+    options.dataCollection = DataCollection()
+
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isFalse()
+  }
+
+  @Test
+  fun `forcing empty data collection marks it explicitly configured`() {
+    val options = IchnoisCoreOptions()
+
+    options.dataCollection.forceDataCollection()
+
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isTrue()
+  }
+
+  @Test
+  fun `forcing data collection preserves existing options`() {
+    val options = IchnoisCoreOptions()
+    options.dataCollection.setUserInfo(false)
+
+    options.dataCollection.forceDataCollection()
+
+    assertThat(options.dataCollection.userInfo).isFalse()
+  }
+
+  @Test
+  fun `setting data collection replaces the default instance`() {
+    val options = IchnoisCoreOptions()
+    val dataCollection = DataCollection().apply { setUserInfo(false) }
+
+    options.dataCollection = dataCollection
+
+    assertThat(options.dataCollection).isSameInstanceAs(dataCollection)
+    assertThat(options.dataCollection.userInfo).isFalse()
+  }
+
+  @Test
+  fun `setting null data collection preserves the current instance`() {
+    val options = IchnoisCoreOptions()
+    val dataCollection = DataCollection().apply { setUserInfo(false) }
+    options.dataCollection = dataCollection
+
+    IchnoisCoreOptions::class
+      .java
+      .getMethod("setDataCollection", DataCollection::class.java)
+      .invoke(options, null)
+
+    assertThat(options.dataCollection).isSameInstanceAs(dataCollection)
+    assertThat(options.dataCollection.userInfo).isFalse()
+  }
+
+  @Test
+  fun `merging absent external data collection preserves legacy mode`() {
+    val options = IchnoisCoreOptions()
+
+    options.merge(ExternalOptions())
+
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isFalse()
+  }
+
+  @Test
+  fun `merging external data collection applies only configured values`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        dataCollection.setUserInfo(false)
+        dataCollection.cookies = KeyValueCollectionBehavior.allowList("safe")
+      }
+    val externalOptions =
+      ExternalOptions().apply {
+        dataCollection = DataCollection().apply { graphql.setVariables(false) }
+      }
+
+    options.merge(externalOptions)
+
+    assertThat(options.dataCollection.userInfo).isFalse()
+    assertThat(options.dataCollection.cookies)
+      .isEqualTo(KeyValueCollectionBehavior.allowList("safe"))
+    assertThat(options.dataCollection.graphql.variables).isFalse()
+  }
+
+  @Test
+  fun `merging external data collection applies every supported value`() {
+    val externalDataCollection =
+      DataCollection().apply {
+        setUserInfo(false)
+        httpBodies = setOf(HttpBodyType.INCOMING_REQUEST, HttpBodyType.OUTGOING_RESPONSE)
+        cookies = KeyValueCollectionBehavior.denyList("cookie")
+        httpHeaders.request = KeyValueCollectionBehavior.allowList("request")
+        httpHeaders.response = KeyValueCollectionBehavior.off()
+        urlQueryParams = KeyValueCollectionBehavior.denyList("query")
+        graphql.setDocument(false)
+        graphql.setVariables(false)
+        setDatabaseQueryData(false)
+        setFilePaths(false)
+      }
+    val options = IchnoisCoreOptions()
+
+    options.merge(ExternalOptions().apply { dataCollection = externalDataCollection })
+
+    assertThat(options.dataCollection.userInfo).isFalse()
+    assertThat(options.dataCollection.httpBodies)
+      .containsExactly(HttpBodyType.INCOMING_REQUEST, HttpBodyType.OUTGOING_RESPONSE)
+    assertThat(options.dataCollection.cookies)
+      .isEqualTo(KeyValueCollectionBehavior.denyList("cookie"))
+    assertThat(options.dataCollection.httpHeaders.request)
+      .isEqualTo(KeyValueCollectionBehavior.allowList("request"))
+    assertThat(options.dataCollection.httpHeaders.response)
+      .isEqualTo(KeyValueCollectionBehavior.off())
+    assertThat(options.dataCollection.urlQueryParams)
+      .isEqualTo(KeyValueCollectionBehavior.denyList("query"))
+    assertThat(options.dataCollection.graphql.document).isFalse()
+    assertThat(options.dataCollection.graphql.variables).isFalse()
+    assertThat(options.dataCollection.databaseQueryData).isFalse()
+    assertThat(options.dataCollection.filePaths).isFalse()
+  }
+
+  @Test
+  fun `external data collection takes precedence over send default PII`() {
+    val externalOptions =
+      ExternalOptions().apply {
+        isSendDefaultPii = false
+        dataCollection = DataCollection().apply { cookies = KeyValueCollectionBehavior.off() }
+      }
+    val options = IchnoisCoreOptions()
+
+    options.merge(externalOptions)
+
+    assertThat(options.isSendDefaultPii).isFalse()
+    assertThat(options.dataCollection.isExplicitlyConfigured()).isTrue()
+    assertThat(options.dataCollectionResolver.isUserInfo).isTrue()
+    assertThat(options.dataCollectionResolver.isDatabaseQueryData).isTrue()
+    assertThat(options.dataCollectionResolver.cookies).isEqualTo(KeyValueCollectionBehavior.off())
+  }
+
+  @Test
+  fun `when options is initialized, logger is not null`() {
+    assertNotNull(IchnoisCoreOptions().logger)
+  }
+
+  @Test
+  fun `when logger is set to null, logger getter returns not null`() {
+    val options = IchnoisCoreOptions()
+    options.setLogger(null)
+    assertNotNull(options.logger)
+  }
+
+  @Test
+  fun `when options is initialized, diagnostic level is default`() {
+    assertEquals(IchnoisCoreOptions.DEFAULT_DIAGNOSTIC_LEVEL, IchnoisCoreOptions().diagnosticLevel)
+  }
+
+  @Test
+  fun `when diagnostic is set to null, diagnostic getter returns no default`() {
+    val options = IchnoisCoreOptions()
+    options.setDiagnosticLevel(null)
+    assertEquals(IchnoisCoreOptions.DEFAULT_DIAGNOSTIC_LEVEL, IchnoisCoreOptions().diagnosticLevel)
+  }
+
+  @Test
+  fun `when options is initialized, debug is false`() {
+    assertFalse(IchnoisCoreOptions().isDebug)
+  }
+
+  @Test
+  fun `when options is initialized, integrations contain UncaughtExceptionHandlerIntegration`() {
+    assertTrue(IchnoisCoreOptions().integrations.any { it is UncaughtExceptionHandlerIntegration })
+  }
+
+  @Test
+  fun `when options is initialized, integrations contain ShutdownHookIntegration`() {
+    assertTrue(IchnoisCoreOptions().integrations.any { it is ShutdownHookIntegration })
+  }
+
+  @Test
+  fun `when options is initialized, default maxBreadcrumb is 100`() =
+    assertEquals(100, IchnoisCoreOptions().maxBreadcrumbs)
+
+  @Test
+  fun `when setMaxBreadcrumb is called, overrides default`() {
+    val options = IchnoisCoreOptions()
+    options.maxBreadcrumbs = 1
+    assertEquals(1, options.maxBreadcrumbs)
+  }
+
+  @Test
+  fun `when options is initialized, default sampling is null`() =
+    assertNull(IchnoisCoreOptions().sampleRate)
+
+  @Test
+  fun `when setSampling is called, overrides default`() {
+    val options = IchnoisCoreOptions()
+    options.sampleRate = 0.5
+    assertEquals(0.5, options.sampleRate)
+  }
+
+  @Test
+  fun `when setSampling is called with null, disables it`() {
+    val options = IchnoisCoreOptions()
+    options.sampleRate = null
+    assertNull(options.sampleRate)
+  }
+
+  @Test
+  fun `when setSampling is set to higher than 1_0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> { IchnoisCoreOptions().sampleRate = 1.0000000000001 }
+  }
+
+  @Test
+  fun `when setSampling is set to lower than 0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> { IchnoisCoreOptions().sampleRate = -0.0000000000001 }
+  }
+
+  @Test
+  fun `when setTracesSampleRate is set to exactly 0, value is set`() {
+    val options = IchnoisCoreOptions().apply { this.tracesSampleRate = 0.0 }
+    assertEquals(0.0, options.tracesSampleRate)
+  }
+
+  @Test
+  fun `when setTracesSampleRate is set to higher than 1_0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> { IchnoisCoreOptions().tracesSampleRate = 1.0000000000001 }
+  }
+
+  @Test
+  fun `when setTracesSampleRate is set to lower than 0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> {
+      IchnoisCoreOptions().tracesSampleRate = -0.0000000000001
+    }
+  }
+
+  @Test
+  fun `when tracesSampleRate is set tracing is considered enabled`() {
+    val options = IchnoisCoreOptions().apply { this.tracesSampleRate = 1.0 }
+
+    assertTrue(options.isTracingEnabled)
+  }
+
+  @Test
+  fun `when tracesSampler is set tracing is considered enabled`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        this.tracesSampler = IchnoisCoreOptions.TracesSamplerCallback { samplingContext -> 1.0 }
+      }
+
+    assertTrue(options.isTracingEnabled)
+  }
+
+  @Test
+  fun `by default tracing is considered disabled`() {
+    val options = IchnoisCoreOptions()
+
+    assertFalse(options.isTracingEnabled)
+  }
+
+  @Test
+  fun `when there's no cacheDirPath, outboxPath returns null`() {
+    val options = IchnoisCoreOptions()
+    assertNull(options.outboxPath)
+  }
+
+  @Test
+  fun `when cacheDirPath is set, outboxPath concatenate outbox path`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = "${File.separator}test"
+    assertEquals("${File.separator}test${File.separator}outbox", options.outboxPath)
+  }
+
+  @Test
+  fun `IchnoisCoreOptions creates IchnoisCoreExecutorService on ctor`() {
+    val options = IchnoisCoreOptions()
+    assertNotNull(options.executorService)
+  }
+
+  @Test
+  fun `init should set SdkVersion`() {
+    val ichnoisOptions = IchnoisCoreOptions()
+    assertNotNull(ichnoisOptions.sdkVersion)
+    val sdkVersion = ichnoisOptions.sdkVersion!!
+
+    assertEquals(BuildConfig.ICHNOIS_JAVA_SDK_NAME, sdkVersion.name)
+    assertEquals(BuildConfig.VERSION_NAME, sdkVersion.version)
+
+    assertTrue(
+      sdkVersion.packageSet.any {
+        it.name == "maven:io.ichnois:ichnois" && it.version == BuildConfig.VERSION_NAME
+      }
+    )
+  }
+
+  @Test
+  fun `init should set clientName`() {
+    val ichnoisOptions = IchnoisCoreOptions()
+
+    val clientName = "${BuildConfig.ICHNOIS_JAVA_SDK_NAME}/${BuildConfig.VERSION_NAME}"
+
+    assertEquals(clientName, ichnoisOptions.ichnoisClientName)
+  }
+
+  @Test
+  fun `when options is initialized, attachThreads is false`() {
+    assertFalse(IchnoisCoreOptions().isAttachThreads)
+  }
+
+  @Test
+  fun `when options is initialized, attachStacktrace is true`() {
+    assertTrue(IchnoisCoreOptions().isAttachStacktrace)
+  }
+
+  @Test
+  fun `when options is initialized, isProfilingEnabled is false and isContinuousProfilingEnabled is true`() {
+    assertFalse(IchnoisCoreOptions().isProfilingEnabled)
+    assertFalse(IchnoisCoreOptions().isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profilesSampleRate is null and profilesSampler is null, isProfilingEnabled is false and isContinuousProfilingEnabled is false`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        this.profilesSampleRate = null
+        this.profilesSampler = null
+      }
+    assertFalse(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profilesSampleRate is 0 and profilesSampler is null, isProfilingEnabled is false and isContinuousProfilingEnabled is false`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        this.profilesSampleRate = 0.0
+        this.profilesSampler = null
+      }
+    assertFalse(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profilesSampleRate is set to a value higher than 0, isProfilingEnabled is true and isContinuousProfilingEnabled is false`() {
+    val options = IchnoisCoreOptions().apply { this.profilesSampleRate = 0.1 }
+    assertTrue(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profilesSampler is set to a value, isProfilingEnabled is true and isContinuousProfilingEnabled is false`() {
+    val options =
+      IchnoisCoreOptions().apply { this.profilesSampler = IchnoisCoreOptions.ProfilesSamplerCallback { 1.0 } }
+    assertTrue(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profileSessionSampleRate is set to 0, isProfilingEnabled is false and isContinuousProfilingEnabled is false`() {
+    val options = IchnoisCoreOptions().apply { this.profileSessionSampleRate = 0.0 }
+    assertFalse(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when profileSessionSampleRate is null, isProfilingEnabled is false and isContinuousProfilingEnabled is false`() {
+    val options = IchnoisCoreOptions()
+    assertNull(options.profileSessionSampleRate)
+    assertFalse(options.isProfilingEnabled)
+    assertFalse(options.isContinuousProfilingEnabled)
+  }
+
+  @Test
+  fun `when setProfilesSampleRate is set to exactly 0, value is set`() {
+    val options = IchnoisCoreOptions().apply { this.profilesSampleRate = 0.0 }
+    assertEquals(0.0, options.profilesSampleRate)
+  }
+
+  @Test
+  fun `when setProfilesSampleRate is set to higher than 1_0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> {
+      IchnoisCoreOptions().profilesSampleRate = 1.0000000000001
+    }
+  }
+
+  @Test
+  fun `when setProfilesSampleRate is set to lower than 0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> {
+      IchnoisCoreOptions().profilesSampleRate = -0.0000000000001
+    }
+  }
+
+  @Test
+  fun `when profileSessionSampleRate is set to exactly 0, value is set`() {
+    val options = IchnoisCoreOptions().apply { this.profileSessionSampleRate = 0.0 }
+    assertEquals(0.0, options.profileSessionSampleRate)
+  }
+
+  @Test
+  fun `when profileSessionSampleRate is set to higher than 1_0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> {
+      IchnoisCoreOptions().profileSessionSampleRate = 1.0000000000001
+    }
+  }
+
+  @Test
+  fun `when profileSessionSampleRate is set to lower than 0, setter throws`() {
+    assertFailsWith<IllegalArgumentException> {
+      IchnoisCoreOptions().profileSessionSampleRate = -0.0000000000001
+    }
+  }
+
+  @Test
+  fun `when profileLifecycleSessionSampleRate is set to a value, value is set`() {
+    val options = IchnoisCoreOptions().apply { this.profileLifecycle = ProfileLifecycle.TRACE }
+    assertEquals(ProfileLifecycle.TRACE, options.profileLifecycle)
+  }
+
+  @Test
+  fun `profileLifecycleSessionSampleRate defaults to MANUAL`() {
+    val options = IchnoisCoreOptions()
+    assertEquals(ProfileLifecycle.MANUAL, options.profileLifecycle)
+  }
+
+  @Test
+  fun `when isStartProfilerOnAppStart is set to a value, value is set`() {
+    val options = IchnoisCoreOptions().apply { this.isStartProfilerOnAppStart = true }
+    assertTrue(options.isStartProfilerOnAppStart)
+  }
+
+  @Test
+  fun `isStartProfilerOnAppStart defaults to false`() {
+    val options = IchnoisCoreOptions()
+    assertFalse(options.isStartProfilerOnAppStart)
+  }
+
+  @Test
+  fun `when options is initialized, compositePerformanceCollector is set`() {
+    assertIs<CompositePerformanceCollector>(IchnoisCoreOptions().compositePerformanceCollector)
+  }
+
+  @Test
+  fun `when options is initialized, transactionProfiler is noop`() {
+    assert(IchnoisCoreOptions().transactionProfiler == NoOpTransactionProfiler.getInstance())
+  }
+
+  @Test
+  fun `when options is initialized, continuousProfiler is noop`() {
+    assert(IchnoisCoreOptions().continuousProfiler == NoOpContinuousProfiler.getInstance())
+  }
+
+  @Test
+  fun `when options is initialized, collector is empty list`() {
+    assertTrue(IchnoisCoreOptions().performanceCollectors.isEmpty())
+  }
+
+  @Test
+  fun `when adds scope observer, observer list has it`() {
+    val observer = mock<IScopeObserver>()
+    val options = IchnoisCoreOptions().apply { addScopeObserver(observer) }
+
+    assertTrue(options.scopeObservers.contains(observer))
+  }
+
+  @Test
+  fun `when environment is not set, falls back to default value`() {
+    val options = IchnoisCoreOptions()
+    assertEquals("production", options.environment)
+  }
+
+  @Test
+  fun `when environment is set, correct value is returned`() {
+    val options = IchnoisCoreOptions().apply { environment = "debug" }
+    assertEquals("debug", options.environment)
+  }
+
+  @Test
+  fun `when adds options observer, observer list has it`() {
+    val observer = mock<IOptionsObserver>()
+    val options = IchnoisCoreOptions().apply { addOptionsObserver(observer) }
+
+    assertTrue(options.optionsObservers.contains(observer))
+  }
+
+  @Test
+  fun `copies options from another IchnoisCoreOptions instance`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.dsn = "http://key@localhost/proj"
+    externalOptions.dist = "distribution"
+    externalOptions.environment = "environment"
+    externalOptions.release = "release"
+    externalOptions.serverName = "serverName"
+    externalOptions.proxy = IchnoisCoreOptions.Proxy("example.com", "8090", Proxy.Type.SOCKS)
+    externalOptions.setTag("tag1", "value1")
+    externalOptions.setTag("tag2", "value2")
+    externalOptions.enableUncaughtExceptionHandler = false
+    externalOptions.sampleRate = 0.3
+    externalOptions.tracesSampleRate = 0.5
+    externalOptions.profilesSampleRate = 0.5
+    externalOptions.addInAppInclude("com.app")
+    externalOptions.addInAppExclude("io.off")
+    externalOptions.addTracePropagationTarget("localhost")
+    externalOptions.addTracePropagationTarget("api.foo.com")
+    externalOptions.addContextTag("userId")
+    externalOptions.addContextTag("requestId")
+    externalOptions.proguardUuid = "1234"
+    externalOptions.idleTimeout = 1500L
+    externalOptions.shutdownTimeoutMillis = 1499L
+    externalOptions.sessionFlushTimeoutMillis = 1498L
+    externalOptions.bundleIds.addAll(
+      listOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411 ", " faa3ab42-b1bd-4659-af8e-1682324aa744")
+    )
+    externalOptions.isEnabled = false
+    externalOptions.isEnablePrettySerializationOutput = false
+    externalOptions.isSendModules = false
+    externalOptions.ignoredCheckIns = listOf("slug1", "slug-B")
+    externalOptions.ignoredTransactions = listOf("transactionName1", "transaction-name-B")
+    externalOptions.ignoredErrors = listOf("Some error", "Another .*")
+    externalOptions.isEnableBackpressureHandling = false
+    externalOptions.isEnableDatabaseTransactionTracing = true
+    externalOptions.isEnableCacheTracing = true
+    externalOptions.maxRequestBodySize = IchnoisCoreOptions.RequestSize.MEDIUM
+    externalOptions.isSendDefaultPii = true
+    externalOptions.isForceInit = true
+    externalOptions.cron =
+      IchnoisCoreOptions.Cron().apply {
+        defaultCheckinMargin = 10L
+        defaultMaxRuntime = 30L
+        defaultTimezone = "America/New_York"
+        defaultFailureIssueThreshold = 40L
+        defaultRecoveryThreshold = 50L
+      }
+    externalOptions.isEnableSpotlight = true
+    externalOptions.spotlightConnectionUrl = "http://local.ichnois.io:1234"
+    externalOptions.isGlobalHubMode = true
+    externalOptions.isEnableLogs = true
+    externalOptions.isEnableMetrics = false
+    externalOptions.profileSessionSampleRate = 0.8
+    externalOptions.profilingTracesDirPath = "/profiling-traces"
+    externalOptions.profileLifecycle = ProfileLifecycle.TRACE
+
+    val hash = StringUtils.calculateStringHash(externalOptions.dsn, mock())
+    val options = IchnoisCoreOptions()
+
+    options.merge(externalOptions)
+
+    assertEquals("http://key@localhost/proj", options.dsn)
+    assertEquals("distribution", options.dist)
+    assertEquals("environment", options.environment)
+    assertEquals("release", options.release)
+    assertEquals("serverName", options.serverName)
+    assertNotNull(options.proxy)
+    assertEquals("example.com", options.proxy!!.host)
+    assertEquals("8090", options.proxy!!.port)
+    assertEquals(java.net.Proxy.Type.SOCKS, options.proxy!!.type)
+    assertEquals(mapOf("tag1" to "value1", "tag2" to "value2"), options.tags)
+    assertFalse(options.isEnableUncaughtExceptionHandler)
+    assertEquals(0.3, options.sampleRate)
+    assertEquals(0.5, options.tracesSampleRate)
+    assertEquals(0.5, options.profilesSampleRate)
+    assertEquals(listOf("com.app"), options.inAppIncludes)
+    assertEquals(listOf("io.off"), options.inAppExcludes)
+    assertEquals(listOf("localhost", "api.foo.com"), options.tracePropagationTargets)
+    assertEquals(listOf("userId", "requestId"), options.contextTags)
+    assertEquals("1234", options.proguardUuid)
+    assertEquals(1500L, options.idleTimeout)
+    assertEquals(1499L, options.shutdownTimeoutMillis)
+    assertEquals(1498L, options.sessionFlushTimeoutMillis)
+    assertEquals(
+      setOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411", "faa3ab42-b1bd-4659-af8e-1682324aa744"),
+      options.bundleIds,
+    )
+    assertFalse(options.isEnabled)
+    assertFalse(options.isEnablePrettySerializationOutput)
+    assertFalse(options.isSendModules)
+    assertEquals(listOf(FilterString("slug1"), FilterString("slug-B")), options.ignoredCheckIns)
+    assertEquals(
+      listOf(FilterString("transactionName1"), FilterString("transaction-name-B")),
+      options.ignoredTransactions,
+    )
+    assertEquals(
+      listOf(FilterString("Some error"), FilterString("Another .*")),
+      options.ignoredErrors,
+    )
+    assertFalse(options.isEnableBackpressureHandling)
+    assertTrue(options.isEnableDatabaseTransactionTracing)
+    assertTrue(options.isEnableCacheTracing)
+    assertTrue(options.isForceInit)
+    assertNotNull(options.cron)
+    assertEquals(10L, options.cron?.defaultCheckinMargin)
+    assertEquals(30L, options.cron?.defaultMaxRuntime)
+    assertEquals(40L, options.cron?.defaultFailureIssueThreshold)
+    assertEquals(50L, options.cron?.defaultRecoveryThreshold)
+    assertEquals("America/New_York", options.cron?.defaultTimezone)
+    assertTrue(options.isSendDefaultPii)
+    assertEquals(RequestSize.MEDIUM, options.maxRequestBodySize)
+    assertTrue(options.isEnableSpotlight)
+    assertEquals("http://local.ichnois.io:1234", options.spotlightConnectionUrl)
+    assertTrue(options.isGlobalHubMode!!)
+    assertTrue(options.logs.isEnabled!!)
+    assertFalse(options.metrics.isEnabled)
+    assertEquals(0.8, options.profileSessionSampleRate)
+    assertEquals("/profiling-traces${File.separator}${hash}", options.profilingTracesDirPath)
+    assertEquals(ProfileLifecycle.TRACE, options.profileLifecycle)
+  }
+
+  @Test
+  fun `merging options when enableUncaughtExceptionHandler is not set preserves the default value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertTrue(options.isEnableUncaughtExceptionHandler)
+  }
+
+  @Test
+  fun `merging options when enableMetrics is not set preserves the default value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertTrue(options.metrics.isEnabled)
+  }
+
+  @Test
+  fun `merging options merges and overwrites existing tag values`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.setTag("tag1", "value1")
+    externalOptions.setTag("tag2", "value2")
+    val options = IchnoisCoreOptions()
+    options.setTag("tag2", "original-options-value")
+    options.setTag("tag3", "value3")
+
+    options.merge(externalOptions)
+
+    assertEquals(mapOf("tag1" to "value1", "tag2" to "value2", "tag3" to "value3"), options.tags)
+  }
+
+  @Test
+  fun `merging options when tracePropagationTargets is not set preserves the default value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertEquals(listOf(".*"), options.tracePropagationTargets)
+  }
+
+  @Test
+  fun `merging options when tracePropagationTargets is empty`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.addTracePropagationTarget("")
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertEquals(listOf(), options.tracePropagationTargets)
+  }
+
+  @Test
+  fun `when options is initialized, Json Serializer is set by default`() {
+    assertTrue(IchnoisCoreOptions().serializer is JsonSerializer)
+  }
+
+  @Test
+  fun `when options are initialized, maxAttachmentSize is 20`() {
+    assertEquals((20 * 1024 * 1024).toLong(), IchnoisCoreOptions().maxAttachmentSize)
+  }
+
+  @Test
+  fun `when setting dsn, calculates hash and add as subfolder of caching dirs`() {
+    val dsn = "http://key@localhost/proj"
+    val hash = StringUtils.calculateStringHash(dsn, mock())
+    val options =
+      IchnoisCoreOptions().apply {
+        setDsn(dsn)
+        cacheDirPath = "${File.separator}test"
+      }
+
+    assertEquals(
+      "${File.separator}test${File.separator}${hash}${File.separator}outbox",
+      options.outboxPath,
+    )
+    assertEquals(
+      "${File.separator}test${File.separator}${hash}${File.separator}profiling_traces",
+      options.profilingTracesDirPath,
+    )
+  }
+
+  @Test
+  fun `when cacheDirPath and profilingTracesDirPath are set, profilingTracesDirPath takes precedence`() {
+    val dsn = "http://key@localhost/proj"
+    val hash = StringUtils.calculateStringHash(dsn, mock())
+    val options =
+      IchnoisCoreOptions().apply {
+        setDsn(dsn)
+        cacheDirPath = "${File.separator}test"
+        profilingTracesDirPath = "${File.separator}test-profiles"
+      }
+
+    assertEquals(
+      "${File.separator}test-profiles${File.separator}${hash}",
+      options.profilingTracesDirPath,
+    )
+  }
+
+  @Test
+  fun `getCacheDirPathWithoutDsn does not contain dsn hash`() {
+    val dsn = "http://key@localhost/proj"
+    val hash = StringUtils.calculateStringHash(dsn, mock())
+    val options =
+      IchnoisCoreOptions().apply {
+        setDsn(dsn)
+        cacheDirPath = "${File.separator}test"
+      }
+
+    val cacheDirPathWithoutDsn = options.cacheDirPathWithoutDsn!!
+    assertNotEquals(cacheDirPathWithoutDsn, options.cacheDirPath)
+    assertEquals(cacheDirPathWithoutDsn, options.cacheDirPath!!.substringBeforeLast("/"))
+    assertFalse(cacheDirPathWithoutDsn.contains(hash.toString()))
+  }
+
+  @Test
+  fun `when setting dsn with whitespace, it is trimmed and produces the same cache dir path`() {
+    val dsn = "http://key@localhost/proj"
+    val options1 =
+      IchnoisCoreOptions().apply {
+        setDsn(dsn)
+        cacheDirPath = "${File.separator}test"
+      }
+    val options2 =
+      IchnoisCoreOptions().apply {
+        setDsn("  $dsn  ")
+        cacheDirPath = "${File.separator}test"
+      }
+
+    assertEquals(dsn, options2.dsn)
+    assertEquals(options1.cacheDirPath, options2.cacheDirPath)
+  }
+
+  @Test
+  fun `when options are initialized, idleTimeout is 3000`() {
+    assertEquals(3000L, IchnoisCoreOptions().idleTimeout)
+  }
+
+  @Test
+  fun `when options are initialized, CompositePerformanceCollector is a NoOp`() {
+    assertEquals(
+      IchnoisCoreOptions().compositePerformanceCollector,
+      NoOpCompositePerformanceCollector.getInstance(),
+    )
+  }
+
+  @Test
+  fun `when setCompositePerformanceCollector is called, overrides default`() {
+    val performanceCollector = mock<CompositePerformanceCollector>()
+    val options = IchnoisCoreOptions()
+    options.compositePerformanceCollector = performanceCollector
+    assertEquals(performanceCollector, options.compositePerformanceCollector)
+  }
+
+  @Test
+  fun `when options are initialized, TimeToFullDisplayTracing is false`() {
+    assertFalse(IchnoisCoreOptions().isEnableTimeToFullDisplayTracing)
+  }
+
+  @Test
+  fun `when options are initialized, FullyDrawnReporter is set`() {
+    assertEquals(FullyDisplayedReporter.getInstance(), IchnoisCoreOptions().fullyDisplayedReporter)
+  }
+
+  @Test
+  fun `when options are initialized, appStartExtender defaults to noop`() {
+    assertEquals(NoOpAppStartExtender.getInstance(), IchnoisCoreOptions().appStartExtender)
+  }
+
+  @Test
+  fun `when appStartExtender is set, it's returned as well`() {
+    val options = IchnoisCoreOptions()
+    val customExtender =
+      object : IAppStartExtender {
+        override fun extendAppStart() = Unit
+
+        override fun finishExtendedAppStart() = Unit
+
+        override fun getExtendedAppStartSpan(): ISpan = NoOpSpan.getInstance()
+      }
+    options.setAppStartExtender(customExtender)
+    assertEquals(customExtender, options.appStartExtender)
+  }
+
+  @Test
+  fun `when options are initialized, connectionStatusProvider is not null and default to noop`() {
+    assertNotNull(IchnoisCoreOptions().connectionStatusProvider)
+    assertTrue(IchnoisCoreOptions().connectionStatusProvider is NoOpConnectionStatusProvider)
+  }
+
+  @Test
+  fun `when connectionStatusProvider is set, its returned as well`() {
+    val options = IchnoisCoreOptions()
+    val customProvider =
+      object : IConnectionStatusProvider {
+        override fun close() = Unit
+
+        override fun getConnectionStatus(): IConnectionStatusProvider.ConnectionStatus {
+          return IConnectionStatusProvider.ConnectionStatus.UNKNOWN
+        }
+
+        override fun getConnectionType(): String? = null
+
+        override fun addConnectionStatusObserver(
+          observer: IConnectionStatusProvider.IConnectionStatusObserver
+        ) = false
+
+        override fun removeConnectionStatusObserver(
+          observer: IConnectionStatusProvider.IConnectionStatusObserver
+        ) {
+          // no-op
+        }
+      }
+    options.connectionStatusProvider = customProvider
+    assertEquals(customProvider, options.connectionStatusProvider)
+  }
+
+  @Test
+  fun `when options are initialized, enabled is set to true by default`() {
+    assertTrue(IchnoisCoreOptions().isEnabled)
+  }
+
+  @Test
+  fun `when options are initialized, enablePrettySerializationOutput is set to true by default`() {
+    assertTrue(IchnoisCoreOptions().isEnablePrettySerializationOutput)
+  }
+
+  @Test
+  fun `when options are initialized, sendModules is set to true by default`() {
+    assertTrue(IchnoisCoreOptions().isSendModules)
+  }
+
+  @Test
+  fun `when options are initialized, enableBackpressureHandling is set to true by default`() {
+    assertTrue(IchnoisCoreOptions().isEnableBackpressureHandling)
+  }
+
+  @Test
+  fun `when options are initialized, enableDatabaseTransactionTracing is set to false by default`() {
+    assertFalse(IchnoisCoreOptions().isEnableDatabaseTransactionTracing)
+  }
+
+  @Test
+  fun `when options are initialized, enableCacheTracing is set to false by default`() {
+    assertFalse(IchnoisCoreOptions().isEnableCacheTracing)
+  }
+
+  @Test
+  fun `when options are initialized, enableQueueTracing is set to false by default`() {
+    assertFalse(IchnoisCoreOptions().isEnableQueueTracing)
+  }
+
+  @Test
+  fun `when options are initialized, metrics is enabled by default`() {
+    assertTrue(IchnoisCoreOptions().metrics.isEnabled)
+  }
+
+  @Test
+  fun `when options are initialized, enableSpotlight is set to false by default`() {
+    assertFalse(IchnoisCoreOptions().isEnableSpotlight)
+  }
+
+  @Test
+  fun `when options are initialized, spotlightConnectionUrl is not set by default`() {
+    assertNull(IchnoisCoreOptions().spotlightConnectionUrl)
+  }
+
+  @Test
+  fun `when options are initialized, enableAppStartProfiling is set to false by default`() {
+    assertFalse(IchnoisCoreOptions().isEnableAppStartProfiling)
+  }
+
+  @Test
+  fun `when options are initialized, isGlobalHubMode is set to null by default`() {
+    assertNull(IchnoisCoreOptions().isGlobalHubMode)
+  }
+
+  @Test
+  fun `when setEnableAppStartProfiling is called, overrides default`() {
+    val options = IchnoisCoreOptions()
+    options.isEnableAppStartProfiling = true
+    options.profilesSampleRate = 1.0
+    assertTrue(options.isEnableAppStartProfiling)
+  }
+
+  @Test
+  fun `when profiling is disabled, isEnableAppStartProfiling is always false`() {
+    val options = IchnoisCoreOptions()
+    options.isEnableAppStartProfiling = true
+    options.profileSessionSampleRate = 0.0
+    assertFalse(options.isEnableAppStartProfiling)
+  }
+
+  @Test
+  fun `when setEnableAppStartProfiling is called and continuous profiling is enabled, isEnableAppStartProfiling is true`() {
+    val options = IchnoisCoreOptions()
+    options.isEnableAppStartProfiling = true
+    options.profileSessionSampleRate = 1.0
+    assertTrue(options.isEnableAppStartProfiling)
+  }
+
+  @Test
+  fun `when options are initialized, enableLegacyProfiling is set to true by default`() {
+    assertTrue(IchnoisCoreOptions().isEnableLegacyProfiling)
+  }
+
+  @Test
+  fun `when setEnableLegacyProfiling is called, value is set`() {
+    val options = IchnoisCoreOptions().apply { isEnableLegacyProfiling = false }
+    assertFalse(options.isEnableLegacyProfiling)
+  }
+
+  @Test
+  fun `when options are initialized, profilingTracesHz is set to 101 by default`() {
+    assertEquals(101, IchnoisCoreOptions().profilingTracesHz)
+  }
+
+  @Test
+  fun `when setProfilingTracesHz is called, overrides default`() {
+    val options = IchnoisCoreOptions()
+    options.profilingTracesHz = 13
+    assertEquals(13, options.profilingTracesHz)
+  }
+
+  @Test
+  fun `when options are initialized, spotlight is disabled by default and no url is set`() {
+    val options = IchnoisCoreOptions()
+    assertFalse(options.isEnableSpotlight)
+    assertNull(options.spotlightConnectionUrl)
+  }
+
+  @Test
+  fun `when spotlight is configured, getters reflect that`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        isEnableSpotlight = true
+        spotlightConnectionUrl = "http://localhost:8080"
+      }
+    assertTrue(options.isEnableSpotlight)
+    assertEquals("http://localhost:8080", options.spotlightConnectionUrl)
+  }
+
+  @Test
+  fun `when options are initialized, enableScopePersistence is set to true by default`() {
+    assertEquals(true, IchnoisCoreOptions().isEnableScopePersistence)
+  }
+
+  @Test
+  fun `existing cron defaults are not overridden if not present in external options`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        cron =
+          IchnoisCoreOptions.Cron().apply {
+            defaultCheckinMargin = 1
+            defaultMaxRuntime = 2
+            defaultTimezone = "America/New_York"
+            defaultFailureIssueThreshold = 3
+            defaultRecoveryThreshold = 4
+          }
+      }
+
+    val externalOptions = ExternalOptions().apply { cron = IchnoisCoreOptions.Cron() }
+
+    options.merge(externalOptions)
+
+    assertEquals(1, options.cron?.defaultCheckinMargin)
+    assertEquals(2, options.cron?.defaultMaxRuntime)
+    assertEquals("America/New_York", options.cron?.defaultTimezone)
+    assertEquals(3, options.cron?.defaultFailureIssueThreshold)
+    assertEquals(4, options.cron?.defaultRecoveryThreshold)
+  }
+
+  @Test
+  fun `all cron properties set in external options override values set in ichnois options`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        cron =
+          IchnoisCoreOptions.Cron().apply {
+            defaultCheckinMargin = 1
+            defaultMaxRuntime = 2
+            defaultTimezone = "America/New_York"
+            defaultFailureIssueThreshold = 3
+            defaultRecoveryThreshold = 4
+          }
+      }
+
+    val externalOptions =
+      ExternalOptions().apply {
+        cron =
+          IchnoisCoreOptions.Cron().apply {
+            defaultCheckinMargin = 10
+            defaultMaxRuntime = 20
+            defaultTimezone = "Europe/Vienna"
+            defaultFailureIssueThreshold = 30
+            defaultRecoveryThreshold = 40
+          }
+      }
+
+    options.merge(externalOptions)
+
+    assertEquals(10, options.cron?.defaultCheckinMargin)
+    assertEquals(20, options.cron?.defaultMaxRuntime)
+    assertEquals("Europe/Vienna", options.cron?.defaultTimezone)
+    assertEquals(30, options.cron?.defaultFailureIssueThreshold)
+    assertEquals(40, options.cron?.defaultRecoveryThreshold)
+  }
+
+  @Test
+  fun `when options is initialized, InitPriority is set to MEDIUM by default`() {
+    assertEquals(IchnoisCoreOptions().initPriority, InitPriority.MEDIUM)
+  }
+
+  @Test
+  fun `merging options when ignoredErrors is not set preserves the previous value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.setIgnoredErrors(listOf("error1", "error2"))
+    options.merge(externalOptions)
+    assertEquals(listOf(FilterString("error1"), FilterString("error2")), options.ignoredErrors)
+  }
+
+  @Test
+  fun `merging options when ignoredTransactions is not set preserves the previous value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.setIgnoredTransactions(listOf("transaction1", "transaction2"))
+    options.merge(externalOptions)
+    assertEquals(
+      listOf(FilterString("transaction1"), FilterString("transaction2")),
+      options.ignoredTransactions,
+    )
+  }
+
+  @Test
+  fun `merging options when ignoredCheckIns is not set preserves the previous value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.setIgnoredCheckIns(listOf("checkin1", "checkin2"))
+    options.merge(externalOptions)
+    assertEquals(
+      listOf(FilterString("checkin1"), FilterString("checkin2")),
+      options.ignoredCheckIns,
+    )
+  }
+
+  @Test
+  fun `null tag`() {
+    val options = IchnoisCoreOptions.empty()
+    options.setTag("k", "v")
+    options.setTag("k", null)
+    options.setTag(null, null)
+    assertTrue(options.tags.isEmpty())
+  }
+
+  @Test
+  fun `feedback dialog handler logs a warning`() {
+    val logger = mock<ILogger>()
+    val options =
+      IchnoisCoreOptions.empty().apply {
+        setLogger(logger)
+        isDebug = true
+      }
+    options.feedbackOptions.formHandler.showForm(mock(), mock())
+    verify(logger).log(eq(IchnoisCoreLevel.WARNING), eq("showForm() can only be called in Android."))
+  }
+
+  @Test
+  fun `default shake controller logs a warning`() {
+    val logger = mock<ILogger>()
+    val options =
+      IchnoisCoreOptions.empty().apply {
+        setLogger(logger)
+        isDebug = true
+      }
+    options.feedbackOptions.shakeController.enableOnShake()
+    verify(logger).log(eq(IchnoisCoreLevel.WARNING), eq("Shake to report is only supported on Android."))
+  }
+
+  @Test
+  fun `autoTransactionDeadlineTimeoutMillis option defaults to 30000`() {
+    val options = IchnoisCoreOptions.empty()
+    assertEquals(30000L, options.deadlineTimeout)
+  }
+
+  @Test
+  fun `autoTransactionDeadlineTimeoutMillis option can be changed`() {
+    val options = IchnoisCoreOptions.empty()
+    options.deadlineTimeout = 60000L
+    assertEquals(60000L, options.deadlineTimeout)
+  }
+
+  @Test
+  fun `autoTransactionDeadlineTimeoutMillis option can be set to zero value`() {
+    val options = IchnoisCoreOptions.empty()
+    options.deadlineTimeout = 0L
+    assertEquals(0L, options.deadlineTimeout)
+  }
+
+  @Test
+  fun `autoTransactionDeadlineTimeoutMillis option can be set to negative value`() {
+    val options = IchnoisCoreOptions.empty()
+    options.deadlineTimeout = -1L
+    assertEquals(-1L, options.deadlineTimeout)
+  }
+
+  @Test
+  fun `propagateTraceparent option defaults to false`() {
+    val options = IchnoisCoreOptions()
+    assertFalse(options.isPropagateTraceparent)
+  }
+
+  @Test
+  fun `propagateTraceparent option can be changed`() {
+    val options = IchnoisCoreOptions()
+    options.isPropagateTraceparent = true
+    assertTrue(options.isPropagateTraceparent)
+  }
+
+  @Test
+  fun `maxFeatureFlags defaults to 100`() {
+    val options = IchnoisCoreOptions()
+    assertEquals(100, options.maxFeatureFlags)
+  }
+
+  @Test
+  fun `maxFeatureFlags can be changed`() {
+    val options = IchnoisCoreOptions()
+    options.maxFeatureFlags = 50
+    assertEquals(50, options.maxFeatureFlags)
+  }
+
+  @Test
+  fun `loggerBatchFactory can be changed`() {
+    val mock = mock<ILoggerBatchProcessorFactory>()
+    val options = IchnoisCoreOptions()
+    options.logs.loggerBatchProcessorFactory = mock
+    assertSame(mock, options.logs.loggerBatchProcessorFactory)
+  }
+
+  @Test
+  fun `when options is initialized, strictTraceContinuation is false`() {
+    assertFalse(IchnoisCoreOptions().isStrictTraceContinuation)
+  }
+
+  @Test
+  fun `when options is initialized, orgId is null`() {
+    assertNull(IchnoisCoreOptions().orgId)
+  }
+
+  @Test
+  fun `merging options applies strictTraceContinuation`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.setStrictTraceContinuation(true)
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertTrue(options.isStrictTraceContinuation)
+  }
+
+  @Test
+  fun `merging options when strictTraceContinuation is not set preserves the previous value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.isStrictTraceContinuation = true
+    options.merge(externalOptions)
+    assertTrue(options.isStrictTraceContinuation)
+  }
+
+  @Test
+  fun `merging options applies orgId`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.setOrgId("12345")
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertEquals("12345", options.orgId)
+  }
+
+  @Test
+  fun `merging options when orgId is not set preserves the previous value`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.orgId = "original"
+    options.merge(externalOptions)
+    assertEquals("original", options.orgId)
+  }
+
+  @Test
+  fun `merging options applies enableQueueTracing`() {
+    val externalOptions = ExternalOptions()
+    externalOptions.setEnableQueueTracing(true)
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertTrue(options.isEnableQueueTracing)
+  }
+
+  @Test
+  fun `merging options preserves enableQueueTracing default when not set`() {
+    val externalOptions = ExternalOptions()
+    val options = IchnoisCoreOptions()
+    options.merge(externalOptions)
+    assertFalse(options.isEnableQueueTracing)
+  }
+
+  @Test
+  fun `getEffectiveOrgId prefers explicit orgId over DSN`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    options.orgId = "999"
+    assertEquals("999", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId falls back to DSN org id`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    assertEquals("123", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId returns null when no orgId configured`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@ichnois.io/456"
+    assertNull(options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId falls back to DSN when explicit orgId is empty string`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    options.orgId = ""
+    assertEquals("123", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId falls back to DSN when explicit orgId is whitespace only`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    options.orgId = "   "
+    assertEquals("123", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId falls back to DSN when explicit orgId is tab and newline`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    options.orgId = "\t\n"
+    assertEquals("123", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId returns null when explicit orgId is empty and no DSN orgId`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@ichnois.io/456"
+    options.orgId = ""
+    assertNull(options.effectiveOrgId)
+  }
+
+  @Test
+  fun `getEffectiveOrgId trims whitespace from explicit orgId`() {
+    val options = IchnoisCoreOptions()
+    options.dsn = "https://key@o123.ingest.ichnois.io/456"
+    options.orgId = "  999  "
+    assertEquals("999", options.effectiveOrgId)
+  }
+
+  @Test
+  fun `scopesStorageFactory is null by default`() {
+    val options = IchnoisCoreOptions()
+    assertNull(options.scopesStorageFactory)
+  }
+
+  @Test
+  fun `scopesStorageFactory can be set and retrieved`() {
+    val options = IchnoisCoreOptions()
+    val factory = IScopesStorageFactory { _ -> DefaultScopesStorage() }
+    options.scopesStorageFactory = factory
+    assertSame(factory, options.scopesStorageFactory)
+  }
+
+  @Test
+  fun `scopesStorageFactory can be set to null`() {
+    val options = IchnoisCoreOptions()
+    val factory = IScopesStorageFactory { _ -> DefaultScopesStorage() }
+    options.scopesStorageFactory = factory
+    options.scopesStorageFactory = null
+    assertNull(options.scopesStorageFactory)
+  }
+
+  private fun IchnoisCoreOptions.peekHostnameCache(): HostnameCache? =
+    getProperty<LazyEvaluator<HostnameCache>>("hostnameCache").getProperty("value")
+
+  /** Options whose hostname cache resolves against a ticker the test controls. */
+  private fun optionsWithTicker(ticker: MonotonicTicker): IchnoisCoreOptions =
+    object : IchnoisCoreOptions() {
+      override fun getMonotonicTicker(): MonotonicTicker = ticker
+    }
+
+  @Test
+  fun `hostname is resolved on first use, not when options are constructed`() {
+    val ticker = TestMonotonicTicker()
+    val options = optionsWithTicker(ticker)
+
+    assertThat(options.peekHostnameCache()).isNull()
+
+    val cache = options.hostnameCache
+
+    // Also keeps the assertion above honest: peek does report a cache once one exists.
+    assertThat(options.peekHostnameCache()).isSameInstanceAs(cache)
+    assertThat(options.hostnameCache).isSameInstanceAs(cache)
+    assertThat(cache.getProperty<MonotonicTicker>("ticker")).isSameInstanceAs(ticker)
+  }
+}

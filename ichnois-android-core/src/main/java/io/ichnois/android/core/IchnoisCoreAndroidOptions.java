@@ -1,0 +1,1045 @@
+package io.ichnois.android.core;
+
+import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
+import android.content.Context;
+import io.ichnois.Hint;
+import io.ichnois.IScope;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.ISpan;
+import io.ichnois.IchnoisCore;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreFeedbackOptions;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.SpanStatus;
+import io.ichnois.android.core.internal.time.AndroidMonotonicTicker;
+import io.ichnois.android.core.internal.util.RootChecker;
+import io.ichnois.android.core.internal.util.IchnoisCoreFrameMetricsCollector;
+import io.ichnois.protocol.Mechanism;
+import io.ichnois.protocol.SdkVersion;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.time.MonotonicTicker;
+import io.ichnois.util.SampleRateUtils;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+/** IchnoisCore SDK options for Android */
+public final class IchnoisCoreAndroidOptions extends IchnoisCoreOptions {
+
+  /**
+   * Enable or disable ANR (Application Not Responding) Default is enabled Used by AnrIntegration
+   */
+  private boolean anrEnabled = true;
+
+  /** ANR Timeout interval in Millis Default is 5000 = 5s Used by AnrIntegration */
+  private long anrTimeoutIntervalMillis = 5000;
+
+  /** Enable or disable ANR on Debug mode Default is disabled Used by AnrIntegration */
+  private boolean anrReportInDebug = false;
+
+  /**
+   * Enable or disable in-process, heartbeat-based app-hang detection in ichnois-native. Default is
+   * disabled. When enabled, ichnois-native's background watchdog captures an app-hang event if no
+   * heartbeat is received within {@link #ndkAppHangTimeoutIntervalMillis} on the monitored thread.
+   *
+   * <p>This is intended for downstream/hybrid SDKs that emit the heartbeat by calling the native
+   * {@code ichnois_app_hang_heartbeat()} from their main thread. It is independent of the JVM-based
+   * {@link #anrEnabled} ANR detection.
+   */
+  private boolean enableNdkAppHangTracking = false;
+
+  /**
+   * The app-hang detection timeout interval in millis used by ichnois-native. Default is 5000 = 5s.
+   */
+  private long ndkAppHangTimeoutIntervalMillis = 5000;
+
+  /**
+   * Enable or disable automatic breadcrumbs for Activity lifecycle. Using
+   * Application.ActivityLifecycleCallbacks
+   */
+  private boolean enableActivityLifecycleBreadcrumbs = true;
+
+  /** Enable or disable automatic breadcrumbs for App's lifecycle Using ProcessLifecycleOwner */
+  private boolean enableAppLifecycleBreadcrumbs = true;
+
+  /** Enable or disable automatic breadcrumbs for SystemEvents Registering a BroadcastReceiver */
+  private boolean enableSystemEventBreadcrumbs = true;
+
+  /** Enable or disable automatic breadcrumbs for App Components Using ComponentCallbacks */
+  private boolean enableAppComponentBreadcrumbs = true;
+
+  /** Enable or disable automatic breadcrumbs for Network Events Using NetworkCallback */
+  private boolean enableNetworkEventBreadcrumbs = true;
+
+  /**
+   * Enables the Auto instrumentation for Activity lifecycle tracing.
+   *
+   * <ul>
+   *   <li>It also requires setting any of {@link IchnoisCoreOptions#getTracesSampleRate()} or {@link
+   *       IchnoisCoreOptions#getTracesSampler()}.
+   * </ul>
+   *
+   * <ul>
+   *   It starts a transaction before each Activity's onCreate method is called
+   *   (onActivityPreCreated).
+   *   <li>The transaction's name is the Activity's name, e.g. MainActivity.
+   *   <li>The transaction's operation is navigation.
+   * </ul>
+   *
+   * <ul>
+   *   It finishes the transaction after each activity's onResume method is called
+   *   (onActivityPostResumed), this depends on {@link
+   *   IchnoisCoreAndroidOptions#enableActivityLifecycleTracingAutoFinish}.
+   *   <li>If {@link IchnoisCoreAndroidOptions#enableActivityLifecycleTracingAutoFinish} is disabled, you
+   *       may finish the transaction manually.
+   *   <li>If the transaction is not finished either automatically or manually, we finish it
+   *       automatically when each Activity's onDestroy method is called (onActivityDestroyed).
+   *   <li>If the previous transaction is not finished when a new Activity is being shown, we finish
+   *       it automatically before the new Activity's onCreate is called (onActivityPreCreated).
+   *   <li>The transaction status will be {@link SpanStatus#OK} if none is set.
+   * </ul>
+   *
+   * <p>The transaction is automatically bound to the {@link IScope}, but only if there's no
+   * transaction already bound to the Scope.
+   */
+  private boolean enableAutoActivityLifecycleTracing = true;
+
+  /**
+   * Enables the Auto instrumentation for Activity lifecycle tracing, but specifically when to
+   * finish the transaction, read {@link IchnoisCoreAndroidOptions#enableAutoActivityLifecycleTracing}.
+   *
+   * <p>If you require a specific lifecycle to finish a transaction or even after the Activity is
+   * fully rendered but still waiting for an IO operation, you could call {@link ISpan#finish()}
+   * yourself on {@link IchnoisCore#getSpan()}, be sure that you've finished all of your manually created
+   * Spans.
+   */
+  private boolean enableActivityLifecycleTracingAutoFinish = true;
+
+  /** Interface that loads the debug images list */
+  private @NotNull IDebugImagesLoader debugImagesLoader = NoOpDebugImagesLoader.getInstance();
+
+  /**
+   * Enables or disables the attach screenshot feature when an error happened. Use {@link
+   * IchnoisCoreAndroidOptions#setBeforeScreenshotCaptureCallback(BeforeCaptureCallback)} ()} to control
+   * when a screenshot should be captured.
+   */
+  private boolean attachScreenshot;
+
+  /**
+   * Enables or disables the attach view hierarchy feature when an error happened. Use {@link
+   * IchnoisCoreAndroidOptions#setBeforeViewHierarchyCaptureCallback(BeforeCaptureCallback)} ()} to
+   * control when a view hierarchy should be captured.
+   */
+  private boolean attachViewHierarchy;
+
+  /**
+   * Enables or disables collecting of device information which requires Inter-Process Communication
+   * (IPC)
+   */
+  private boolean collectAdditionalContext = true;
+
+  /** Enables or disables collecting of external storage context. */
+  private boolean collectExternalStorageContext = false;
+
+  private volatile @Nullable DeviceInfoUtil deviceInfoUtil;
+
+  /**
+   * Controls how many seconds to wait for sending events in case there were Startup Crashes in the
+   * previous run. IchnoisCore SDKs normally send events from a background queue, but in the case of
+   * Startup Crashes, it blocks the execution of the {@link IchnoisCore#init()} function for the amount
+   * of startupCrashFlushTimeoutMillis to make sure the events make it to IchnoisCore.
+   *
+   * <p>When the timeout is reached, the execution will continue on background.
+   *
+   * <p>Default is 5000 = 5s.
+   */
+  private long startupCrashFlushTimeoutMillis = 5000; // 5s
+
+  /**
+   * Controls the threshold after the application startup time, within which a crash should happen
+   * to be considered a Startup Crash.
+   *
+   * <p>Startup Crashes are sent on {@link IchnoisCore#init()} in a blocking way, controlled by {@link
+   * IchnoisCoreAndroidOptions#startupCrashFlushTimeoutMillis}.
+   *
+   * <p>Default is 2000 = 2s.
+   */
+  private final long startupCrashDurationThresholdMillis = 2000; // 2s
+
+  private boolean enableFramesTracking = true;
+
+  private @Nullable String nativeSdkName = null;
+
+  /**
+   * Controls whether to enable the {@link RootChecker}, which can potentially make apps to be
+   * flagged by some app stores as harmful.
+   */
+  private boolean enableRootCheck = true;
+
+  private @Nullable BeforeCaptureCallback beforeScreenshotCaptureCallback;
+
+  private @Nullable BeforeCaptureCallback beforeViewHierarchyCaptureCallback;
+
+  /** Turns NDK on or off. Default is enabled. */
+  private boolean enableNdk = true;
+
+  @NotNull
+  private NdkHandlerStrategy ndkHandlerStrategy =
+      NdkHandlerStrategy.ICHNOIS_HANDLER_STRATEGY_DEFAULT;
+
+  /**
+   * Enable the Java to NDK Scope sync. The default value for ichnois-java is disabled and enabled
+   * for ichnois-android.
+   */
+  private boolean enableScopeSync = true;
+
+  /**
+   * Whether to enable automatic trace ID generation. This is mainly used by the Hybrid SDKs to
+   * control the trace ID generation from the outside.
+   */
+  private boolean enableAutoTraceIdGeneration = true;
+
+  /** Enable or disable intent extras reporting for system event breadcrumbs. Default is false. */
+  private boolean enableSystemEventBreadcrumbsExtras = false;
+
+  @NotNull
+  DeviceInfoUtil getOrCreateDeviceInfoUtil(final @NotNull Context context) {
+    if (deviceInfoUtil == null) {
+      try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+        if (deviceInfoUtil == null) {
+          deviceInfoUtil = new DeviceInfoUtil(ContextUtils.getApplicationContext(context), this);
+        }
+      }
+    }
+    return deviceInfoUtil;
+  }
+
+  public interface BeforeCaptureCallback {
+
+    /**
+     * A callback which can be used to suppress capturing of screenshots or view hierarchies. This
+     * gives more fine grained control when capturing should be performed. E.g. - only capture
+     * screenshots for fatal events - overrule any debouncing for important events <br>
+     * As capturing can be resource-intensive, the debounce parameter should be respected if
+     * possible.
+     *
+     * <pre>
+     *  if (debounce) {
+     *    return false;
+     *  } else {
+     *    // check event and hint
+     *  }
+     *  </pre>
+     *
+     * @param event the event
+     * @param hint the hints
+     * @param debounce true if capturing is marked for being debounced
+     * @return true if capturing should be performed, false otherwise
+     */
+    boolean execute(@NotNull IchnoisCoreEvent event, @NotNull Hint hint, boolean debounce);
+  }
+
+  /**
+   * Controls whether to report historical ANRs (v2) from the {@link ApplicationExitInfo} system
+   * API. When enabled, reports all of the ANRs available in the {@link
+   * ActivityManager#getHistoricalProcessExitReasons(String, int, int)} list, as opposed to
+   * reporting only the latest one.
+   *
+   * <p>These events do not affect ANR rate nor are they enriched with additional information from
+   * {@link IScope} like breadcrumbs. The events are reported with 'HistoricalAppExitInfo' {@link
+   * Mechanism}.
+   */
+  private boolean reportHistoricalAnrs = false;
+
+  /**
+   * Controls whether to report historical Tombstones from the {@link ApplicationExitInfo} system
+   * API. When enabled, reports all of the Tombstones available in the {@link
+   * ActivityManager#getHistoricalProcessExitReasons(String, int, int)} list, as opposed to
+   * reporting only the latest one.
+   *
+   * <p>These events do not affect crash rate nor are they enriched with additional information from
+   * {@link IScope} like breadcrumbs.
+   */
+  private boolean reportHistoricalTombstones = false;
+
+  /**
+   * Controls whether to report <a
+   * href="https://source.android.com/docs/core/perf/memory-limiter">MemoryLimiter</a> exits from
+   * the {@link ApplicationExitInfo} system API.
+   *
+   * <p>If this flag is true and {@link #reportHistoricalMemoryLimiterExits} is false, then only the
+   * latest MemoryLimiter exit is reported. If both are true, then all available exits are reported.
+   */
+  private boolean memoryLimiterEnabled = false;
+
+  /**
+   * Controls whether to report historical <a
+   * href="https://source.android.com/docs/core/perf/memory-limiter">MemoryLimiter</a> exits from
+   * the {@link ApplicationExitInfo} system API (where "historical" means "older than the latest").
+   *
+   * <p>No-ops if {@link #memoryLimiterEnabled} is false.
+   */
+  private boolean reportHistoricalMemoryLimiterExits = false;
+
+  /**
+   * Controls whether to send ANR (v2) thread dump as an attachment with plain text. The thread dump
+   * is being attached from {@link ApplicationExitInfo#getTraceInputStream()}, if available.
+   */
+  private boolean attachAnrThreadDump = false;
+
+  /**
+   * Controls whether to attach the raw tombstone protobuf as an attachment. The tombstone is being
+   * attached from {@link ApplicationExitInfo#getTraceInputStream()}, if available.
+   */
+  private boolean attachRawTombstone = false;
+
+  private boolean enablePerformanceV2 = true;
+
+  private boolean enableStandaloneAppStartTracing = false;
+
+  private @Nullable IchnoisCoreFrameMetricsCollector frameMetricsCollector;
+
+  private boolean enableTombstone = false;
+
+  /**
+   * The maximum time difference, in milliseconds, between a tombstone from {@link
+   * ApplicationExitInfo} and a native crash event in the outbox for the two to be merged into a
+   * single event.
+   */
+  private long tombstoneMergeTimeThresholdMillis = 5000;
+
+  /**
+   * Screenshot masking options. Configure which views should be masked when capturing screenshots
+   * on error events.
+   *
+   * <p>Note: Screenshot masking requires the {@code ichnois-android-replay} module to be present at
+   * runtime. If the replay module is not available, screenshots will be captured without masking.
+   */
+  private final @NotNull IchnoisCoreScreenshotOptions screenshot = new IchnoisCoreScreenshotOptions();
+
+  /**
+   * Sample rate for capturing main-thread stack profiles when a foreground ANR is detected. {@code
+   * null} disables ANR profiling (default). Values must be between {@code 0.0} and {@code 1.0}.
+   */
+  private @Nullable Double anrProfilingSampleRate;
+
+  private boolean enableAnrFingerprinting = true;
+
+  public IchnoisCoreAndroidOptions() {
+    setIchnoisClientName(BuildConfig.ICHNOIS_ANDROID_SDK_NAME + "/" + BuildConfig.VERSION_NAME);
+    setSdkVersion(createSdkVersion());
+    setAttachServerName(false);
+  }
+
+  private @NotNull SdkVersion createSdkVersion() {
+    SdkVersion sdkVersion = getSdkVersion();
+
+    final String name = BuildConfig.ICHNOIS_ANDROID_SDK_NAME;
+    final String version = BuildConfig.VERSION_NAME;
+    sdkVersion = SdkVersion.updateSdkVersion(sdkVersion, name, version);
+
+    sdkVersion.addPackage("maven:io.ichnois:ichnois-android-core", version);
+
+    return sdkVersion;
+  }
+
+  /**
+   * Checks if ANR (Application Not Responding) is enabled or disabled Default is enabled
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isAnrEnabled() {
+    return anrEnabled;
+  }
+
+  /**
+   * Sets ANR (Application Not Responding) to enabled or disabled Default is enabled
+   *
+   * @param anrEnabled true for enabled and false for disabled
+   */
+  public void setAnrEnabled(boolean anrEnabled) {
+    this.anrEnabled = anrEnabled;
+  }
+
+  /**
+   * Returns the ANR timeout internal in Millis Default is 5000 = 5s
+   *
+   * @return the timeout in millis
+   */
+  public long getAnrTimeoutIntervalMillis() {
+    return anrTimeoutIntervalMillis;
+  }
+
+  /**
+   * Sets the ANR timeout internal in Millis Default is 5000 = 5s
+   *
+   * @param anrTimeoutIntervalMillis the timeout internal in Millis
+   */
+  public void setAnrTimeoutIntervalMillis(long anrTimeoutIntervalMillis) {
+    this.anrTimeoutIntervalMillis = anrTimeoutIntervalMillis;
+  }
+
+  /**
+   * Checks if ANR (Application Not Responding) is enabled or disabled on Debug mode Default is
+   * disabled
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isAnrReportInDebug() {
+    return anrReportInDebug;
+  }
+
+  /**
+   * Sets ANR (Application Not Responding) to enabled or disabled on Debug mode Default is disabled
+   *
+   * @param anrReportInDebug true for enabled and false for disabled
+   */
+  public void setAnrReportInDebug(boolean anrReportInDebug) {
+    this.anrReportInDebug = anrReportInDebug;
+  }
+
+  /**
+   * Checks if heartbeat-based app-hang detection in ichnois-native is enabled. Default is disabled.
+   *
+   * @return true if enabled or false otherwise
+   */
+  @ApiStatus.Experimental
+  public boolean isEnableNdkAppHangTracking() {
+    return enableNdkAppHangTracking;
+  }
+
+  /**
+   * Enables or disables heartbeat-based app-hang detection in ichnois-native. Default is disabled.
+   * Requires the NDK integration to be present and emitting heartbeats via the native {@code
+   * ichnois_app_hang_heartbeat()}.
+   *
+   * @param enableNdkAppHangTracking true for enabled and false for disabled
+   */
+  @ApiStatus.Experimental
+  public void setEnableNdkAppHangTracking(boolean enableNdkAppHangTracking) {
+    this.enableNdkAppHangTracking = enableNdkAppHangTracking;
+  }
+
+  /**
+   * Returns the app-hang detection timeout interval in millis used by ichnois-native. Default is
+   * 5000 = 5s.
+   *
+   * @return the timeout in millis
+   */
+  @ApiStatus.Experimental
+  public long getNdkAppHangTimeoutIntervalMillis() {
+    return ndkAppHangTimeoutIntervalMillis;
+  }
+
+  /**
+   * Sets the app-hang detection timeout interval in millis used by ichnois-native. Default is 5000 =
+   * 5s.
+   *
+   * @param ndkAppHangTimeoutIntervalMillis the timeout interval in millis
+   */
+  @ApiStatus.Experimental
+  public void setNdkAppHangTimeoutIntervalMillis(long ndkAppHangTimeoutIntervalMillis) {
+    this.ndkAppHangTimeoutIntervalMillis = ndkAppHangTimeoutIntervalMillis;
+  }
+
+  /**
+   * Sets Tombstone reporting (ApplicationExitInfo.REASON_CRASH_NATIVE) to enabled or disabled.
+   *
+   * @param enableTombstone true for enabled and false for disabled
+   */
+  public void setTombstoneEnabled(boolean enableTombstone) {
+    this.enableTombstone = enableTombstone;
+  }
+
+  /**
+   * Checks if Tombstone reporting (ApplicationExitInfo.REASON_CRASH_NATIVE) is enabled or disabled
+   * Default is disabled
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isTombstoneEnabled() {
+    return enableTombstone;
+  }
+
+  public boolean isEnableActivityLifecycleBreadcrumbs() {
+    return enableActivityLifecycleBreadcrumbs;
+  }
+
+  public void setEnableActivityLifecycleBreadcrumbs(boolean enableActivityLifecycleBreadcrumbs) {
+    this.enableActivityLifecycleBreadcrumbs = enableActivityLifecycleBreadcrumbs;
+  }
+
+  public boolean isEnableAppLifecycleBreadcrumbs() {
+    return enableAppLifecycleBreadcrumbs;
+  }
+
+  public void setEnableAppLifecycleBreadcrumbs(boolean enableAppLifecycleBreadcrumbs) {
+    this.enableAppLifecycleBreadcrumbs = enableAppLifecycleBreadcrumbs;
+  }
+
+  public boolean isEnableSystemEventBreadcrumbs() {
+    return enableSystemEventBreadcrumbs;
+  }
+
+  public void setEnableSystemEventBreadcrumbs(boolean enableSystemEventBreadcrumbs) {
+    this.enableSystemEventBreadcrumbs = enableSystemEventBreadcrumbs;
+  }
+
+  public boolean isEnableAppComponentBreadcrumbs() {
+    return enableAppComponentBreadcrumbs;
+  }
+
+  public void setEnableAppComponentBreadcrumbs(boolean enableAppComponentBreadcrumbs) {
+    this.enableAppComponentBreadcrumbs = enableAppComponentBreadcrumbs;
+  }
+
+  public boolean isEnableNetworkEventBreadcrumbs() {
+    return enableNetworkEventBreadcrumbs;
+  }
+
+  public void setEnableNetworkEventBreadcrumbs(boolean enableNetworkEventBreadcrumbs) {
+    this.enableNetworkEventBreadcrumbs = enableNetworkEventBreadcrumbs;
+  }
+
+  /**
+   * Enable or disable all the automatic breadcrumbs
+   *
+   * @param enable true if enable or false otherwise
+   */
+  public void enableAllAutoBreadcrumbs(boolean enable) {
+    enableActivityLifecycleBreadcrumbs = enable;
+    enableAppComponentBreadcrumbs = enable;
+    enableSystemEventBreadcrumbs = enable;
+    enableAppLifecycleBreadcrumbs = enable;
+    enableNetworkEventBreadcrumbs = enable;
+    setEnableUserInteractionBreadcrumbs(enable);
+  }
+
+  /**
+   * Returns the Debug image loader
+   *
+   * @return the image loader
+   */
+  public @NotNull IDebugImagesLoader getDebugImagesLoader() {
+    return debugImagesLoader;
+  }
+
+  /**
+   * Sets the image loader
+   *
+   * @param debugImagesLoader the image loader
+   */
+  public void setDebugImagesLoader(final @NotNull IDebugImagesLoader debugImagesLoader) {
+    this.debugImagesLoader =
+        debugImagesLoader != null ? debugImagesLoader : NoOpDebugImagesLoader.getInstance();
+  }
+
+  public boolean isEnableAutoActivityLifecycleTracing() {
+    return enableAutoActivityLifecycleTracing;
+  }
+
+  public void setEnableAutoActivityLifecycleTracing(boolean enableAutoActivityLifecycleTracing) {
+    this.enableAutoActivityLifecycleTracing = enableAutoActivityLifecycleTracing;
+  }
+
+  public boolean isEnableActivityLifecycleTracingAutoFinish() {
+    return enableActivityLifecycleTracingAutoFinish;
+  }
+
+  public void setEnableActivityLifecycleTracingAutoFinish(
+      boolean enableActivityLifecycleTracingAutoFinish) {
+    this.enableActivityLifecycleTracingAutoFinish = enableActivityLifecycleTracingAutoFinish;
+  }
+
+  public boolean isAttachScreenshot() {
+    return attachScreenshot;
+  }
+
+  public void setAttachScreenshot(boolean attachScreenshot) {
+    this.attachScreenshot = attachScreenshot;
+  }
+
+  public boolean isAttachViewHierarchy() {
+    return attachViewHierarchy;
+  }
+
+  public void setAttachViewHierarchy(boolean attachViewHierarchy) {
+    this.attachViewHierarchy = attachViewHierarchy;
+  }
+
+  public boolean isCollectAdditionalContext() {
+    return collectAdditionalContext;
+  }
+
+  public void setCollectAdditionalContext(boolean collectAdditionalContext) {
+    this.collectAdditionalContext = collectAdditionalContext;
+  }
+
+  public boolean isCollectExternalStorageContext() {
+    return collectExternalStorageContext;
+  }
+
+  public void setCollectExternalStorageContext(final boolean collectExternalStorageContext) {
+    this.collectExternalStorageContext = collectExternalStorageContext;
+  }
+
+  public boolean isEnableFramesTracking() {
+    return enableFramesTracking;
+  }
+
+  /**
+   * Enable or disable Frames Tracking, which is used to report slow and frozen frames.
+   *
+   * @param enableFramesTracking true if frames tracking should be enabled, false otherwise.
+   */
+  public void setEnableFramesTracking(boolean enableFramesTracking) {
+    this.enableFramesTracking = enableFramesTracking;
+  }
+
+  /**
+   * Returns the Startup Crash flush timeout in Millis
+   *
+   * @return the timeout in Millis
+   */
+  @ApiStatus.Internal
+  long getStartupCrashFlushTimeoutMillis() {
+    return startupCrashFlushTimeoutMillis;
+  }
+
+  /**
+   * Sets the Startup Crash flush timeout in Millis
+   *
+   * @param startupCrashFlushTimeoutMillis the timeout in Millis
+   */
+  @TestOnly
+  void setStartupCrashFlushTimeoutMillis(long startupCrashFlushTimeoutMillis) {
+    this.startupCrashFlushTimeoutMillis = startupCrashFlushTimeoutMillis;
+  }
+
+  /**
+   * Returns the Startup Crash duration threshold in Millis
+   *
+   * @return the threshold in Millis
+   */
+  @ApiStatus.Internal
+  public long getStartupCrashDurationThresholdMillis() {
+    return startupCrashDurationThresholdMillis;
+  }
+
+  /**
+   * Sets the sdk name for the ichnois-native ndk module. The value is used for the event->sdk
+   * attribute and the ichnois_client auth header.
+   *
+   * @param nativeSdkName the native sdk name
+   */
+  @ApiStatus.Internal
+  public void setNativeSdkName(final @Nullable String nativeSdkName) {
+    this.nativeSdkName = nativeSdkName;
+  }
+
+  @ApiStatus.Internal
+  public void setNativeHandlerStrategy(final @NotNull NdkHandlerStrategy ndkHandlerStrategy) {
+    this.ndkHandlerStrategy = ndkHandlerStrategy;
+  }
+
+  @ApiStatus.Internal
+  public int getNdkHandlerStrategy() {
+    return ndkHandlerStrategy.getValue();
+  }
+
+  /**
+   * Returns the sdk name for the ichnois native ndk module.
+   *
+   * @return the custom SDK name if set, otherwise null
+   */
+  @ApiStatus.Internal
+  public @Nullable String getNativeSdkName() {
+    return nativeSdkName;
+  }
+
+  public boolean isEnableRootCheck() {
+    return enableRootCheck;
+  }
+
+  public void setEnableRootCheck(final boolean enableRootCheck) {
+    this.enableRootCheck = enableRootCheck;
+  }
+
+  public @Nullable BeforeCaptureCallback getBeforeScreenshotCaptureCallback() {
+    return beforeScreenshotCaptureCallback;
+  }
+
+  /**
+   * Sets a callback which is executed before capturing screenshots. Only relevant if
+   * attachScreenshot is set to true.
+   *
+   * @param beforeScreenshotCaptureCallback the callback to execute
+   */
+  public void setBeforeScreenshotCaptureCallback(
+      final @NotNull BeforeCaptureCallback beforeScreenshotCaptureCallback) {
+    this.beforeScreenshotCaptureCallback = beforeScreenshotCaptureCallback;
+  }
+
+  public @Nullable BeforeCaptureCallback getBeforeViewHierarchyCaptureCallback() {
+    return beforeViewHierarchyCaptureCallback;
+  }
+
+  /**
+   * Sets a callback which is executed before capturing view hierarchies. Only relevant if
+   * attachViewHierarchy is set to true.
+   *
+   * @param beforeViewHierarchyCaptureCallback the callback to execute
+   */
+  public void setBeforeViewHierarchyCaptureCallback(
+      final @NotNull BeforeCaptureCallback beforeViewHierarchyCaptureCallback) {
+    this.beforeViewHierarchyCaptureCallback = beforeViewHierarchyCaptureCallback;
+  }
+
+  /**
+   * Check if NDK is ON or OFF Default is ON
+   *
+   * @return true if ON or false otherwise
+   */
+  public boolean isEnableNdk() {
+    return enableNdk;
+  }
+
+  /**
+   * Sets NDK to ON or OFF
+   *
+   * @param enableNdk true if ON or false otherwise
+   */
+  public void setEnableNdk(boolean enableNdk) {
+    this.enableNdk = enableNdk;
+  }
+
+  /**
+   * Returns if the Java to NDK Scope sync is enabled
+   *
+   * @return true if enabled or false otherwise
+   */
+  public boolean isEnableScopeSync() {
+    return enableScopeSync;
+  }
+
+  /**
+   * Enables or not the Java to NDK Scope sync
+   *
+   * @param enableScopeSync true if enabled or false otherwise
+   */
+  public void setEnableScopeSync(boolean enableScopeSync) {
+    this.enableScopeSync = enableScopeSync;
+  }
+
+  public boolean isReportHistoricalAnrs() {
+    return reportHistoricalAnrs;
+  }
+
+  public void setReportHistoricalAnrs(final boolean reportHistoricalAnrs) {
+    this.reportHistoricalAnrs = reportHistoricalAnrs;
+  }
+
+  public boolean isReportHistoricalTombstones() {
+    return reportHistoricalTombstones;
+  }
+
+  public void setReportHistoricalTombstones(final boolean reportHistoricalTombstones) {
+    this.reportHistoricalTombstones = reportHistoricalTombstones;
+  }
+
+  public boolean isAttachAnrThreadDump() {
+    return attachAnrThreadDump;
+  }
+
+  public void setAttachAnrThreadDump(final boolean attachAnrThreadDump) {
+    this.attachAnrThreadDump = attachAnrThreadDump;
+  }
+
+  public long getTombstoneMergeTimeThresholdMillis() {
+    return tombstoneMergeTimeThresholdMillis;
+  }
+
+  /**
+   * Sets the maximum time difference, in milliseconds, between a tombstone from {@link
+   * ApplicationExitInfo} and a native crash event in the outbox for the two to be merged into a
+   * single event. Defaults to 5000 ms.
+   *
+   * <p>The two timestamps come from different sources: the tombstone timestamp is recorded by the
+   * system when the process died, the native event timestamp is recorded by the SDK signal handler.
+   * Raise the threshold when crashes are reported as separate 'signalhandler' events instead of a
+   * merged event, because the gap between the two exceeded the threshold.
+   *
+   * <p>Do not raise it more than necessary. The threshold is the only criterion used to pair the
+   * two, so a high value can merge a tombstone with a native crash that belongs to a different
+   * process death. The merged event then reports the wrong stack trace, and the native crash it
+   * consumed is never sent on its own.
+   *
+   * <p>A value of 0 merges only events with identical timestamps. A negative value disables merging
+   * completely, so tombstone and native crash are both reported as separate events.
+   *
+   * @param tombstoneMergeTimeThresholdMillis the threshold in milliseconds
+   */
+  public void setTombstoneMergeTimeThresholdMillis(final long tombstoneMergeTimeThresholdMillis) {
+    this.tombstoneMergeTimeThresholdMillis = tombstoneMergeTimeThresholdMillis;
+  }
+
+  public boolean isAttachRawTombstone() {
+    return attachRawTombstone;
+  }
+
+  public void setAttachRawTombstone(final boolean attachRawTombstone) {
+    this.attachRawTombstone = attachRawTombstone;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isMemoryLimiterEnabled() {
+    return memoryLimiterEnabled;
+  }
+
+  /**
+   * Enables or disables reporting of Android <a
+   * href="https://source.android.com/docs/core/perf/memory-limiter">MemoryLimiter</a> exits.
+   * Disabled by default.
+   *
+   * <p>Enabling this flag allows the SDK to inspect retained {@link ApplicationExitInfo} records on
+   * the next app start and report the latest retained matching MemoryLimiter exit as a IchnoisCore
+   * event.
+   *
+   * <p>See {@link #setReportHistoricalMemoryLimiterExits(boolean)} if you also want to create
+   * IchnoisCore events from MemoryLimiter exits before the latest.
+   *
+   * <p>Available on Android API ≥ 37. No-ops if the Android API is below 37 or if the {@link
+   * #setCacheDirPath cache dir path} hasn't been set.
+   */
+  @ApiStatus.Experimental
+  public void setMemoryLimiterEnabled(final boolean memoryLimiterEnabled) {
+    this.memoryLimiterEnabled = memoryLimiterEnabled;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isReportHistoricalMemoryLimiterExits() {
+    return reportHistoricalMemoryLimiterExits;
+  }
+
+  /**
+   * Enables or disables reporting of historical retained <a
+   * href="https://source.android.com/docs/core/perf/memory-limiter">MemoryLimiter</a> exits on
+   * startup (where "historical" means "older than the latest"). Disabled by default.
+   *
+   * <p>Use this together with {@link #setMemoryLimiterEnabled(boolean)} when you want the
+   * platform's complete retained exit history.
+   *
+   * <p>Note: unlike the latest exit, historical exits are <b>not</b> enriched with contextual
+   * IchnoisCore data.
+   *
+   * <p>Available on Android API ≥ 37. No-ops if the Android API is below 37, if the {@link
+   * #setCacheDirPath cache dir path} hasn't been set, or if {@link #setMemoryLimiterEnabled the
+   * MemoryLimiter integration} hasn't been enabled.
+   */
+  @ApiStatus.Experimental
+  public void setReportHistoricalMemoryLimiterExits(
+      final boolean reportHistoricalMemoryLimiterExits) {
+    this.reportHistoricalMemoryLimiterExits = reportHistoricalMemoryLimiterExits;
+  }
+
+  /**
+   * @return true if performance-v2 is enabled. See {@link #setEnablePerformanceV2(boolean)} for
+   *     more details.
+   */
+  public boolean isEnablePerformanceV2() {
+    return enablePerformanceV2;
+  }
+
+  /**
+   * Enables or disables the Performance V2 SDK features.
+   *
+   * <p>With this change - Cold app start spans will provide more accurate timings - Cold app start
+   * spans will be enriched with detailed ContentProvider, Application and Activity startup times
+   *
+   * @param enablePerformanceV2 true if enabled or false otherwise
+   */
+  public void setEnablePerformanceV2(final boolean enablePerformanceV2) {
+    this.enablePerformanceV2 = enablePerformanceV2;
+  }
+
+  /**
+   * @return true if standalone app start tracing is enabled. See {@link
+   *     #setEnableStandaloneAppStartTracing(boolean)} for more details.
+   */
+  @ApiStatus.Experimental
+  public boolean isEnableStandaloneAppStartTracing() {
+    return enableStandaloneAppStartTracing;
+  }
+
+  /**
+   * Enables or disables standalone app start tracing.
+   *
+   * <p>When enabled, app start is sent as its own transaction instead of an {@code app.start.*}
+   * child span on the first Activity transaction.
+   *
+   * <p>The SDK reports app start through these paths:
+   *
+   * <ul>
+   *   <li>With an Activity: the SDK sends an "App Start" transaction with operation {@code
+   *       app.start}, plus a separate {@code ui.load} transaction for the Activity. Both
+   *       transactions share the same trace ID.
+   *   <li>Headless app start: for launches started by something like a broadcast receiver, service,
+   *       or content provider without an Activity, the SDK sends only the standalone app-start
+   *       transaction.
+   *       <ul>
+   *         <li>On devices running Android 15 (API level 35) or newer, the SDK can use {@code
+   *             ApplicationStartInfo} to classify cold versus warm starts and anchor the end time
+   *             at the {@code Application.onCreate} start.
+   *         <li>On devices running older Android versions, headless launches are treated as cold
+   *             once {@code Application.onCreate} finishes without an Activity. The end time falls
+   *             back to the best SDK/plugin timing available.
+   *         <li>With {@code Application.onCreate} instrumentation, the SDK can add an {@code
+   *             application.load} phase span and use the exact {@code Application.onCreate} end
+   *             time. Without that instrumentation, the standalone transaction is still sent, but
+   *             it may only include the {@code process.load} phase span.
+   *       </ul>
+   *   <li>If an Activity opens after a headless start, its {@code ui.load} transaction reuses the
+   *       app-start trace ID.
+   * </ul>
+   *
+   * @param enableStandaloneAppStartTracing true if enabled or false otherwise
+   */
+  @ApiStatus.Experimental
+  public void setEnableStandaloneAppStartTracing(final boolean enableStandaloneAppStartTracing) {
+    this.enableStandaloneAppStartTracing = enableStandaloneAppStartTracing;
+  }
+
+  @ApiStatus.Internal
+  public @Nullable IchnoisCoreFrameMetricsCollector getFrameMetricsCollector() {
+    return frameMetricsCollector;
+  }
+
+  @ApiStatus.Internal
+  public void setFrameMetricsCollector(
+      final @Nullable IchnoisCoreFrameMetricsCollector frameMetricsCollector) {
+    this.frameMetricsCollector = frameMetricsCollector;
+  }
+
+  public boolean isEnableAutoTraceIdGeneration() {
+    return enableAutoTraceIdGeneration;
+  }
+
+  public void setEnableAutoTraceIdGeneration(final boolean enableAutoTraceIdGeneration) {
+    this.enableAutoTraceIdGeneration = enableAutoTraceIdGeneration;
+  }
+
+  public boolean isEnableSystemEventBreadcrumbsExtras() {
+    return enableSystemEventBreadcrumbsExtras;
+  }
+
+  public void setEnableSystemEventBreadcrumbsExtras(
+      final boolean enableSystemEventBreadcrumbsExtras) {
+    this.enableSystemEventBreadcrumbsExtras = enableSystemEventBreadcrumbsExtras;
+  }
+
+  /**
+   * Returns the screenshot masking options.
+   *
+   * @return the screenshot masking options
+   */
+  public @NotNull IchnoisCoreScreenshotOptions getScreenshot() {
+    return screenshot;
+  }
+
+  /**
+   * Returns the sample rate used when deciding whether to capture a main-thread stack profile for a
+   * detected foreground ANR.
+   *
+   * @return the ANR profiling sample rate, or {@code null} when ANR profiling is disabled
+   */
+  public @Nullable Double getAnrProfilingSampleRate() {
+    return anrProfilingSampleRate;
+  }
+
+  /**
+   * Sets the sample rate for capturing main-thread stack profiles when a foreground ANR is
+   * detected. The profile is attached to the ANR event on the next app start.
+   *
+   * <p>Use {@code null} to disable ANR profiling (default). Values must be between {@code 0.0} and
+   * {@code 1.0}.
+   *
+   * @param anrProfilingSampleRate the sample rate, or {@code null} to disable
+   */
+  public void setAnrProfilingSampleRate(final @Nullable Double anrProfilingSampleRate) {
+    if (!SampleRateUtils.isValidSampleRate(anrProfilingSampleRate)) {
+      throw new IllegalArgumentException(
+          "The value "
+              + anrProfilingSampleRate
+              + " is not valid. Use null to disable or values >= 0.0 and <= 1.0.");
+    }
+    this.anrProfilingSampleRate = anrProfilingSampleRate;
+  }
+
+  /**
+   * Returns whether ANR profiling is enabled. ANR profiling is enabled when {@link
+   * #getAnrProfilingSampleRate()} is non-null and greater than {@code 0.0}.
+   *
+   * @return {@code true} if ANR profiling is enabled
+   */
+  public boolean isAnrProfilingEnabled() {
+    return anrProfilingSampleRate != null && anrProfilingSampleRate > 0;
+  }
+
+  /**
+   * Returns whether ANR fingerprinting is enabled. When enabled, the SDK assigns static
+   * fingerprints to ANR events that would otherwise produce noisy grouping. Currently, this applies
+   * a static fingerprint to ANRs whose stacktraces contain only system frames and no application
+   * frames.
+   *
+   * @return true if ANR fingerprinting is enabled
+   */
+  public boolean isEnableAnrFingerprinting() {
+    return enableAnrFingerprinting;
+  }
+
+  /**
+   * Sets whether ANR fingerprinting is enabled. When enabled, the SDK assigns static fingerprints
+   * to ANR events that would otherwise produce noisy grouping. Currently, this applies a static
+   * fingerprint to ANRs whose stacktraces contain only system frames and no application frames.
+   *
+   * @param enableAnrFingerprinting true to enable ANR fingerprinting
+   */
+  public void setEnableAnrFingerprinting(final boolean enableAnrFingerprinting) {
+    this.enableAnrFingerprinting = enableAnrFingerprinting;
+  }
+
+  @Override
+  @ApiStatus.Internal
+  public @NotNull MonotonicTicker getMonotonicTicker() {
+    return AndroidMonotonicTicker.getInstance();
+  }
+
+  static class AndroidUserFeedbackFormHandler implements IchnoisCoreFeedbackOptions.IFormHandler {
+    @Override
+    public void showForm(
+        final @Nullable IchnoisCoreId associatedEventId,
+        final @Nullable IchnoisCoreFeedbackOptions.OptionsConfigurator configurator) {
+      final @Nullable Activity activity = CurrentActivityHolder.getInstance().getActivity();
+      if (activity == null) {
+        IchnoisCore.getCurrentScopes()
+            .getOptions()
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.ERROR,
+                "Cannot show user feedback dialog, no activity is available. "
+                    + "Make sure to call IchnoisCoreAndroid.init() in your Application.onCreate() method.");
+        return;
+      }
+
+      new IchnoisCoreUserFeedbackForm.Builder(activity)
+          .associatedEventId(associatedEventId)
+          .configurator(configurator)
+          .create()
+          .show();
+    }
+  }
+}

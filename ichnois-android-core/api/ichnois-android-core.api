@@ -1,0 +1,929 @@
+public final class io/ichnois/android/core/ActivityBreadcrumbsIntegration : android/app/Application$ActivityLifecycleCallbacks, io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/app/Application;)V
+	public fun close ()V
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivitySaveInstanceState (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/ActivityFramesTracker {
+	public fun <init> (Lio/ichnois/util/LoadClass;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)V
+	public fun <init> (Lio/ichnois/util/LoadClass;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Lio/ichnois/android/core/MainLooperHandler;)V
+	public fun addActivity (Landroid/app/Activity;)V
+	public fun isFrameMetricsAggregatorAvailable ()Z
+	public fun setMetrics (Landroid/app/Activity;Lio/ichnois/protocol/IchnoisCoreId;)V
+	public fun stop ()V
+	public fun takeMetrics (Lio/ichnois/protocol/IchnoisCoreId;)Ljava/util/Map;
+}
+
+public final class io/ichnois/android/core/ActivityLifecycleIntegration : android/app/Application$ActivityLifecycleCallbacks, io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/app/Application;Lio/ichnois/android/core/BuildInfoProvider;Lio/ichnois/android/core/ActivityFramesTracker;)V
+	public fun close ()V
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityPostCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityPostResumed (Landroid/app/Activity;)V
+	public fun onActivityPostStarted (Landroid/app/Activity;)V
+	public fun onActivityPreCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityPrePaused (Landroid/app/Activity;)V
+	public fun onActivityPreStarted (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivitySaveInstanceState (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public class io/ichnois/android/core/AndroidContinuousProfiler : io/ichnois/IContinuousProfiler, io/ichnois/transport/RateLimiter$IRateLimitObserver {
+	public fun <init> (Lio/ichnois/android/core/BuildInfoProvider;Lio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;Lio/ichnois/ILogger;Ljava/lang/String;ILio/ichnois/util/LazyEvaluator$Evaluator;)V
+	public fun close (Z)V
+	public fun getChunkId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun getProfileRecordingState (Lio/ichnois/protocol/IchnoisCoreId;Lio/ichnois/IchnoisCoreDate;Lio/ichnois/IchnoisCoreDate;)Lio/ichnois/profiling/ProfileRecordingState;
+	public fun getProfilerId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun getRootSpanCounter ()I
+	public fun isRunning ()Z
+	public fun onRateLimitChanged (Lio/ichnois/transport/RateLimiter;)V
+	public fun reevaluateSampling ()V
+	public fun startProfiler (Lio/ichnois/ProfileLifecycle;Lio/ichnois/TracesSampler;)V
+	public fun stopProfiler (Lio/ichnois/ProfileLifecycle;)V
+}
+
+public final class io/ichnois/android/core/AndroidCpuCollector : io/ichnois/IPerformanceSnapshotCollector {
+	public fun <init> (Lio/ichnois/ILogger;)V
+	public fun collect (Lio/ichnois/PerformanceCollectionData;)V
+	public fun setup ()V
+}
+
+public final class io/ichnois/android/core/AndroidDateUtils {
+	public fun <init> ()V
+	public static fun getCurrentIchnoisCoreDateTime ()Lio/ichnois/IchnoisCoreDate;
+}
+
+public final class io/ichnois/android/core/AndroidFatalLogger : io/ichnois/ILogger {
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;)V
+	public fun isEnabled (Lio/ichnois/IchnoisCoreLevel;)Z
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/String;Ljava/lang/Throwable;)V
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+}
+
+public final class io/ichnois/android/core/AndroidLogger : io/ichnois/ILogger {
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;)V
+	public fun isEnabled (Lio/ichnois/IchnoisCoreLevel;)Z
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/String;Ljava/lang/Throwable;)V
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun log (Lio/ichnois/IchnoisCoreLevel;Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+}
+
+public final class io/ichnois/android/core/AndroidLoggerBatchProcessor : io/ichnois/logger/LoggerBatchProcessor, io/ichnois/android/core/AppState$AppStateListener {
+	public fun <init> (Lio/ichnois/IchnoisCoreOptions;Lio/ichnois/IIchnoisCoreClient;)V
+	public fun close (Z)V
+	public fun onBackground ()V
+	public fun onForeground ()V
+}
+
+public final class io/ichnois/android/core/AndroidLoggerBatchProcessorFactory : io/ichnois/logger/ILoggerBatchProcessorFactory {
+	public fun <init> ()V
+	public fun create (Lio/ichnois/IchnoisCoreOptions;Lio/ichnois/IchnoisCoreClient;)Lio/ichnois/logger/ILoggerBatchProcessor;
+}
+
+public class io/ichnois/android/core/AndroidMemoryCollector : io/ichnois/IPerformanceSnapshotCollector {
+	public fun <init> ()V
+	public fun collect (Lio/ichnois/PerformanceCollectionData;)V
+	public fun setup ()V
+}
+
+public final class io/ichnois/android/core/AndroidMetricsBatchProcessor : io/ichnois/metrics/MetricsBatchProcessor, io/ichnois/android/core/AppState$AppStateListener {
+	public fun <init> (Lio/ichnois/IchnoisCoreOptions;Lio/ichnois/IIchnoisCoreClient;)V
+	public fun close (Z)V
+	public fun onBackground ()V
+	public fun onForeground ()V
+}
+
+public final class io/ichnois/android/core/AndroidMetricsBatchProcessorFactory : io/ichnois/metrics/IMetricsBatchProcessorFactory {
+	public fun <init> ()V
+	public fun create (Lio/ichnois/IchnoisCoreOptions;Lio/ichnois/IchnoisCoreClient;)Lio/ichnois/metrics/IMetricsBatchProcessor;
+}
+
+public class io/ichnois/android/core/AndroidProfiler {
+	protected final field lock Lio/ichnois/util/AutoClosableReentrantLock;
+	public fun <init> (Ljava/lang/String;ILio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;Lio/ichnois/util/LazyEvaluator$Evaluator;Lio/ichnois/ILogger;)V
+	public fun close ()V
+	public fun endAndCollect (ZLjava/util/List;)Lio/ichnois/android/core/AndroidProfiler$ProfileEndData;
+	public fun start ()Lio/ichnois/android/core/AndroidProfiler$ProfileStartData;
+}
+
+public class io/ichnois/android/core/AndroidProfiler$ProfileEndData {
+	public final field didTimeout Z
+	public final field endCpuMillis J
+	public final field endNanos J
+	public final field measurementsMap Ljava/util/Map;
+	public final field traceFile Ljava/io/File;
+	public fun <init> (JJZLjava/io/File;Ljava/util/Map;)V
+}
+
+public class io/ichnois/android/core/AndroidProfiler$ProfileStartData {
+	public final field startCpuMillis J
+	public final field startNanos J
+	public final field startTimestamp Ljava/util/Date;
+	public fun <init> (JJLjava/util/Date;)V
+}
+
+public final class io/ichnois/android/core/AndroidSocketTagger : io/ichnois/ISocketTagger {
+	public static fun getInstance ()Lio/ichnois/android/core/AndroidSocketTagger;
+	public fun tagSockets ()V
+	public fun untagSockets ()V
+}
+
+public final class io/ichnois/android/core/AnrIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;)V
+	public fun close ()V
+	public final fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/AnrIntegrationFactory {
+	public fun <init> ()V
+	public static fun create (Landroid/content/Context;Lio/ichnois/android/core/BuildInfoProvider;)Lio/ichnois/Integration;
+}
+
+public class io/ichnois/android/core/AnrV2Integration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;)V
+	public fun close ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/AnrV2Integration$AnrV2Hint : io/ichnois/hints/BlockingFlushHint, io/ichnois/hints/AbnormalExit, io/ichnois/hints/Backfillable {
+	public fun <init> (JLio/ichnois/ILogger;JZZ)V
+	public fun ignoreCurrentThread ()Z
+	public fun isFlushable (Lio/ichnois/protocol/IchnoisCoreId;)Z
+	public fun mechanism ()Ljava/lang/String;
+	public fun setFlushable (Lio/ichnois/protocol/IchnoisCoreId;)V
+	public fun shouldEnrich ()Z
+	public fun timestamp ()Ljava/lang/Long;
+}
+
+public final class io/ichnois/android/core/AppComponentsBreadcrumbsIntegration : android/content/ComponentCallbacks2, io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;)V
+	public fun close ()V
+	public fun onConfigurationChanged (Landroid/content/res/Configuration;)V
+	public fun onLowMemory ()V
+	public fun onTrimMemory (I)V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/AppLifecycleIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> ()V
+	public fun close ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/AppStartExtension : io/ichnois/IAppStartExtender {
+	public fun <init> (Lio/ichnois/android/core/performance/AppStartMetrics;)V
+	public fun clear ()V
+	public fun extendAppStart ()V
+	public fun finishExtendedAppStart ()V
+	public fun finishTransaction (Lio/ichnois/IchnoisCoreDate;)V
+	public fun getExtendedAppStartSpan ()Lio/ichnois/ISpan;
+	public fun getExtendedEndTime ()Lio/ichnois/IchnoisCoreDate;
+	public fun isActive ()Z
+	public fun isExtended ()Z
+	public fun setData (Ljava/lang/String;Ljava/lang/Object;)V
+	public fun setExtendAppStartListener (Lio/ichnois/android/core/AppStartExtension$ExtendAppStartListener;)V
+}
+
+public abstract interface class io/ichnois/android/core/AppStartExtension$ExtendAppStartListener {
+	public abstract fun onExtendAppStartRequested ()Lio/ichnois/android/core/AppStartExtension$ExtendedAppStart;
+}
+
+public final class io/ichnois/android/core/AppStartExtension$ExtendedAppStart {
+	public final field span Lio/ichnois/ISpan;
+	public final field transaction Lio/ichnois/ITransaction;
+	public fun <init> (Lio/ichnois/ITransaction;Lio/ichnois/ISpan;)V
+}
+
+public final class io/ichnois/android/core/AppState : java/io/Closeable {
+	public fun addAppStateListener (Lio/ichnois/android/core/AppState$AppStateListener;)V
+	public fun close ()V
+	public static fun getInstance ()Lio/ichnois/android/core/AppState;
+	public fun getLifecycleObserver ()Lio/ichnois/android/core/AppState$LifecycleObserver;
+	public fun isInBackground ()Ljava/lang/Boolean;
+	public fun registerLifecycleObserver (Lio/ichnois/IchnoisCoreOptions;)V
+	public fun removeAppStateListener (Lio/ichnois/android/core/AppState$AppStateListener;)V
+	public fun resetInstance ()V
+	public fun unregisterLifecycleObserver ()V
+}
+
+public abstract interface class io/ichnois/android/core/AppState$AppStateListener {
+	public abstract fun onBackground ()V
+	public abstract fun onForeground ()V
+}
+
+public final class io/ichnois/android/core/AppState$LifecycleObserver : androidx/lifecycle/DefaultLifecycleObserver {
+	public fun <init> (Lio/ichnois/android/core/AppState;)V
+	public fun getListeners ()Ljava/util/List;
+	public fun onStart (Landroidx/lifecycle/LifecycleOwner;)V
+	public fun onStop (Landroidx/lifecycle/LifecycleOwner;)V
+}
+
+public final class io/ichnois/android/core/ApplicationExitInfoEventProcessor : io/ichnois/BackfillingEventProcessor, io/ichnois/internal/eventprocessor/IchnoisCoreEventProcessor {
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Lio/ichnois/android/core/BuildInfoProvider;)V
+	public fun getOrder ()Ljava/lang/Long;
+	public fun process (Lio/ichnois/IchnoisCoreEvent;Lio/ichnois/Hint;)Lio/ichnois/IchnoisCoreEvent;
+	public fun process (Lio/ichnois/protocol/IchnoisCoreTransaction;Lio/ichnois/Hint;)Lio/ichnois/protocol/IchnoisCoreTransaction;
+}
+
+public final class io/ichnois/android/core/BuildConfig {
+	public static final field BUILD_TYPE Ljava/lang/String;
+	public static final field DEBUG Z
+	public static final field LIBRARY_PACKAGE_NAME Ljava/lang/String;
+	public static final field ICHNOIS_ANDROID_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+	public fun <init> ()V
+}
+
+public final class io/ichnois/android/core/BuildInfoProvider {
+	public fun <init> (Lio/ichnois/ILogger;)V
+	public fun getBuildTags ()Ljava/lang/String;
+	public fun getManufacturer ()Ljava/lang/String;
+	public fun getModel ()Ljava/lang/String;
+	public fun getSdkInfoVersion ()I
+	public fun getVersionRelease ()Ljava/lang/String;
+	public fun isEmulator ()Ljava/lang/Boolean;
+}
+
+public final class io/ichnois/android/core/ContextUtils {
+	public static fun appIsLibraryForComposePreview (Landroid/content/Context;)Z
+	public static fun getApplicationContext (Landroid/content/Context;)Landroid/content/Context;
+	public static fun isForegroundImportance ()Z
+}
+
+public class io/ichnois/android/core/CurrentActivityHolder {
+	public fun clearActivity ()V
+	public fun clearActivity (Landroid/app/Activity;)V
+	public fun getActivity ()Landroid/app/Activity;
+	public static fun getInstance ()Lio/ichnois/android/core/CurrentActivityHolder;
+	public fun setActivity (Landroid/app/Activity;)V
+}
+
+public final class io/ichnois/android/core/DeviceInfoUtil {
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)V
+	public fun collectDeviceInformation (ZZ)Lio/ichnois/protocol/Device;
+	public static fun getBatteryLevel (Landroid/content/Intent;Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/Float;
+	public static fun getInstance (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)Lio/ichnois/android/core/DeviceInfoUtil;
+	public fun getOperatingSystem ()Lio/ichnois/protocol/OperatingSystem;
+	public fun getSideLoadedInfo ()Lio/ichnois/android/core/ContextUtils$SideLoadedInfo;
+	public fun getSplitApksInfo ()Lio/ichnois/android/core/ContextUtils$SplitApksInfo;
+	public fun getTotalMemory ()Ljava/lang/Long;
+	public static fun isCharging (Landroid/content/Intent;Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/Boolean;
+}
+
+public abstract class io/ichnois/android/core/EnvelopeFileObserverIntegration : io/ichnois/Integration, java/io/Closeable {
+	protected final field startLock Lio/ichnois/util/AutoClosableReentrantLock;
+	public fun <init> ()V
+	public fun close ()V
+	public static fun getOutboxFileObserver ()Lio/ichnois/android/core/EnvelopeFileObserverIntegration;
+	public final fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/FeedbackShakeIntegration : android/app/Application$ActivityLifecycleCallbacks, io/ichnois/Integration, io/ichnois/IchnoisCoreFeedbackOptions$IShakeController, java/io/Closeable {
+	public fun <init> (Landroid/app/Application;)V
+	public fun close ()V
+	public fun disableOnShake ()V
+	public fun enableOnShake ()V
+	public fun isOnShakeEnabled ()Z
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivitySaveInstanceState (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public abstract interface class io/ichnois/android/core/IDebugImagesLoader {
+	public abstract fun clearDebugImages ()V
+	public abstract fun loadDebugImages ()Ljava/util/List;
+	public abstract fun loadDebugImagesForAddresses (Ljava/util/Set;)Ljava/util/Set;
+}
+
+public final class io/ichnois/android/core/InternalIchnoisCoreSdk {
+	public fun <init> ()V
+	public static fun captureEnvelope ([BZ)Lio/ichnois/protocol/IchnoisCoreId;
+	public static fun captureEnvelopeNonTerminating ([B)Lio/ichnois/protocol/IchnoisCoreId;
+	public static fun getAppStartMeasurement ()Ljava/util/Map;
+	public static fun getCurrentScope ()Lio/ichnois/IScope;
+	public static fun serializeScope (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Lio/ichnois/IScope;)Ljava/util/Map;
+	public static fun setTrace (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Double;Ljava/lang/Double;)V
+	public static fun updateSessionForDroppedEventNonTerminating (Z)V
+}
+
+public final class io/ichnois/android/core/LoadClass : io/ichnois/util/LoadClass {
+	public fun <init> ()V
+	public fun isClassAvailable (Ljava/lang/String;Lio/ichnois/ILogger;)Z
+	public fun isClassAvailable (Ljava/lang/String;Lio/ichnois/IchnoisCoreOptions;)Z
+	public fun loadClass (Ljava/lang/String;Lio/ichnois/ILogger;)Ljava/lang/Class;
+}
+
+public final class io/ichnois/android/core/MemoryLimiterIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/BuildInfoProvider;)V
+	public fun close ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/MemoryLimiterIntegration$MemoryLimiterHint : io/ichnois/hints/BlockingFlushHint, io/ichnois/hints/AbnormalExit, io/ichnois/hints/Backfillable {
+	public fun <init> (JLio/ichnois/ILogger;JZ)V
+	public fun ignoreCurrentThread ()Z
+	public fun isFlushable (Lio/ichnois/protocol/IchnoisCoreId;)Z
+	public fun mechanism ()Ljava/lang/String;
+	public fun setFlushable (Lio/ichnois/protocol/IchnoisCoreId;)V
+	public fun shouldEnrich ()Z
+	public fun timestamp ()Ljava/lang/Long;
+}
+
+public final class io/ichnois/android/core/NativeEventCollector {
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)V
+	public fun collect ()V
+	public fun deleteNativeEventFile (Lio/ichnois/android/core/NativeEventCollector$NativeEventData;)Z
+	public fun findAndRemoveMatchingNativeEvent (J)Lio/ichnois/android/core/NativeEventCollector$NativeEventData;
+}
+
+public final class io/ichnois/android/core/NativeEventCollector$NativeEventData {
+	public fun getEnvelope ()Lio/ichnois/IchnoisCoreEnvelope;
+	public fun getEvent ()Lio/ichnois/IchnoisCoreEvent;
+	public fun getFile ()Ljava/io/File;
+}
+
+public final class io/ichnois/android/core/NdkHandlerStrategy : java/lang/Enum {
+	public static final field ICHNOIS_HANDLER_STRATEGY_CHAIN_AT_START Lio/ichnois/android/core/NdkHandlerStrategy;
+	public static final field ICHNOIS_HANDLER_STRATEGY_DEFAULT Lio/ichnois/android/core/NdkHandlerStrategy;
+	public fun getValue ()I
+	public static fun valueOf (Ljava/lang/String;)Lio/ichnois/android/core/NdkHandlerStrategy;
+	public static fun values ()[Lio/ichnois/android/core/NdkHandlerStrategy;
+}
+
+public final class io/ichnois/android/core/NdkIntegration : io/ichnois/Integration, java/io/Closeable {
+	public static final field ICHNOIS_NDK_CLASS_NAME Ljava/lang/String;
+	public fun <init> (Ljava/lang/Class;)V
+	public fun close ()V
+	public final fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/NetworkBreadcrumbsIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/BuildInfoProvider;)V
+	public fun close ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public class io/ichnois/android/core/PerfettoContinuousProfiler : io/ichnois/IContinuousProfiler, io/ichnois/transport/RateLimiter$IRateLimitObserver {
+	public fun <init> (Lio/ichnois/ILogger;Lio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;Lio/ichnois/util/LazyEvaluator$Evaluator;Ljava/util/function/Supplier;)V
+	public fun close (Z)V
+	public fun getChunkId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun getProfileRecordingState (Lio/ichnois/protocol/IchnoisCoreId;Lio/ichnois/IchnoisCoreDate;Lio/ichnois/IchnoisCoreDate;)Lio/ichnois/profiling/ProfileRecordingState;
+	public fun getProfilerId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun isRunning ()Z
+	public fun onRateLimitChanged (Lio/ichnois/transport/RateLimiter;)V
+	public fun reevaluateSampling ()V
+	public fun startProfiler (Lio/ichnois/ProfileLifecycle;Lio/ichnois/TracesSampler;)V
+	public fun stopProfiler (Lio/ichnois/ProfileLifecycle;)V
+}
+
+public class io/ichnois/android/core/PerfettoProfiler {
+	public fun <init> (Landroid/content/Context;Lio/ichnois/ILogger;Lio/ichnois/IIchnoisCoreExecutorService;)V
+	public fun endAndCollect (Ljava/util/function/Consumer;)V
+}
+
+public final class io/ichnois/android/core/ScreenshotEventProcessor : io/ichnois/internal/eventprocessor/IchnoisCoreEventProcessor {
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Lio/ichnois/android/core/BuildInfoProvider;Z)V
+	public fun getOrder ()Ljava/lang/Long;
+	public fun process (Lio/ichnois/IchnoisCoreEvent;Lio/ichnois/Hint;)Lio/ichnois/IchnoisCoreEvent;
+	public fun process (Lio/ichnois/protocol/IchnoisCoreTransaction;Lio/ichnois/Hint;)Lio/ichnois/protocol/IchnoisCoreTransaction;
+}
+
+public final class io/ichnois/android/core/IchnoisCoreAndroid {
+	public static fun init (Landroid/content/Context;)V
+	public static fun init (Landroid/content/Context;Lio/ichnois/ILogger;)V
+	public static fun init (Landroid/content/Context;Lio/ichnois/ILogger;Lio/ichnois/IchnoisCore$OptionsConfiguration;)V
+	public static fun init (Landroid/content/Context;Lio/ichnois/IchnoisCore$OptionsConfiguration;)V
+}
+
+public final class io/ichnois/android/core/IchnoisCoreAndroidDateProvider : io/ichnois/IchnoisCoreDateProvider {
+	public fun <init> ()V
+	public fun now ()Lio/ichnois/IchnoisCoreDate;
+}
+
+public final class io/ichnois/android/core/IchnoisCoreAndroidOptions : io/ichnois/IchnoisCoreOptions {
+	public fun <init> ()V
+	public fun enableAllAutoBreadcrumbs (Z)V
+	public fun getAnrProfilingSampleRate ()Ljava/lang/Double;
+	public fun getAnrTimeoutIntervalMillis ()J
+	public fun getBeforeScreenshotCaptureCallback ()Lio/ichnois/android/core/IchnoisCoreAndroidOptions$BeforeCaptureCallback;
+	public fun getBeforeViewHierarchyCaptureCallback ()Lio/ichnois/android/core/IchnoisCoreAndroidOptions$BeforeCaptureCallback;
+	public fun getDebugImagesLoader ()Lio/ichnois/android/core/IDebugImagesLoader;
+	public fun getFrameMetricsCollector ()Lio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;
+	public fun getMonotonicTicker ()Lio/ichnois/time/MonotonicTicker;
+	public fun getNativeSdkName ()Ljava/lang/String;
+	public fun getNdkAppHangTimeoutIntervalMillis ()J
+	public fun getNdkHandlerStrategy ()I
+	public fun getScreenshot ()Lio/ichnois/android/core/IchnoisCoreScreenshotOptions;
+	public fun getStartupCrashDurationThresholdMillis ()J
+	public fun getTombstoneMergeTimeThresholdMillis ()J
+	public fun isAnrEnabled ()Z
+	public fun isAnrProfilingEnabled ()Z
+	public fun isAnrReportInDebug ()Z
+	public fun isAttachAnrThreadDump ()Z
+	public fun isAttachRawTombstone ()Z
+	public fun isAttachScreenshot ()Z
+	public fun isAttachViewHierarchy ()Z
+	public fun isCollectAdditionalContext ()Z
+	public fun isCollectExternalStorageContext ()Z
+	public fun isEnableActivityLifecycleBreadcrumbs ()Z
+	public fun isEnableActivityLifecycleTracingAutoFinish ()Z
+	public fun isEnableAnrFingerprinting ()Z
+	public fun isEnableAppComponentBreadcrumbs ()Z
+	public fun isEnableAppLifecycleBreadcrumbs ()Z
+	public fun isEnableAutoActivityLifecycleTracing ()Z
+	public fun isEnableAutoTraceIdGeneration ()Z
+	public fun isEnableFramesTracking ()Z
+	public fun isEnableNdk ()Z
+	public fun isEnableNdkAppHangTracking ()Z
+	public fun isEnableNetworkEventBreadcrumbs ()Z
+	public fun isEnablePerformanceV2 ()Z
+	public fun isEnableRootCheck ()Z
+	public fun isEnableScopeSync ()Z
+	public fun isEnableStandaloneAppStartTracing ()Z
+	public fun isEnableSystemEventBreadcrumbs ()Z
+	public fun isEnableSystemEventBreadcrumbsExtras ()Z
+	public fun isMemoryLimiterEnabled ()Z
+	public fun isReportHistoricalAnrs ()Z
+	public fun isReportHistoricalMemoryLimiterExits ()Z
+	public fun isReportHistoricalTombstones ()Z
+	public fun isTombstoneEnabled ()Z
+	public fun setAnrEnabled (Z)V
+	public fun setAnrProfilingSampleRate (Ljava/lang/Double;)V
+	public fun setAnrReportInDebug (Z)V
+	public fun setAnrTimeoutIntervalMillis (J)V
+	public fun setAttachAnrThreadDump (Z)V
+	public fun setAttachRawTombstone (Z)V
+	public fun setAttachScreenshot (Z)V
+	public fun setAttachViewHierarchy (Z)V
+	public fun setBeforeScreenshotCaptureCallback (Lio/ichnois/android/core/IchnoisCoreAndroidOptions$BeforeCaptureCallback;)V
+	public fun setBeforeViewHierarchyCaptureCallback (Lio/ichnois/android/core/IchnoisCoreAndroidOptions$BeforeCaptureCallback;)V
+	public fun setCollectAdditionalContext (Z)V
+	public fun setCollectExternalStorageContext (Z)V
+	public fun setDebugImagesLoader (Lio/ichnois/android/core/IDebugImagesLoader;)V
+	public fun setEnableActivityLifecycleBreadcrumbs (Z)V
+	public fun setEnableActivityLifecycleTracingAutoFinish (Z)V
+	public fun setEnableAnrFingerprinting (Z)V
+	public fun setEnableAppComponentBreadcrumbs (Z)V
+	public fun setEnableAppLifecycleBreadcrumbs (Z)V
+	public fun setEnableAutoActivityLifecycleTracing (Z)V
+	public fun setEnableAutoTraceIdGeneration (Z)V
+	public fun setEnableFramesTracking (Z)V
+	public fun setEnableNdk (Z)V
+	public fun setEnableNdkAppHangTracking (Z)V
+	public fun setEnableNetworkEventBreadcrumbs (Z)V
+	public fun setEnablePerformanceV2 (Z)V
+	public fun setEnableRootCheck (Z)V
+	public fun setEnableScopeSync (Z)V
+	public fun setEnableStandaloneAppStartTracing (Z)V
+	public fun setEnableSystemEventBreadcrumbs (Z)V
+	public fun setEnableSystemEventBreadcrumbsExtras (Z)V
+	public fun setFrameMetricsCollector (Lio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;)V
+	public fun setMemoryLimiterEnabled (Z)V
+	public fun setNativeHandlerStrategy (Lio/ichnois/android/core/NdkHandlerStrategy;)V
+	public fun setNativeSdkName (Ljava/lang/String;)V
+	public fun setNdkAppHangTimeoutIntervalMillis (J)V
+	public fun setReportHistoricalAnrs (Z)V
+	public fun setReportHistoricalMemoryLimiterExits (Z)V
+	public fun setReportHistoricalTombstones (Z)V
+	public fun setTombstoneEnabled (Z)V
+	public fun setTombstoneMergeTimeThresholdMillis (J)V
+}
+
+public abstract interface class io/ichnois/android/core/IchnoisCoreAndroidOptions$BeforeCaptureCallback {
+	public abstract fun execute (Lio/ichnois/IchnoisCoreEvent;Lio/ichnois/Hint;Z)Z
+}
+
+public final class io/ichnois/android/core/IchnoisCoreFramesDelayResult {
+	public fun <init> (DI)V
+	public fun getDelaySeconds ()D
+	public fun getFramesContributingToDelayCount ()I
+}
+
+public final class io/ichnois/android/core/IchnoisCoreInitProvider {
+	public fun <init> ()V
+	public fun attachInfo (Landroid/content/Context;Landroid/content/pm/ProviderInfo;)V
+	public fun getType (Landroid/net/Uri;)Ljava/lang/String;
+	public fun onCreate ()Z
+	public fun shutdown ()V
+}
+
+public final class io/ichnois/android/core/IchnoisCoreLogcatAdapter {
+	public fun <init> ()V
+	public static fun d (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun d (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun e (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun e (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun i (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun i (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun v (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun v (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun w (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun w (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun w (Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun wtf (Ljava/lang/String;Ljava/lang/String;)I
+	public static fun wtf (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+	public static fun wtf (Ljava/lang/String;Ljava/lang/Throwable;)I
+}
+
+public final class io/ichnois/android/core/IchnoisCorePerformanceProvider {
+	public fun <init> ()V
+	public fun attachInfo (Landroid/content/Context;Landroid/content/pm/ProviderInfo;)V
+	public fun getType (Landroid/net/Uri;)Ljava/lang/String;
+	public fun onCreate ()Z
+	public fun shutdown ()V
+}
+
+public final class io/ichnois/android/core/IchnoisCoreScreenshotOptions : io/ichnois/IchnoisCoreMaskingOptions {
+	public fun <init> ()V
+	public fun setMaskAllImages (Z)V
+	public fun trackCustomMasking ()V
+}
+
+public final class io/ichnois/android/core/IchnoisCoreShakeDetector : android/hardware/SensorEventListener {
+	public fun <init> (Lio/ichnois/ILogger;)V
+	public fun close ()V
+	public fun onAccuracyChanged (Landroid/hardware/Sensor;I)V
+	public fun onSensorChanged (Landroid/hardware/SensorEvent;)V
+	public fun start (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreShakeDetector$Listener;)V
+	public fun stop ()V
+}
+
+public abstract interface class io/ichnois/android/core/IchnoisCoreShakeDetector$Listener {
+	public abstract fun onShake ()V
+}
+
+public class io/ichnois/android/core/IchnoisCoreUserFeedbackButton : android/widget/Button {
+	public fun <init> (Landroid/content/Context;)V
+	public fun <init> (Landroid/content/Context;Landroid/util/AttributeSet;)V
+	public fun <init> (Landroid/content/Context;Landroid/util/AttributeSet;I)V
+	public fun <init> (Landroid/content/Context;Landroid/util/AttributeSet;II)V
+	public fun setOnClickListener (Landroid/view/View$OnClickListener;)V
+}
+
+public final class io/ichnois/android/core/IchnoisCoreUserFeedbackDialog : io/ichnois/android/core/IchnoisCoreUserFeedbackForm {
+}
+
+public class io/ichnois/android/core/IchnoisCoreUserFeedbackDialog$Builder : io/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder {
+	public fun <init> (Landroid/content/Context;)V
+	public fun <init> (Landroid/content/Context;I)V
+	public fun <init> (Landroid/content/Context;ILio/ichnois/android/core/IchnoisCoreUserFeedbackDialog$OptionsConfiguration;)V
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreUserFeedbackDialog$OptionsConfiguration;)V
+	public fun associatedEventId (Lio/ichnois/protocol/IchnoisCoreId;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackDialog$Builder;
+	public synthetic fun associatedEventId (Lio/ichnois/protocol/IchnoisCoreId;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder;
+	public fun configurator (Lio/ichnois/IchnoisCoreFeedbackOptions$OptionsConfigurator;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackDialog$Builder;
+	public synthetic fun configurator (Lio/ichnois/IchnoisCoreFeedbackOptions$OptionsConfigurator;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder;
+	public fun create ()Lio/ichnois/android/core/IchnoisCoreUserFeedbackDialog;
+	public synthetic fun create ()Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm;
+}
+
+public abstract interface class io/ichnois/android/core/IchnoisCoreUserFeedbackDialog$OptionsConfiguration : io/ichnois/android/core/IchnoisCoreUserFeedbackForm$OptionsConfiguration {
+}
+
+public class io/ichnois/android/core/IchnoisCoreUserFeedbackForm : android/app/AlertDialog {
+	protected fun onCreate (Landroid/os/Bundle;)V
+	public fun onDetachedFromWindow ()V
+	protected fun onStart ()V
+	protected fun onStop ()V
+	public fun setCancelable (Z)V
+	public fun setOnDismissListener (Landroid/content/DialogInterface$OnDismissListener;)V
+	public fun show ()V
+}
+
+public class io/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder {
+	public fun <init> (Landroid/content/Context;)V
+	public fun <init> (Landroid/content/Context;I)V
+	public fun <init> (Landroid/content/Context;ILio/ichnois/android/core/IchnoisCoreUserFeedbackForm$OptionsConfiguration;)V
+	public fun <init> (Landroid/content/Context;Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm$OptionsConfiguration;)V
+	public fun associatedEventId (Lio/ichnois/protocol/IchnoisCoreId;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder;
+	public fun configurator (Lio/ichnois/IchnoisCoreFeedbackOptions$OptionsConfigurator;)Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm$Builder;
+	public fun create ()Lio/ichnois/android/core/IchnoisCoreUserFeedbackForm;
+}
+
+public abstract interface class io/ichnois/android/core/IchnoisCoreUserFeedbackForm$OptionsConfiguration {
+	public abstract fun configure (Landroid/content/Context;Lio/ichnois/IchnoisCoreFeedbackOptions;)V
+}
+
+public class io/ichnois/android/core/SpanFrameMetricsCollector : io/ichnois/IPerformanceContinuousCollector, io/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector$FrameMetricsCollectorListener {
+	protected final field lock Lio/ichnois/util/AutoClosableReentrantLock;
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Lio/ichnois/android/core/internal/util/IchnoisCoreFrameMetricsCollector;)V
+	public fun clear ()V
+	public fun onFrameMetricCollected (JJJJZZF)V
+	public fun onSpanFinished (Lio/ichnois/ISpan;)V
+	public fun onSpanStarted (Lio/ichnois/ISpan;)V
+}
+
+public final class io/ichnois/android/core/SystemEventsBreadcrumbsIntegration : io/ichnois/Integration, io/ichnois/android/core/AppState$AppStateListener, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;)V
+	public fun <init> (Landroid/content/Context;Landroid/os/Handler;)V
+	public fun <init> (Landroid/content/Context;Ljava/util/List;)V
+	public fun close ()V
+	public static fun getDefaultActions ()Ljava/util/List;
+	public fun onBackground ()V
+	public fun onForeground ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public class io/ichnois/android/core/TombstoneIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/content/Context;)V
+	public fun close ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/TombstoneIntegration$TombstoneHint : io/ichnois/hints/BlockingFlushHint, io/ichnois/hints/Backfillable, io/ichnois/hints/NativeCrashExit {
+	public fun <init> (JLio/ichnois/ILogger;JZ)V
+	public fun isFlushable (Lio/ichnois/protocol/IchnoisCoreId;)Z
+	public fun setFlushable (Lio/ichnois/protocol/IchnoisCoreId;)V
+	public fun shouldEnrich ()Z
+	public fun timestamp ()Ljava/lang/Long;
+}
+
+public class io/ichnois/android/core/TombstoneIntegration$TombstonePolicy : io/ichnois/android/core/ApplicationExitInfoHistoryDispatcher$ApplicationExitInfoPolicy {
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;Landroid/content/Context;)V
+	public fun buildReport (Landroid/app/ApplicationExitInfo;Z)Lio/ichnois/android/core/ApplicationExitInfoHistoryDispatcher$Report;
+	public fun getLabel ()Ljava/lang/String;
+	public fun getLastReportedTimestamp ()Ljava/lang/Long;
+	public fun markReported (J)V
+	public fun matches (Landroid/app/ApplicationExitInfo;)Z
+	public fun shouldReportHistorical ()Z
+}
+
+public final class io/ichnois/android/core/UserInteractionIntegration : android/app/Application$ActivityLifecycleCallbacks, io/ichnois/Integration, java/io/Closeable {
+	public fun <init> (Landroid/app/Application;Lio/ichnois/util/LoadClass;)V
+	public fun close ()V
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivitySaveInstanceState (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/core/ViewHierarchyEventProcessor : io/ichnois/internal/eventprocessor/IchnoisCoreEventProcessor {
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)V
+	public fun getOrder ()Ljava/lang/Long;
+	public fun process (Lio/ichnois/IchnoisCoreEvent;Lio/ichnois/Hint;)Lio/ichnois/IchnoisCoreEvent;
+	public fun process (Lio/ichnois/protocol/IchnoisCoreTransaction;Lio/ichnois/Hint;)Lio/ichnois/protocol/IchnoisCoreTransaction;
+	public static fun snapshotViewHierarchy (Landroid/app/Activity;Lio/ichnois/ILogger;)Lio/ichnois/protocol/ViewHierarchy;
+	public static fun snapshotViewHierarchy (Landroid/app/Activity;Ljava/util/List;Lio/ichnois/util/thread/IThreadChecker;Lio/ichnois/ILogger;)Lio/ichnois/protocol/ViewHierarchy;
+	public static fun snapshotViewHierarchy (Landroid/view/View;)Lio/ichnois/protocol/ViewHierarchy;
+	public static fun snapshotViewHierarchy (Landroid/view/View;Ljava/util/List;)Lio/ichnois/protocol/ViewHierarchy;
+	public static fun snapshotViewHierarchyAsData (Landroid/app/Activity;Lio/ichnois/util/thread/IThreadChecker;Lio/ichnois/ISerializer;Lio/ichnois/ILogger;)[B
+}
+
+public class io/ichnois/android/core/anr/AggregatedStackTrace {
+	public fun <init> ([Ljava/lang/StackTraceElement;IIJF)V
+	public fun addOccurrence (J)V
+	public fun getStack ()[Ljava/lang/StackTraceElement;
+}
+
+public class io/ichnois/android/core/anr/AnrCulpritIdentifier {
+	public fun <init> ()V
+	public static fun identify (Ljava/util/List;)Lio/ichnois/android/core/anr/AggregatedStackTrace;
+	public static fun isSystemFrame (Ljava/lang/String;)Z
+}
+
+public class io/ichnois/android/core/anr/AnrProfile {
+	public final field endTimeMs J
+	public final field stacks Ljava/util/List;
+	public final field startTimeMs J
+	public fun <init> (Ljava/util/List;)V
+}
+
+public class io/ichnois/android/core/anr/AnrProfileManager : java/lang/AutoCloseable {
+	public fun <init> (Lio/ichnois/IchnoisCoreOptions;)V
+	public fun <init> (Lio/ichnois/IchnoisCoreOptions;Ljava/io/File;)V
+	public fun add (Lio/ichnois/android/core/anr/AnrStackTrace;)V
+	public fun clear ()V
+	public fun close ()V
+	public fun load ()Lio/ichnois/android/core/anr/AnrProfile;
+}
+
+public class io/ichnois/android/core/anr/AnrProfileRotationHelper {
+	public fun <init> ()V
+	public static fun deleteLastFile (Ljava/io/File;)Z
+	public static fun getFileForRecording (Ljava/io/File;)Ljava/io/File;
+	public static fun getLastFile (Ljava/io/File;)Ljava/io/File;
+	public static fun rotate ()V
+}
+
+public class io/ichnois/android/core/anr/AnrProfilingIntegration : io/ichnois/Integration, io/ichnois/android/core/AppState$AppStateListener, java/io/Closeable, java/lang/Runnable {
+	public static final field POLLING_INTERVAL_MS J
+	public static final field THRESHOLD_ANR_MS J
+	public fun <init> ()V
+	protected fun checkMainThread (Ljava/lang/Thread;)V
+	public fun close ()V
+	protected fun getProfileManager ()Lio/ichnois/android/core/anr/AnrProfileManager;
+	protected fun getState ()Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+	public fun onBackground ()V
+	public fun onForeground ()V
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+	public fun run ()V
+}
+
+protected final class io/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState : java/lang/Enum {
+	public static final field ANR_DETECTED Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+	public static final field IDLE Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+	public static final field SUSPICIOUS Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+	public static fun valueOf (Ljava/lang/String;)Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+	public static fun values ()[Lio/ichnois/android/core/anr/AnrProfilingIntegration$MainThreadState;
+}
+
+public final class io/ichnois/android/core/anr/AnrStackTrace : java/lang/Comparable {
+	public final field stack [Ljava/lang/StackTraceElement;
+	public final field timestampMs J
+	public fun <init> (J[Ljava/lang/StackTraceElement;)V
+	public fun compareTo (Lio/ichnois/android/core/anr/AnrStackTrace;)I
+	public synthetic fun compareTo (Ljava/lang/Object;)I
+	public static fun deserialize (Ljava/io/DataInputStream;)Lio/ichnois/android/core/anr/AnrStackTrace;
+	public fun serialize (Ljava/io/DataOutputStream;)V
+}
+
+public final class io/ichnois/android/core/anr/StackTraceConverter {
+	public fun <init> ()V
+	public static fun convert (Lio/ichnois/android/core/anr/AnrProfile;)Lio/ichnois/protocol/profiling/IchnoisCoreProfile;
+}
+
+public final class io/ichnois/android/core/cache/AndroidEnvelopeCache : io/ichnois/cache/EnvelopeCache {
+	public static final field LAST_ANR_MARKER_LABEL Ljava/lang/String;
+	public static final field LAST_ANR_REPORT Ljava/lang/String;
+	public static final field LAST_MEMORY_LIMITER_MARKER_LABEL Ljava/lang/String;
+	public static final field LAST_MEMORY_LIMITER_REPORT Ljava/lang/String;
+	public static final field LAST_TOMBSTONE_MARKER_LABEL Ljava/lang/String;
+	public static final field LAST_TOMBSTONE_REPORT Ljava/lang/String;
+	public fun <init> (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)V
+	public fun getDirectory ()Ljava/io/File;
+	public static fun hasStartupCrashMarker (Lio/ichnois/IchnoisCoreOptions;)Z
+	public static fun lastReportedAnr (Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/Long;
+	public static fun lastReportedMemoryLimiter (Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/Long;
+	public static fun lastReportedTombstone (Lio/ichnois/IchnoisCoreOptions;)Ljava/lang/Long;
+	public static fun markAnrReported (Lio/ichnois/IchnoisCoreOptions;J)V
+	public static fun markMemoryLimiterReported (Lio/ichnois/IchnoisCoreOptions;J)V
+	public static fun markTombstoneReported (Lio/ichnois/IchnoisCoreOptions;J)V
+	public fun store (Lio/ichnois/IchnoisCoreEnvelope;Lio/ichnois/Hint;)V
+	public fun storeEnvelope (Lio/ichnois/IchnoisCoreEnvelope;Lio/ichnois/Hint;)Z
+}
+
+public class io/ichnois/android/core/performance/ActivityLifecycleCallbacksAdapter : android/app/Application$ActivityLifecycleCallbacks {
+	public fun <init> ()V
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivitySaveInstanceState (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+}
+
+public class io/ichnois/android/core/performance/ActivityLifecycleSpanHelper {
+	public fun <init> (Ljava/lang/String;)V
+	public fun clear ()V
+	public fun createAndStopOnCreateSpan (Lio/ichnois/ISpan;)V
+	public fun createAndStopOnStartSpan (Lio/ichnois/ISpan;)V
+	public fun getOnCreateSpan ()Lio/ichnois/ISpan;
+	public fun getOnCreateStartTimestamp ()Lio/ichnois/IchnoisCoreDate;
+	public fun getOnStartSpan ()Lio/ichnois/ISpan;
+	public fun getOnStartStartTimestamp ()Lio/ichnois/IchnoisCoreDate;
+	public fun saveSpanToAppStartMetrics ()V
+	public fun setOnCreateStartTimestamp (Lio/ichnois/IchnoisCoreDate;)V
+	public fun setOnStartStartTimestamp (Lio/ichnois/IchnoisCoreDate;)V
+}
+
+public class io/ichnois/android/core/performance/ActivityLifecycleTimeSpan : java/lang/Comparable {
+	public fun <init> ()V
+	public fun compareTo (Lio/ichnois/android/core/performance/ActivityLifecycleTimeSpan;)I
+	public synthetic fun compareTo (Ljava/lang/Object;)I
+	public final fun getOnCreate ()Lio/ichnois/android/core/performance/TimeSpan;
+	public final fun getOnStart ()Lio/ichnois/android/core/performance/TimeSpan;
+}
+
+public class io/ichnois/android/core/performance/AppStartMetrics : io/ichnois/android/core/performance/ActivityLifecycleCallbacksAdapter {
+	public static final field staticLock Lio/ichnois/util/AutoClosableReentrantLock;
+	public fun <init> ()V
+	public fun addActivityLifecycleTimeSpans (Lio/ichnois/android/core/performance/ActivityLifecycleTimeSpan;)V
+	public fun canExtendAppStart ()Z
+	public fun clear ()V
+	public fun createProcessInitSpan ()Lio/ichnois/android/core/performance/TimeSpan;
+	public fun getActivityLifecycleTimeSpans ()Ljava/util/List;
+	public fun getAppStartBaggageHeader ()Ljava/lang/String;
+	public fun getAppStartContinuousProfiler ()Lio/ichnois/IContinuousProfiler;
+	public fun getAppStartEndTime ()Lio/ichnois/IchnoisCoreDate;
+	public fun getAppStartExtension ()Lio/ichnois/android/core/AppStartExtension;
+	public fun getAppStartProfiler ()Lio/ichnois/ITransactionProfiler;
+	public fun getAppStartReason ()Ljava/lang/String;
+	public fun getAppStartSamplingDecision ()Lio/ichnois/TracesSamplingDecision;
+	public fun getAppStartIchnoisCoreTraceHeader ()Ljava/lang/String;
+	public fun getAppStartTimeSpan ()Lio/ichnois/android/core/performance/TimeSpan;
+	public fun getAppStartTimeSpanForHeadless ()Lio/ichnois/android/core/performance/TimeSpan;
+	public fun getAppStartTimeSpanWithFallback (Lio/ichnois/android/core/IchnoisCoreAndroidOptions;)Lio/ichnois/android/core/performance/TimeSpan;
+	public fun getAppStartTraceId ()Lio/ichnois/protocol/IchnoisCoreId;
+	public fun getAppStartType ()Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+	public fun getApplicationOnCreateTimeSpan ()Lio/ichnois/android/core/performance/TimeSpan;
+	public fun getClassLoadedUptimeMs ()J
+	public fun getContentProviderOnCreateTimeSpans ()Ljava/util/List;
+	public static fun getInstance ()Lio/ichnois/android/core/performance/AppStartMetrics;
+	public fun getSdkInitTimeSpan ()Lio/ichnois/android/core/performance/TimeSpan;
+	public fun isAppLaunchedInForeground ()Z
+	public fun onActivityCreated (Landroid/app/Activity;Landroid/os/Bundle;)V
+	public fun onActivityDestroyed (Landroid/app/Activity;)V
+	public fun onActivityPaused (Landroid/app/Activity;)V
+	public fun onActivityResumed (Landroid/app/Activity;)V
+	public fun onActivityStarted (Landroid/app/Activity;)V
+	public fun onActivityStopped (Landroid/app/Activity;)V
+	public fun onAppStartSpansSent ()V
+	public static fun onApplicationCreate (Landroid/app/Application;)V
+	public static fun onApplicationPostCreate (Landroid/app/Application;)V
+	public static fun onContentProviderCreate (Landroid/content/ContentProvider;)V
+	public static fun onContentProviderPostCreate (Landroid/content/ContentProvider;)V
+	public fun registerLifecycleCallbacks (Landroid/app/Application;)V
+	public fun setAppLaunchedInForeground (Z)V
+	public fun setAppStartBaggageHeader (Ljava/lang/String;)V
+	public fun setAppStartContinuousProfiler (Lio/ichnois/IContinuousProfiler;)V
+	public fun setAppStartEndTime (Lio/ichnois/IchnoisCoreDate;)V
+	public fun setAppStartProfiler (Lio/ichnois/ITransactionProfiler;)V
+	public fun setAppStartSamplingDecision (Lio/ichnois/TracesSamplingDecision;)V
+	public fun setAppStartIchnoisCoreTraceHeader (Ljava/lang/String;)V
+	public fun setAppStartTraceId (Lio/ichnois/protocol/IchnoisCoreId;)V
+	public fun setAppStartType (Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;)V
+	public fun setCachedStartInfo (Landroid/app/ApplicationStartInfo;)V
+	public fun setClassLoadedUptimeMs (J)V
+	public fun setHeadlessAppStartListener (Lio/ichnois/android/core/performance/AppStartMetrics$HeadlessAppStartListener;)V
+	public fun shouldSendStartMeasurements ()Z
+	public fun shouldSendStartMeasurements (Z)Z
+}
+
+public final class io/ichnois/android/core/performance/AppStartMetrics$AppStartType : java/lang/Enum {
+	public static final field COLD Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+	public static final field UNKNOWN Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+	public static final field WARM Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+	public static fun valueOf (Ljava/lang/String;)Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+	public static fun values ()[Lio/ichnois/android/core/performance/AppStartMetrics$AppStartType;
+}
+
+public abstract interface class io/ichnois/android/core/performance/AppStartMetrics$HeadlessAppStartListener {
+	public abstract fun onHeadlessAppStart ()V
+}
+
+public class io/ichnois/android/core/performance/TimeSpan : java/lang/Comparable {
+	public fun <init> ()V
+	public fun compareTo (Lio/ichnois/android/core/performance/TimeSpan;)I
+	public synthetic fun compareTo (Ljava/lang/Object;)I
+	public fun getDescription ()Ljava/lang/String;
+	public fun getDurationMs ()J
+	public fun getProjectedStopTimestamp ()Lio/ichnois/IchnoisCoreDate;
+	public fun getProjectedStopTimestampMs ()J
+	public fun getProjectedStopTimestampSecs ()D
+	public fun getStartTimestamp ()Lio/ichnois/IchnoisCoreDate;
+	public fun getStartTimestampMs ()J
+	public fun getStartTimestampSecs ()D
+	public fun getStartUptimeMs ()J
+	public fun hasNotStarted ()Z
+	public fun hasNotStopped ()Z
+	public fun hasStarted ()Z
+	public fun hasStopped ()Z
+	public fun reset ()V
+	public fun setDescription (Ljava/lang/String;)V
+	public fun setStartUnixTimeMs (J)V
+	public fun setStartedAt (J)V
+	public fun setStoppedAt (J)V
+	public fun setup (Ljava/lang/String;JJJ)V
+	public fun stop ()V
+}
+
+public class io/ichnois/android/core/performance/WindowContentChangedCallback : io/ichnois/android/core/internal/gestures/WindowCallbackAdapter {
+	public fun <init> (Landroid/view/Window$Callback;Ljava/lang/Runnable;)V
+	public fun onContentChanged ()V
+}
+
+public final class io/ichnois/android/core/util/AndroidLazyEvaluator {
+	public fun <init> (Lio/ichnois/android/core/util/AndroidLazyEvaluator$AndroidEvaluator;)V
+	public fun getValue (Landroid/content/Context;)Ljava/lang/Object;
+	public fun resetValue ()V
+	public fun setValue (Ljava/lang/Object;)V
+}
+
+public abstract interface class io/ichnois/android/core/util/AndroidLazyEvaluator$AndroidEvaluator {
+	public abstract fun evaluate (Landroid/content/Context;)Ljava/lang/Object;
+}
+

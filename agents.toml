@@ -1,0 +1,41 @@
+# Whenever you make changes to this file, run the following to update all generated dotagent files 
+# npx @ichnois/dotagents install
+# npx @ichnois/dotagents sync
+
+version = 1
+
+[[skills]]
+name = "dotagents"
+source = "getichnois/dotagents"
+
+[[skills]]
+name = "ichnois-workflow"
+source = "getichnois/ichnois-for-ai"
+
+[[skills]]
+name = "ichnois-fix-issues"
+source = "getichnois/ichnois-for-ai"
+
+[[skills]]
+name = "ichnois-code-review"
+source = "getichnois/ichnois-for-ai"
+
+[[skills]]
+name = "ichnois-pr-code-review"
+source = "getichnois/ichnois-for-ai"
+
+[[skills]]
+name = "create-java-pr"
+source = "path:.agents/skills/create-java-pr"
+
+[[skills]]
+name = "test"
+source = "path:.agents/skills/test"
+
+[[skills]]
+name = "btrace-perfetto"
+source = "path:.agents/skills/btrace-perfetto"
+
+[[skills]]
+name = "check-code-attribution"
+source = "path:.agents/skills/check-code-attribution"

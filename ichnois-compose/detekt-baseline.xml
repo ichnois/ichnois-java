@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:ComposeGestureTargetLocator.kt$ComposeGestureTargetLocator$override fun locate(root: Any?, x: Float, y: Float, targetType: UiElement.Type): UiElement?</ID>
+    <ID>FunctionOnlyReturningConstant:IchnoisCoreModifier.kt$IchnoisCoreModifier.IchnoisCoreTagModifierNode$@Suppress("unused") fun isImportantForBounds(): Boolean</ID>
+    <ID>LongMethod:ComposeGestureTargetLocator.kt$ComposeGestureTargetLocator$override fun locate(root: Any?, x: Float, y: Float, targetType: UiElement.Type): UiElement?</ID>
+    <ID>LongParameterList:ComposeGestureTargetLocatorTest.kt$ComposeGestureTargetLocatorTest$( isPlaced: Boolean, tag: String?, width: Int, height: Int, children: List&lt;LayoutNode> = emptyList(), semanticsKeys: List&lt;String> = emptyList(), nodeModifierClassName: String? = null, left: Float = 0f, top: Float = 0f, )</ID>
+    <ID>LongParameterList:IchnoisCoreComposeTracing.kt$BucketSpans$( ownerSpan: ISpan, startTimestamp: IchnoisCoreDate, cached: WeakReference&lt;ISpan>?, operation: String, description: String, setCached: (WeakReference&lt;ISpan>) -> Unit, )</ID>
+    <ID>NestedBlockDepth:ComposeGestureTargetLocator.kt$ComposeGestureTargetLocator$override fun locate(root: Any?, x: Float, y: Float, targetType: UiElement.Type): UiElement?</ID>
+    <ID>NestedBlockDepth:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper$fun extractTag(modifier: Modifier): String?</ID>
+    <ID>ReturnCount:ComposeGestureTargetLocator.kt$ComposeGestureTargetLocator$override fun locate(root: Any?, x: Float, y: Float, targetType: UiElement.Type): UiElement?</ID>
+    <ID>ReturnCount:ComposeIntegrationTests.kt$ComposeIntegrationTests$private fun locateAndroidComposeView(root: View?): Any?</ID>
+    <ID>ReturnCount:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper$fun extractTag(modifier: Modifier): String?</ID>
+    <ID>SwallowedException:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper$e: Throwable</ID>
+    <ID>SwallowedException:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper.Companion$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper$e: Throwable</ID>
+    <ID>TooGenericExceptionCaught:IchnoisCoreComposeHelper.kt$IchnoisCoreComposeHelper.Companion$e: Exception</ID>
+  </CurrentIssues>
+</SmellBaseline>

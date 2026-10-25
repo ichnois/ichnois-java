@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+  <application
+    android:theme="@style/Theme.AppCompat"
+    android:label="IchnoisCore End2End Tests"
+    android:largeHeap="true"
+    android:icon="@android:mipmap/sym_def_app_icon"
+    android:usesCleartextTraffic="true"
+    tools:targetApi="m">
+<!--  android:usesCleartextTraffic="true" is needed to send data to http://localhost... (the mock relay server)  -->
+
+    <activity android:name=".EmptyActivity" />
+    <activity android:name=".ProfilingSampleActivity" />
+    <activity
+      android:theme="@style/Theme.AppCompat.NoActionBar"
+      android:name=".ComposeActivity" />
+
+    <provider
+      android:name="io.ichnois.android.core.IchnoisCoreInitProvider"
+      android:authorities="${applicationId}.IchnoisCoreInitProvider"
+      tools:node="remove" />
+
+    <provider
+      android:name="io.ichnois.android.core.IchnoisCorePerformanceProvider"
+      android:authorities="${applicationId}.IchnoisCorePerformanceProvider"
+      tools:node="remove" />
+
+  </application>
+
+</manifest>

@@ -1,0 +1,210 @@
+package io.ichnois.android.fragment
+
+import android.content.Context
+import android.os.Bundle
+import android.view.View
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks
+import io.ichnois.Breadcrumb
+import io.ichnois.Hint
+import io.ichnois.IScopes
+import io.ichnois.ISpan
+import io.ichnois.ScopesAdapter
+import io.ichnois.IchnoisCoreLevel.INFO
+import io.ichnois.SpanStatus
+import io.ichnois.TypeCheckHint.ANDROID_FRAGMENT
+import java.util.WeakHashMap
+
+private const val TRACE_ORIGIN = "auto.ui.fragment"
+
+@Suppress("TooManyFunctions")
+public class IchnoisCoreFragmentLifecycleCallbacks(
+  private val scopes: IScopes = ScopesAdapter.getInstance(),
+  internal val filterFragmentLifecycleBreadcrumbs: Set<FragmentLifecycleState>,
+  internal val enableAutoFragmentLifecycleTracing: Boolean,
+) : FragmentLifecycleCallbacks() {
+  public constructor(
+    scopes: IScopes,
+    enableFragmentLifecycleBreadcrumbs: Boolean,
+    enableAutoFragmentLifecycleTracing: Boolean,
+  ) : this(
+    scopes = scopes,
+    filterFragmentLifecycleBreadcrumbs =
+      FragmentLifecycleState.states.takeIf { enableFragmentLifecycleBreadcrumbs }.orEmpty(),
+    enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing,
+  )
+
+  public constructor(
+    enableFragmentLifecycleBreadcrumbs: Boolean = true,
+    enableAutoFragmentLifecycleTracing: Boolean = false,
+  ) : this(
+    scopes = ScopesAdapter.getInstance(),
+    filterFragmentLifecycleBreadcrumbs =
+      FragmentLifecycleState.states.takeIf { enableFragmentLifecycleBreadcrumbs }.orEmpty(),
+    enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing,
+  )
+
+  private val isPerformanceEnabled
+    get() = scopes.options.isTracingEnabled && enableAutoFragmentLifecycleTracing
+
+  private val fragmentsWithOngoingTransactions = WeakHashMap<Fragment, ISpan>()
+
+  public val enableFragmentLifecycleBreadcrumbs: Boolean
+    get() = filterFragmentLifecycleBreadcrumbs.isNotEmpty()
+
+  override fun onFragmentAttached(
+    fragmentManager: FragmentManager,
+    fragment: Fragment,
+    context: Context,
+  ) {
+    addBreadcrumb(fragment, FragmentLifecycleState.ATTACHED)
+  }
+
+  override fun onFragmentSaveInstanceState(
+    fragmentManager: FragmentManager,
+    fragment: Fragment,
+    outState: Bundle,
+  ) {
+    addBreadcrumb(fragment, FragmentLifecycleState.SAVE_INSTANCE_STATE)
+  }
+
+  override fun onFragmentCreated(
+    fragmentManager: FragmentManager,
+    fragment: Fragment,
+    savedInstanceState: Bundle?,
+  ) {
+    addBreadcrumb(fragment, FragmentLifecycleState.CREATED)
+
+    startTracing(fragment)
+  }
+
+  override fun onFragmentViewCreated(
+    fragmentManager: FragmentManager,
+    fragment: Fragment,
+    view: View,
+    savedInstanceState: Bundle?,
+  ) {
+    addBreadcrumb(fragment, FragmentLifecycleState.VIEW_CREATED)
+
+    // For detach/attach navigation (e.g. manual tab switching, ViewPager v1 with
+    // FragmentPagerAdapter, custom navigation frameworks), onFragmentCreated is never called for
+    // off-screen fragments that are re-attached. Starting here enables a narrower
+    // "view created -> resumed" span for those paths. startTracing is idempotent, so for the
+    // normal onFragmentCreated -> onFragmentViewCreated path this is a no-op.
+    startTracing(fragment)
+  }
+
+  override fun onFragmentStarted(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.STARTED)
+
+    // ViewPager2 locks background fragments to STARTED state, so we stop here to avoid
+    // spans hanging for off-screen fragments that never reach RESUMED.
+    stopTracing(fragment)
+  }
+
+  override fun onFragmentResumed(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.RESUMED)
+
+    // For detach/attach navigation, onFragmentStarted may not fire before onFragmentResumed.
+    // If a span is still running here, stop it now. stopTracing is idempotent, so this is a
+    // no-op for the normal path where onFragmentStarted already stopped the span.
+    stopTracing(fragment)
+  }
+
+  override fun onFragmentPaused(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.PAUSED)
+  }
+
+  override fun onFragmentStopped(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.STOPPED)
+  }
+
+  override fun onFragmentViewDestroyed(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.VIEW_DESTROYED)
+
+    // Failsafe: cancel any span that didn't finish via the normal started/resumed path
+    // (e.g. fragment view destroyed before reaching STARTED or RESUMED).
+    stopTracing(fragment)
+  }
+
+  override fun onFragmentDestroyed(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.DESTROYED)
+
+    stopTracing(fragment)
+  }
+
+  override fun onFragmentDetached(fragmentManager: FragmentManager, fragment: Fragment) {
+    addBreadcrumb(fragment, FragmentLifecycleState.DETACHED)
+  }
+
+  private fun addBreadcrumb(fragment: Fragment, state: FragmentLifecycleState) {
+    if (!filterFragmentLifecycleBreadcrumbs.contains(state)) {
+      return
+    }
+    val breadcrumb =
+      Breadcrumb().apply {
+        type = "navigation"
+        setData("state", state.breadcrumbName)
+        setData("screen", getFragmentName(fragment))
+        category = "ui.fragment.lifecycle"
+        level = INFO
+      }
+
+    val hint = Hint().also { it.set(ANDROID_FRAGMENT, fragment) }
+
+    scopes.addBreadcrumb(breadcrumb, hint)
+  }
+
+  private fun getFragmentName(fragment: Fragment): String =
+    fragment.javaClass.canonicalName ?: fragment.javaClass.simpleName
+
+  private fun isRunningSpan(fragment: Fragment): Boolean =
+    fragmentsWithOngoingTransactions.containsKey(fragment)
+
+  private fun startTracing(fragment: Fragment) {
+    if (!fragment.isAdded) {
+      return
+    }
+
+    val fragmentName = getFragmentName(fragment)
+
+    if (scopes.options.isEnableScreenTracking) {
+      scopes.configureScope { it.screen = fragmentName }
+    }
+
+    if (!isPerformanceEnabled || isRunningSpan(fragment)) {
+      return
+    }
+
+    var transaction: ISpan? = null
+    scopes.configureScope { transaction = it.transaction }
+
+    val span = transaction?.startChild(FRAGMENT_LOAD_OP, fragmentName)
+
+    span?.let {
+      fragmentsWithOngoingTransactions[fragment] = it
+      it.spanContext.origin = TRACE_ORIGIN
+    }
+  }
+
+  private fun stopTracing(fragment: Fragment) {
+    if (!isPerformanceEnabled || !isRunningSpan(fragment)) {
+      return
+    }
+
+    val span = fragmentsWithOngoingTransactions[fragment]
+    span?.let {
+      var status = it.status
+      if (status == null) {
+        status = SpanStatus.OK
+      }
+      it.finish(status)
+      fragmentsWithOngoingTransactions.remove(fragment)
+    }
+  }
+
+  public companion object {
+    public const val FRAGMENT_LOAD_OP: String = "ui.load"
+  }
+}

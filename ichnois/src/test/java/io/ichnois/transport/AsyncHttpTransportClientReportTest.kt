@@ -1,0 +1,439 @@
+package io.ichnois.transport
+
+import io.ichnois.IchnoisCoreEnvelope
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreOptionsManipulator
+import io.ichnois.Session
+import io.ichnois.cache.IEnvelopeCache
+import io.ichnois.clientreport.ClientReportTestHelper.Companion.retryableHint
+import io.ichnois.clientreport.ClientReportTestHelper.Companion.retryableUncaughtExceptionHint
+import io.ichnois.clientreport.ClientReportTestHelper.Companion.uncaughtExceptionHint
+import io.ichnois.clientreport.DiscardReason
+import io.ichnois.clientreport.IClientReportRecorder
+import io.ichnois.dsnString
+import io.ichnois.hints.Retryable
+import io.ichnois.protocol.User
+import io.ichnois.util.HintUtils
+import java.io.IOException
+import kotlin.test.Test
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.same
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoMoreInteractions
+import org.mockito.kotlin.whenever
+
+class AsyncHttpTransportClientReportTest {
+  private class Fixture {
+    var connection = mock<HttpConnection>()
+    var transportGate = mock<ITransportGate>()
+    var executor = mock<QueuedThreadPoolExecutor>()
+    var rateLimiter = mock<RateLimiter>()
+    var envelopeCache = mock<IEnvelopeCache>()
+    var ichnoisOptions: IchnoisCoreOptions =
+      IchnoisCoreOptions().apply {
+        dsn = dsnString
+        setSerializer(mock())
+        setEnvelopeDiskCache(envelopeCache)
+      }
+    var clientReportRecorder = mock<IClientReportRecorder>()
+    val envelopeBeforeAttachingClientReport =
+      IchnoisCoreEnvelope.from(ichnoisOptions.serializer, createSession(), null)
+    val envelopeAfterAttachingClientReport =
+      IchnoisCoreEnvelope.from(ichnoisOptions.serializer, createSession(), null)
+
+    fun getSUT(): AsyncHttpTransport {
+      IchnoisCoreOptionsManipulator.setClientReportRecorder(ichnoisOptions, clientReportRecorder)
+      return AsyncHttpTransport(executor, ichnoisOptions, rateLimiter, transportGate, connection)
+    }
+
+    private fun createSession(): Session = Session("123", User(), "env", "release")
+  }
+
+  private val fixture = Fixture()
+
+  @Test
+  fun `attaches client report to envelope`() {
+    // given
+    givenSetup(TransportResult.success())
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, never()).recordLostEnvelope(any(), any())
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope on 500 error for retryable`() {
+    // given
+    givenSetup(TransportResult.error(500))
+    whenever(
+        fixture.envelopeCache.storeEnvelope(eq(fixture.envelopeBeforeAttachingClientReport), any())
+      )
+      .thenReturn(true)
+
+    // when
+    val retryableHint = retryableHint()
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    val ichnoisSdkHint = HintUtils.getIchnoisCoreSdkHint(retryableHint)
+    assertFalse((ichnoisSdkHint as Retryable).isRetry)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope on 500 error for non retryable`() {
+    // given
+    givenSetup(TransportResult.error(500))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope on 400 error for retryable`() {
+    // given
+    givenSetup(TransportResult.error(400))
+    whenever(
+        fixture.envelopeCache.storeEnvelope(eq(fixture.envelopeBeforeAttachingClientReport), any())
+      )
+      .thenReturn(true)
+
+    // when
+    val retryableHint = retryableHint()
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    val ichnoisSdkHint = HintUtils.getIchnoisCoreSdkHint(retryableHint)
+    assertFalse((ichnoisSdkHint as Retryable).isRetry)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope on 400 error for non retryable`() {
+    // given
+    givenSetup(TransportResult.error(400))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `records lost envelope with send_error on 413 for retryable`() {
+    // given
+    givenSetup(TransportResult.error(413))
+    whenever(
+        fixture.envelopeCache.storeEnvelope(eq(fixture.envelopeBeforeAttachingClientReport), any())
+      )
+      .thenReturn(true)
+
+    // when
+    val retryableHint = retryableHint()
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    val ichnoisSdkHint = HintUtils.getIchnoisCoreSdkHint(retryableHint)
+    assertFalse((ichnoisSdkHint as Retryable).isRetry)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope with send_error on 413 for non retryable`() {
+    // given
+    givenSetup(TransportResult.error(413))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.SEND_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+    verify(fixture.envelopeCache).discard(fixture.envelopeBeforeAttachingClientReport)
+  }
+
+  @Test
+  fun `records lost envelope on full queue for non retryable`() {
+    // given
+    givenSetup(cancel = true)
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+
+    // then
+    verify(fixture.clientReportRecorder, never()).attachReportToEnvelope(any())
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.QUEUE_OVERFLOW),
+        same(fixture.envelopeBeforeAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `records lost envelope on full queue for retryable`() {
+    // given
+    givenSetup(cancel = true)
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint())
+
+    // then
+    verify(fixture.clientReportRecorder, never()).attachReportToEnvelope(any())
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.QUEUE_OVERFLOW),
+        same(fixture.envelopeBeforeAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `attaches report and records lost envelope on full queue for non retryable uncaught exception`() {
+    // given
+    givenSetup(cancel = true)
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, uncaughtExceptionHint())
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.QUEUE_OVERFLOW),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `attaches report and records lost envelope on full queue for retryable uncaught exception`() {
+    // given
+    givenSetup(cancel = true)
+
+    // when
+    fixture
+      .getSUT()
+      .send(fixture.envelopeBeforeAttachingClientReport, retryableUncaughtExceptionHint())
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.QUEUE_OVERFLOW),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `records lost envelope on io exception for non retryable`() {
+    // given
+    givenSetup()
+    whenever(fixture.connection.send(any())).thenThrow(IOException("thrown on purpose"))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.NETWORK_ERROR),
+        same(fixture.envelopeAfterAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `does not record lost envelope on io exception for retryable`() {
+    // given
+    givenSetup()
+    whenever(fixture.connection.send(any())).thenThrow(IOException("thrown on purpose"))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint())
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, never()).recordLostEnvelope(any(), any())
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `does not record lost envelope on 429 error for retryable`() {
+    // given
+    givenSetup(TransportResult.error(429))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint())
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, never()).recordLostEnvelope(any(), any())
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `does not record lost envelope on 429 error for non retryable`() {
+    // given
+    givenSetup(TransportResult.error(429))
+
+    // when
+    assertFailsWith(java.lang.IllegalStateException::class) {
+      fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+    }
+
+    // then
+    verify(fixture.clientReportRecorder, times(1))
+      .attachReportToEnvelope(same(fixture.envelopeBeforeAttachingClientReport))
+    verify(fixture.clientReportRecorder, never()).recordLostEnvelope(any(), any())
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `records lost envelope if transport not connected for non retryable`() {
+    // given
+    givenSetup(transportConnected = false)
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport)
+
+    // then
+    verify(fixture.clientReportRecorder, never()).attachReportToEnvelope(any())
+    verify(fixture.clientReportRecorder, times(1))
+      .recordLostEnvelope(
+        eq(DiscardReason.NETWORK_ERROR),
+        same(fixture.envelopeBeforeAttachingClientReport),
+      )
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  @Test
+  fun `does not record lost envelope if transport not connected for retryable`() {
+    // given
+    givenSetup(transportConnected = false)
+
+    // when
+    fixture.getSUT().send(fixture.envelopeBeforeAttachingClientReport, retryableHint())
+
+    // then
+    verify(fixture.clientReportRecorder, never()).attachReportToEnvelope(any())
+    verify(fixture.clientReportRecorder, never()).recordLostEnvelope(any(), any())
+    verifyNoMoreInteractions(fixture.clientReportRecorder)
+  }
+
+  private fun givenSetup(
+    result: TransportResult? = null,
+    cancel: Boolean? = null,
+    transportConnected: Boolean? = null,
+  ) {
+    if (cancel == true) {
+      whenever(fixture.executor.submit(any())).thenAnswer {
+        QueuedThreadPoolExecutor.CancelledFuture<Any>()
+      }
+    } else {
+      whenever(fixture.executor.submit(any())).thenAnswer {
+        (it.arguments[0] as Runnable).run()
+        null
+      }
+    }
+
+    whenever(fixture.transportGate.isConnected).thenReturn(transportConnected ?: true)
+    whenever(fixture.rateLimiter.filter(any(), anyOrNull())).thenAnswer { it.arguments[0] }
+
+    result?.let { whenever(fixture.connection.send(any())).thenReturn(result) }
+
+    whenever(
+        fixture.clientReportRecorder.attachReportToEnvelope(
+          eq(fixture.envelopeBeforeAttachingClientReport)
+        )
+      )
+      .thenReturn(fixture.envelopeAfterAttachingClientReport)
+  }
+}

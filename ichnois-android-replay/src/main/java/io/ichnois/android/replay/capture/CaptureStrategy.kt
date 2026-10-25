@@ -1,0 +1,291 @@
+package io.ichnois.android.replay.capture
+
+import android.graphics.Bitmap
+import android.view.MotionEvent
+import io.ichnois.Breadcrumb
+import io.ichnois.DateUtils
+import io.ichnois.Hint
+import io.ichnois.IScopes
+import io.ichnois.ReplayRecording
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreReplayEvent
+import io.ichnois.IchnoisCoreReplayEvent.ReplayType
+import io.ichnois.android.replay.ReplayCache
+import io.ichnois.android.replay.ScreenshotRecorderConfig
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.rrweb.RRWebBreadcrumbEvent
+import io.ichnois.rrweb.RRWebEvent
+import io.ichnois.rrweb.RRWebMetaEvent
+import io.ichnois.rrweb.RRWebOptionsEvent
+import io.ichnois.rrweb.RRWebVideoEvent
+import java.io.File
+import java.util.Date
+import java.util.Deque
+import java.util.LinkedList
+
+internal interface CaptureStrategy {
+  var currentSegment: Int
+  var currentReplayId: IchnoisCoreId
+  val replayCacheDir: File?
+  var replayType: ReplayType
+  var segmentTimestamp: Date?
+  var isFlushed: Boolean
+
+  fun start(segmentId: Int = 0, replayId: IchnoisCoreId = IchnoisCoreId(), replayType: ReplayType? = null)
+
+  fun stop()
+
+  fun pause()
+
+  fun resume()
+
+  /**
+   * Captures replay data for an event. Session mode may defer sending until its normal segment
+   * boundary because the replay is already being uploaded continuously.
+   */
+  fun captureReplay(isTerminating: Boolean, onSegmentSent: (Date) -> Unit)
+
+  /** Explicitly sends the current replay data to IchnoisCore in either session or buffer mode. */
+  fun flush(onSegmentSent: (Date) -> Unit)
+
+  fun onScreenshotRecorded(
+    bitmap: Bitmap? = null,
+    store: ReplayCache.(frameTimestamp: Long) -> Unit,
+  )
+
+  fun onConfigurationChanged(recorderConfig: ScreenshotRecorderConfig)
+
+  fun onTouchEvent(event: MotionEvent)
+
+  fun onScreenChanged(screen: String?) = Unit
+
+  fun convert(): CaptureStrategy
+
+  fun registerTraceId(traceId: IchnoisCoreId)
+
+  fun registerSegmentName(segmentName: String)
+
+  companion object {
+    private fun Breadcrumb?.isNetworkAvailable(): Boolean =
+      this != null &&
+        category == "network.event" &&
+        data.getOrElse("action", { null }) == "NETWORK_AVAILABLE"
+
+    private fun Breadcrumb.isNetworkConnectivity(): Boolean =
+      category == "network.event" && data.containsKey("network_type")
+
+    private const val NETWORK_BREADCRUMB_START_OFFSET = 5000L
+
+    // 5 minutes, otherwise relay will just drop it. Can prevent the case where the device
+    // time is wrong and the segment is too long.
+    private const val MAX_SEGMENT_DURATION = 1000L * 60 * 5
+
+    fun createSegment(
+      scopes: IScopes?,
+      options: IchnoisCoreOptions,
+      duration: Long,
+      currentSegmentTimestamp: Date,
+      replayId: IchnoisCoreId,
+      segmentId: Int,
+      height: Int,
+      width: Int,
+      replayType: ReplayType,
+      cache: ReplayCache?,
+      frameRate: Int,
+      bitRate: Int,
+      screenAtStart: String?,
+      breadcrumbs: List<Breadcrumb>?,
+      events: Deque<RRWebEvent>,
+      traceIds: List<String> = emptyList(),
+      segmentNames: List<String> = emptyList(),
+    ): ReplaySegment {
+      val generatedVideo =
+        cache?.createVideoOf(
+          minOf(duration, MAX_SEGMENT_DURATION),
+          currentSegmentTimestamp.time,
+          segmentId,
+          height,
+          width,
+          frameRate,
+          bitRate,
+        ) ?: return ReplaySegment.Failed
+
+      val (video, frameCount, videoDuration) = generatedVideo
+
+      val replayBreadcrumbs: List<Breadcrumb> =
+        if (breadcrumbs == null) {
+          var crumbs = emptyList<Breadcrumb>()
+          scopes?.configureScope { scope -> crumbs = ArrayList(scope.breadcrumbs) }
+          crumbs
+        } else {
+          breadcrumbs
+        }
+
+      return buildReplay(
+        options,
+        video,
+        replayId,
+        currentSegmentTimestamp,
+        segmentId,
+        height,
+        width,
+        frameCount,
+        frameRate,
+        videoDuration,
+        replayType,
+        screenAtStart,
+        replayBreadcrumbs,
+        events,
+        traceIds,
+        segmentNames,
+      )
+    }
+
+    @Suppress("NewApi")
+    private fun buildReplay(
+      options: IchnoisCoreOptions,
+      video: File,
+      currentReplayId: IchnoisCoreId,
+      segmentTimestamp: Date,
+      segmentId: Int,
+      height: Int,
+      width: Int,
+      frameCount: Int,
+      frameRate: Int,
+      videoDuration: Long,
+      replayType: ReplayType,
+      screenAtStart: String?,
+      breadcrumbs: List<Breadcrumb>,
+      events: Deque<RRWebEvent>,
+      traceIds: List<String>,
+      segmentNames: List<String>,
+    ): ReplaySegment {
+      val endTimestamp = DateUtils.getDateTime(segmentTimestamp.time + videoDuration)
+      val replay =
+        IchnoisCoreReplayEvent().apply {
+          this.eventId = currentReplayId
+          this.replayId = currentReplayId
+          this.segmentId = segmentId
+          this.timestamp = endTimestamp
+          this.replayStartTimestamp = segmentTimestamp
+          this.replayType = replayType
+          this.videoFile = video
+          this.traceIds = traceIds
+          this.segmentNames = segmentNames
+        }
+
+      val recordingPayload = mutableListOf<RRWebEvent>()
+      recordingPayload +=
+        RRWebMetaEvent().apply {
+          this.timestamp = segmentTimestamp.time
+          this.height = height
+          this.width = width
+        }
+      recordingPayload +=
+        RRWebVideoEvent().apply {
+          this.timestamp = segmentTimestamp.time
+          this.segmentId = segmentId
+          this.durationMs = videoDuration
+          this.frameCount = frameCount
+          this.size = video.length()
+          this.frameRate = frameRate
+          this.height = height
+          this.width = width
+          // TODO: support non-fullscreen windows later
+          this.left = 0
+          this.top = 0
+        }
+
+      val urls = LinkedList<String>()
+      var previousCrumb: Breadcrumb? = null
+      breadcrumbs.forEach { breadcrumb ->
+        // we special-case network-reconnected breadcrumb, because there's usually some delay after
+        // we receive onConnected callback and we resume ongoing replay recording. We still want
+        // this breadcrumb to be sent with the current segment, hence we give it more room to make
+        // it into the replay
+        val isAfterNetworkReconnected =
+          previousCrumb?.isNetworkAvailable() == true &&
+            breadcrumb.isNetworkConnectivity() &&
+            breadcrumb.timestamp.time + NETWORK_BREADCRUMB_START_OFFSET >= segmentTimestamp.time
+        if (
+          (breadcrumb.timestamp.time >= segmentTimestamp.time || isAfterNetworkReconnected) &&
+            breadcrumb.timestamp.time < endTimestamp.time
+        ) {
+          val rrwebEvent = options.replayController.breadcrumbConverter.convert(breadcrumb)
+
+          if (rrwebEvent != null) {
+            recordingPayload += rrwebEvent
+
+            // fill in the urls array from navigation breadcrumbs
+            if (
+              (rrwebEvent as? RRWebBreadcrumbEvent)?.category == "navigation" &&
+                rrwebEvent.data?.getOrElse("to", { null }) is String
+            ) {
+              urls.add(rrwebEvent.data!!["to"] as String)
+            }
+          }
+        }
+        previousCrumb = breadcrumb
+      }
+
+      if (screenAtStart != null && urls.firstOrNull() != screenAtStart) {
+        urls.addFirst(screenAtStart)
+      }
+
+      rotateEvents(events, endTimestamp.time) { event ->
+        if (event.timestamp >= segmentTimestamp.time) {
+          recordingPayload += event
+        }
+      }
+
+      if (segmentId == 0) {
+        recordingPayload += RRWebOptionsEvent(options)
+      }
+
+      val recording =
+        ReplayRecording().apply {
+          this.segmentId = segmentId
+          this.payload = recordingPayload.sortedBy { it.timestamp }
+        }
+
+      replay.urls = urls
+      return ReplaySegment.Created(replay = replay, recording = recording)
+    }
+
+    internal fun rotateEvents(
+      events: Deque<RRWebEvent>,
+      until: Long,
+      callback: ((RRWebEvent) -> Unit)? = null,
+    ) {
+      val iter = events.iterator()
+      while (iter.hasNext()) {
+        val event = iter.next()
+        if (event.timestamp < until) {
+          callback?.invoke(event)
+          iter.remove()
+        }
+      }
+    }
+  }
+
+  sealed class ReplaySegment {
+    object Failed : ReplaySegment()
+
+    data class Created(val replay: IchnoisCoreReplayEvent, val recording: ReplayRecording) :
+      ReplaySegment() {
+      fun capture(scopes: IScopes?, hint: Hint = Hint()) {
+        scopes?.captureReplay(replay, hint.apply { replayRecording = recording })
+      }
+
+      @Suppress("NewApi")
+      fun setSegmentId(segmentId: Int) {
+        replay.segmentId = segmentId
+        recording.payload?.forEach {
+          when (it) {
+            is RRWebVideoEvent -> it.segmentId = segmentId
+          }
+        }
+      }
+    }
+  }
+}

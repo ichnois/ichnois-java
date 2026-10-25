@@ -1,0 +1,351 @@
+package io.ichnois.util
+
+import io.ichnois.ILogger
+import io.ichnois.JsonDeserializer
+import io.ichnois.JsonSerializable
+import io.ichnois.NoOpLogger
+import io.ichnois.ObjectReader
+import io.ichnois.ObjectWriter
+import io.ichnois.vendor.gson.stream.JsonToken
+import java.math.BigDecimal
+import java.net.URI
+import java.util.Currency
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import kotlin.test.assertEquals
+import org.junit.Test
+
+class MapObjectReaderTest {
+  enum class BasicEnum {
+    A
+  }
+
+  data class BasicSerializable(var test: String = "string") : JsonSerializable {
+    override fun serialize(writer: ObjectWriter, logger: ILogger) {
+      writer.beginObject().name("test").value(test).endObject()
+    }
+
+    class Deserializer : JsonDeserializer<BasicSerializable> {
+      override fun deserialize(reader: ObjectReader, logger: ILogger): BasicSerializable {
+        val basicSerializable = BasicSerializable()
+        reader.beginObject()
+        if (reader.nextName() == "test") {
+          basicSerializable.test = reader.nextString()
+        }
+        reader.endObject()
+        return basicSerializable
+      }
+    }
+  }
+
+  private val logger = NoOpLogger.getInstance()
+
+  private fun getValuesReader(value: Any): MapObjectReader =
+    MapObjectReader(linkedMapOf("values" to value)).apply {
+      beginObject()
+      nextName()
+    }
+
+  private fun serializableValue(value: String): Map<String, Any> = linkedMapOf("test" to value)
+
+  private fun partialSerializableValue(kind: String, value: String): Map<String, Any> =
+    linkedMapOf("test" to value, "kind" to kind)
+
+  private val partiallyFailingDeserializer =
+    JsonDeserializer<BasicSerializable> { reader, _ ->
+      val basicSerializable = BasicSerializable()
+      reader.beginObject()
+      if (reader.nextName() == "kind") {
+        if (reader.nextString() == "fail") {
+          throw IllegalStateException("intentional")
+        }
+      }
+      if (reader.nextName() == "test") {
+        basicSerializable.test = reader.nextString()
+      }
+      reader.endObject()
+      basicSerializable
+    }
+
+  @Test
+  fun `deserializes data correctly`() {
+    val data = mutableMapOf<String, Any>()
+    val writer = MapObjectWriter(data)
+
+    writer.name("null").nullValue()
+    writer.name("int").value(1)
+    writer.name("boolean").value(true)
+    writer.name("long").value(Long.MAX_VALUE)
+    writer.name("double").value(Double.MAX_VALUE)
+    writer.name("number").value(BigDecimal(123))
+    writer.name("date").value(logger, Date(0))
+    writer.name("string").value("string")
+
+    writer.name("TimeZone").value(logger, TimeZone.getTimeZone("Vienna"))
+    writer.name("JsonSerializable").value(logger, BasicSerializable())
+    writer.name("Collection").value(logger, listOf("a", "b"))
+    writer.name("Arrays").value(logger, arrayOf("b", "c"))
+    writer.name("Map").value(logger, mapOf(kotlin.Pair("key", "value")))
+    writer.name("MapOfLists").value(logger, mapOf("metric_a" to listOf("foo")))
+    writer.name("Locale").value(logger, Locale.US)
+    writer.name("URI").value(logger, URI.create("http://www.example.com"))
+    writer.name("UUID").value(logger, "00000000-1111-2222-3333-444444444444")
+    writer.name("Currency").value(logger, Currency.getInstance("EUR"))
+    writer.name("Enum").value(logger, MapObjectWriterTest.BasicEnum.A)
+    writer.name("data").value(logger, mapOf("screen" to "MainActivity"))
+    writer.name("ListOfObjects").value(logger, listOf(BasicSerializable()))
+    writer.name("MapOfObjects").value(logger, mapOf("key" to BasicSerializable()))
+    writer.name("MapOfListsObjects").value(logger, mapOf("key" to listOf(BasicSerializable())))
+
+    val reader = MapObjectReader(data)
+    reader.beginObject()
+    assertEquals(JsonToken.NAME, reader.peek())
+    assertEquals("MapOfListsObjects", reader.nextName())
+    assertEquals(
+      mapOf("key" to listOf(BasicSerializable())),
+      reader.nextMapOfListOrNull(logger, BasicSerializable.Deserializer()),
+    )
+    assertEquals("MapOfObjects", reader.nextName())
+    assertEquals(
+      mapOf("key" to BasicSerializable()),
+      reader.nextMapOrNull(logger, BasicSerializable.Deserializer()),
+    )
+    assertEquals("ListOfObjects", reader.nextName())
+    assertEquals(
+      listOf(BasicSerializable()),
+      reader.nextListOrNull(logger, BasicSerializable.Deserializer()),
+    )
+    assertEquals("data", reader.nextName())
+    assertEquals(mapOf("screen" to "MainActivity"), reader.nextObjectOrNull())
+    assertEquals("Enum", reader.nextName())
+    assertEquals(BasicEnum.A, BasicEnum.valueOf(reader.nextString()))
+    assertEquals("Currency", reader.nextName())
+    assertEquals(Currency.getInstance("EUR"), Currency.getInstance(reader.nextString()))
+    assertEquals("UUID", reader.nextName())
+    assertEquals("00000000-1111-2222-3333-444444444444", reader.nextString())
+    assertEquals("URI", reader.nextName())
+    assertEquals(URI.create("http://www.example.com"), URI.create(reader.nextString()))
+    assertEquals("Locale", reader.nextName())
+    assertEquals(Locale.US.toString(), reader.nextString())
+    assertEquals("MapOfLists", reader.nextName())
+    reader.beginObject()
+    assertEquals("metric_a", reader.nextName())
+    reader.beginArray()
+    assertEquals("foo", reader.nextStringOrNull())
+    reader.endArray()
+    reader.endObject()
+    assertEquals("Map", reader.nextName())
+    // nested object
+    reader.beginObject()
+    assertEquals("key", reader.nextName())
+    assertEquals("value", reader.nextStringOrNull())
+    reader.endObject()
+    assertEquals("Arrays", reader.nextName())
+    reader.beginArray()
+    assertEquals("b", reader.nextString())
+    assertEquals("c", reader.nextString())
+    reader.endArray()
+    assertEquals("Collection", reader.nextName())
+    reader.beginArray()
+    assertEquals("a", reader.nextString())
+    assertEquals("b", reader.nextString())
+    reader.endArray()
+    assertEquals("JsonSerializable", reader.nextName())
+    assertEquals(BasicSerializable(), reader.nextOrNull(logger, BasicSerializable.Deserializer()))
+    assertEquals("TimeZone", reader.nextName())
+    assertEquals(TimeZone.getTimeZone("Vienna"), reader.nextTimeZoneOrNull(logger))
+    assertEquals("string", reader.nextName())
+    assertEquals("string", reader.nextString())
+    assertEquals("date", reader.nextName())
+    assertEquals(Date(0), reader.nextDateOrNull(logger))
+    assertEquals("number", reader.nextName())
+    assertEquals(BigDecimal(123), reader.nextObjectOrNull())
+    assertEquals("double", reader.nextName())
+    assertEquals(Double.MAX_VALUE, reader.nextDoubleOrNull())
+    assertEquals("long", reader.nextName())
+    assertEquals(Long.MAX_VALUE, reader.nextLongOrNull())
+    assertEquals("boolean", reader.nextName())
+    assertEquals(true, reader.nextBoolean())
+    assertEquals("int", reader.nextName())
+    assertEquals(1, reader.nextInt())
+    assertEquals("null", reader.nextName())
+    reader.nextNull()
+    reader.endObject()
+  }
+
+  @Test
+  fun `nextListOrNull returns empty list for empty list`() {
+    val actual =
+      getValuesReader(emptyList<String>()).nextListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyList(), actual)
+  }
+
+  @Test
+  fun `nextListOrNull skips a failing element`() {
+    val actual =
+      getValuesReader(listOf("fail")).nextListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyList(), actual)
+  }
+
+  @Test
+  fun `nextListOrNull keeps elements before a failing element`() {
+    val actual =
+      getValuesReader(listOf(serializableValue("one"), "fail"))
+        .nextListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(listOf(BasicSerializable("one")), actual)
+  }
+
+  @Test
+  fun `nextListOrNull keeps elements after a failing element`() {
+    val actual =
+      getValuesReader(listOf("fail", serializableValue("two")))
+        .nextListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(listOf(BasicSerializable("two")), actual)
+  }
+
+  @Test
+  fun `nextListOrNull keeps elements after a failing object followed by a primitive`() {
+    val reader =
+      getValuesReader(
+        listOf(
+          partialSerializableValue("fail", "bad"),
+          "oops",
+          partialSerializableValue("ok", "two"),
+        )
+      )
+
+    val actual = reader.nextListOrNull(logger, partiallyFailingDeserializer)
+
+    assertEquals(listOf(BasicSerializable("two")), actual)
+    assertEquals(JsonToken.END_OBJECT, reader.peek())
+  }
+
+  @Test
+  fun `nextMapOrNull returns empty map for empty map`() {
+    val actual =
+      getValuesReader(linkedMapOf<String, String>())
+        .nextMapOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyMap(), actual)
+  }
+
+  @Test
+  fun `nextMapOrNull skips a failing value`() {
+    val actual =
+      getValuesReader(linkedMapOf("bad" to "fail"))
+        .nextMapOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyMap(), actual)
+  }
+
+  @Test
+  fun `nextMapOrNull keeps values before a failing value`() {
+    val actual =
+      getValuesReader(linkedMapOf("bad" to "fail", "good" to serializableValue("one")))
+        .nextMapOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(mapOf("good" to BasicSerializable("one")), actual)
+  }
+
+  @Test
+  fun `nextMapOrNull keeps values after a failing value`() {
+    val actual =
+      getValuesReader(linkedMapOf("good" to serializableValue("two"), "bad" to "fail"))
+        .nextMapOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(mapOf("good" to BasicSerializable("two")), actual)
+  }
+
+  @Test
+  fun `nextMapOfListOrNull returns empty map for empty map`() {
+    val actual =
+      getValuesReader(linkedMapOf<String, List<String>>())
+        .nextMapOfListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyMap(), actual)
+  }
+
+  @Test
+  fun `nextMapOfListOrNull skips a failing value`() {
+    val actual =
+      getValuesReader(linkedMapOf("bad" to serializableValue("fail")))
+        .nextMapOfListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(emptyMap(), actual)
+  }
+
+  @Test
+  fun `nextMapOfListOrNull keeps values before a failing value`() {
+    val actual =
+      getValuesReader(
+          linkedMapOf(
+            "bad" to serializableValue("fail"),
+            "good" to listOf(serializableValue("one")),
+          )
+        )
+        .nextMapOfListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(mapOf("good" to listOf(BasicSerializable("one"))), actual)
+  }
+
+  @Test
+  fun `nextMapOfListOrNull keeps values after a failing value`() {
+    val actual =
+      getValuesReader(
+          linkedMapOf(
+            "good" to listOf(serializableValue("two")),
+            "bad" to serializableValue("fail"),
+          )
+        )
+        .nextMapOfListOrNull(logger, BasicSerializable.Deserializer())
+
+    assertEquals(mapOf("good" to listOf(BasicSerializable("two"))), actual)
+  }
+
+  @Test
+  fun `nextListOrNull keeps elements after a partially consumed failing element`() {
+    val actual =
+      getValuesReader(
+          listOf(partialSerializableValue("fail", "bad"), partialSerializableValue("ok", "two"))
+        )
+        .nextListOrNull(logger, partiallyFailingDeserializer)
+
+    assertEquals(listOf(BasicSerializable("two")), actual)
+  }
+
+  @Test
+  fun `nextMapOrNull keeps values before a partially consumed failing value`() {
+    val actual =
+      getValuesReader(
+          linkedMapOf(
+            "bad" to partialSerializableValue("fail", "bad"),
+            "good" to partialSerializableValue("ok", "two"),
+          )
+        )
+        .nextMapOrNull(logger, partiallyFailingDeserializer)
+
+    assertEquals(mapOf("good" to BasicSerializable("two")), actual)
+  }
+
+  @Test
+  fun `nextMapOfListOrNull keeps values before a partially consumed failing element`() {
+    val actual =
+      getValuesReader(
+          linkedMapOf(
+            "bad" to listOf(partialSerializableValue("fail", "bad")),
+            "good" to listOf(partialSerializableValue("ok", "two")),
+          )
+        )
+        .nextMapOfListOrNull(logger, partiallyFailingDeserializer)
+
+    assertEquals(
+      mapOf("bad" to emptyList<BasicSerializable>(), "good" to listOf(BasicSerializable("two"))),
+      actual,
+    )
+  }
+}

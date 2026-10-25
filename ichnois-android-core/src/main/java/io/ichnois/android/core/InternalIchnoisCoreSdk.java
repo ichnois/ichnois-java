@@ -1,0 +1,495 @@
+package io.ichnois.android.core;
+
+import static io.ichnois.IchnoisCore.getCurrentScopes;
+import static io.ichnois.IchnoisCoreLevel.INFO;
+import static io.ichnois.IchnoisCoreLevel.WARNING;
+
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import io.ichnois.DateUtils;
+import io.ichnois.ILogger;
+import io.ichnois.IScope;
+import io.ichnois.IScopes;
+import io.ichnois.ISerializer;
+import io.ichnois.ObjectWriter;
+import io.ichnois.PropagationContext;
+import io.ichnois.ScopeType;
+import io.ichnois.ScopesAdapter;
+import io.ichnois.IchnoisCoreEnvelope;
+import io.ichnois.IchnoisCoreEnvelopeItem;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.Session;
+import io.ichnois.android.core.performance.ActivityLifecycleTimeSpan;
+import io.ichnois.android.core.performance.AppStartMetrics;
+import io.ichnois.android.core.performance.TimeSpan;
+import io.ichnois.cache.EnvelopeCache;
+import io.ichnois.protocol.App;
+import io.ichnois.protocol.Device;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.User;
+import io.ichnois.util.MapObjectWriter;
+import io.ichnois.util.TracingUtils;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/** IchnoisCore SDK internal API methods meant for being used by the IchnoisCore Hybrid SDKs. */
+@ApiStatus.Internal
+public final class InternalIchnoisCoreSdk {
+
+  /**
+   * @return a copy of the current scopes's topmost scope, or null in case the scopes is disabled
+   */
+  @Nullable
+  public static IScope getCurrentScope() {
+    final @NotNull AtomicReference<IScope> scopeRef = new AtomicReference<>();
+    ScopesAdapter.getInstance()
+        .configureScope(
+            ScopeType.COMBINED,
+            scope -> {
+              scopeRef.set(scope.clone());
+            });
+    return scopeRef.get();
+  }
+
+  /**
+   * Serializes the provided scope. Specific data may be back-filled (e.g. device context) if the
+   * scope itself does not provide it.
+   *
+   * @param context Android context
+   * @param options IchnoisCore Options
+   * @param scope the scope
+   * @return a map containing all relevant scope data (user, contexts, tags, extras, fingerprint,
+   *     level, breadcrumbs)
+   */
+  @NotNull
+  public static Map<String, Object> serializeScope(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @Nullable IScope scope) {
+
+    final @NotNull Map<String, Object> data = new HashMap<>();
+    if (scope == null) {
+      return data;
+    }
+    try {
+      final @NotNull ILogger logger = options.getLogger();
+      final @NotNull ObjectWriter writer = new MapObjectWriter(data);
+
+      final @NotNull DeviceInfoUtil deviceInfoUtil = DeviceInfoUtil.getInstance(context, options);
+      final @NotNull Device deviceInfo = deviceInfoUtil.collectDeviceInformation(true, true);
+      scope.getContexts().setDevice(deviceInfo);
+      scope.getContexts().setOperatingSystem(deviceInfoUtil.getOperatingSystem());
+
+      // user
+      @Nullable User user = scope.getUser();
+      if (user == null) {
+        user = new User();
+        scope.setUser(user);
+      }
+      if (user.getId() == null) {
+        try {
+          user.setId(Installation.id(context));
+        } catch (RuntimeException e) {
+          logger.log(IchnoisCoreLevel.ERROR, "Could not retrieve installation ID", e);
+        }
+      }
+
+      // app context
+      @Nullable App app = scope.getContexts().getApp();
+      if (app == null) {
+        app = new App();
+      }
+      app.setAppName(ContextUtils.getApplicationName(context));
+
+      final @NotNull TimeSpan appStartTimeSpan =
+          AppStartMetrics.getInstance().getAppStartTimeSpanWithFallback(options);
+      if (appStartTimeSpan.hasStarted()) {
+        app.setAppStartTime(DateUtils.toUtilDate(appStartTimeSpan.getStartTimestamp()));
+      }
+
+      final @NotNull BuildInfoProvider buildInfoProvider =
+          new BuildInfoProvider(options.getLogger());
+      final @Nullable PackageInfo packageInfo =
+          ContextUtils.getPackageInfo(
+              context, PackageManager.GET_PERMISSIONS, options.getLogger(), buildInfoProvider);
+      if (packageInfo != null) {
+        ContextUtils.setAppPackageInfo(packageInfo, buildInfoProvider, deviceInfoUtil, app);
+      }
+      scope.getContexts().setApp(app);
+
+      writer.name("user").value(logger, scope.getUser());
+      writer.name("contexts").value(logger, scope.getContexts());
+      writer.name("tags").value(logger, scope.getTags());
+      writer.name("extras").value(logger, scope.getExtras());
+      writer.name("fingerprint").value(logger, scope.getFingerprint());
+      writer.name("level").value(logger, scope.getLevel());
+      writer.name("breadcrumbs").value(logger, scope.getBreadcrumbs());
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Could not serialize scope.", e);
+      return new HashMap<>();
+    }
+
+    return data;
+  }
+
+  /**
+   * Captures the provided envelope. Compared to {@link IScopes#captureEvent(IchnoisCoreEvent)} this
+   * method <br>
+   * - will not enrich events with additional data (e.g. scope)<br>
+   * - will not execute beforeSend: it's up to the caller to take care of this<br>
+   * - will not perform any sampling: it's up to the caller to take care of this<br>
+   * - will enrich the envelope with a Session update if applicable<br>
+   *
+   * <p>Unhandled events ({@code handled=false}) end the session as {@code crashed}. Prefer {@link
+   * #captureEnvelopeNonTerminating(byte[])} for hybrid runtimes where the process is expected to
+   * continue (e.g. Flutter).
+   *
+   * @param envelopeData the serialized envelope data
+   * @param maybeStartNewSession if true, starts a new session after a crashed session is cleared
+   * @return The Id (IchnoisCoreId object) of the event, or null in case the envelope could not be
+   *     captured
+   */
+  @Nullable
+  public static IchnoisCoreId captureEnvelope(
+      final @NotNull byte[] envelopeData, final boolean maybeStartNewSession) {
+    final @NotNull IScopes scopes = ScopesAdapter.getInstance();
+    final @NotNull IchnoisCoreOptions options = scopes.getOptions();
+
+    final @Nullable IchnoisCoreEnvelope envelope = readEnvelope(options, envelopeData);
+    if (envelope == null) {
+      return null;
+    }
+
+    try {
+      final @NotNull ISerializer serializer = options.getSerializer();
+      final @NotNull EnvelopeEventState eventState = eventStateOf(envelope, serializer);
+
+      final @NotNull List<IchnoisCoreEnvelopeItem> envelopeItems = new ArrayList<>();
+      for (IchnoisCoreEnvelopeItem item : envelope.getItems()) {
+        envelopeItems.add(item);
+      }
+
+      // update session and add it to envelope if necessary
+      final @Nullable Session.State status =
+          eventState == EnvelopeEventState.UNHANDLED ? Session.State.Crashed : null;
+      final @Nullable Session session =
+          updateSession(scopes, options, status, eventState != EnvelopeEventState.NONE);
+      if (session != null) {
+        final IchnoisCoreEnvelopeItem sessionItem = IchnoisCoreEnvelopeItem.fromSession(serializer, session);
+        envelopeItems.add(sessionItem);
+        deleteCurrentSessionFile(
+            options,
+            // should be sync if going to crash or already not a main thread
+            !maybeStartNewSession || !scopes.getOptions().getThreadChecker().isMainThread());
+        if (maybeStartNewSession) {
+          scopes.startSession();
+        }
+      }
+
+      final IchnoisCoreEnvelope repackagedEnvelope =
+          new IchnoisCoreEnvelope(envelope.getHeader(), envelopeItems);
+      return scopes.captureEnvelope(repackagedEnvelope);
+    } catch (Throwable t) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Failed to capture envelope", t);
+    }
+    return null;
+  }
+
+  /**
+   * Captures the provided envelope for a non-terminating hybrid exception (e.g. Flutter).
+   *
+   * <p>Compared to {@link #captureEnvelope(byte[], boolean)} this method does <strong>not</strong>
+   * treat {@code handled=false} as a crash that ends the session. Instead it:
+   *
+   * <ul>
+   *   <li>flags the current session with a non-terminating unhandled error and increments the error
+   *       count
+   *   <li>keeps session status {@code Ok} and the same session id on the scope
+   *   <li>does not attach a session update item to this envelope
+   *   <li>does not start a new session
+   *   <li>persists the current session before returning, so the flag survives process death
+   * </ul>
+   *
+   * <p>Persisting is a blocking disk write on the calling thread, so call this off the main thread
+   * as the hybrid SDKs do. It is synchronous on purpose: a deferred write would not be on disk yet
+   * if the process dies right after this returns.
+   *
+   * <p>The session is finalized later by normal lifecycle ({@code endSession} / background /
+   * previous-session recovery) as {@code unhandled}, unless a terminal status takes over first,
+   * such as {@code crashed} for a native crash or {@code abnormal} for an ANR.
+   *
+   * <p>Same as {@link #captureEnvelope(byte[], boolean)}, this method will not enrich events, run
+   * {@code beforeSend}, or sample — the caller is responsible for that.
+   *
+   * @param envelopeData the serialized envelope data
+   * @return the id of the captured envelope, or null if capture failed
+   */
+  @Nullable
+  public static IchnoisCoreId captureEnvelopeNonTerminating(final @NotNull byte[] envelopeData) {
+    final @NotNull IScopes scopes = ScopesAdapter.getInstance();
+    final @NotNull IchnoisCoreOptions options = scopes.getOptions();
+
+    final @Nullable IchnoisCoreEnvelope envelope = readEnvelope(options, envelopeData);
+    if (envelope == null) {
+      return null;
+    }
+
+    final @NotNull EnvelopeEventState eventState;
+    try {
+      eventState = eventStateOf(envelope, options.getSerializer());
+    } catch (Exception e) {
+      // getEvent reads through a Callable, whose call() declares Exception
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Failed to inspect envelope events", e);
+      return null;
+    }
+
+    if (eventState != EnvelopeEventState.NONE) {
+      updateSessionNonTerminating(eventState == EnvelopeEventState.UNHANDLED);
+    }
+
+    return scopes.captureEnvelope(envelope);
+  }
+
+  /**
+   * Session side effects of {@link #captureEnvelopeNonTerminating(byte[])} without sending the
+   * event. Hybrid SDKs should call this when an error is dropped by sampling.
+   *
+   * <p>Do not call this for events dropped by {@code beforeSend} or ignored exception types.
+   *
+   * <p>Persisting the session is a blocking disk write on the calling thread, so call this off the
+   * main thread as the hybrid SDKs do. It is synchronous on purpose: a deferred write would not be
+   * on disk yet if the process dies right after this returns.
+   *
+   * @param crashed {@code true} if the dropped error was unhandled ({@code
+   *     mechanism.handled=false})
+   */
+  public static void updateSessionForDroppedEventNonTerminating(final boolean crashed) {
+    updateSessionNonTerminating(crashed);
+  }
+
+  /**
+   * Flags the current session for a non-terminating hybrid error and persists it before returning,
+   * so the marker survives an immediate process death.
+   *
+   * <p>The write stays inside {@code withSession}: the scope's session lock is what keeps the
+   * session from being ended or replaced mid-write.
+   *
+   * @param unhandled {@code true} if the error was unhandled ({@code mechanism.handled=false})
+   */
+  private static void updateSessionNonTerminating(final boolean unhandled) {
+    final @NotNull IScopes scopes = ScopesAdapter.getInstance();
+    final @NotNull IchnoisCoreOptions options = scopes.getOptions();
+    scopes.configureScope(
+        scope ->
+            scope.withSession(
+                session -> {
+                  if (session == null) {
+                    options.getLogger().log(INFO, "Session is null on updateSessionNonTerminating");
+                    return;
+                  }
+                  if (session.isTerminated()) {
+                    options
+                        .getLogger()
+                        .log(INFO, "Session already terminated, not recording the error.");
+                    return;
+                  }
+                  final boolean recorded =
+                      unhandled
+                          ? session.recordNonTerminatingUnhandledError()
+                          : session.update(null, null, true, null);
+                  if (recorded && options.getEnvelopeDiskCache() instanceof EnvelopeCache) {
+                    ((EnvelopeCache) options.getEnvelopeDiskCache()).persistCurrentSession(session);
+                  }
+                }));
+  }
+
+  /** What the events inside an envelope amount to, from the session's point of view. */
+  private enum EnvelopeEventState {
+    /** No event carried an exception. */
+    NONE,
+    /** At least one event carried an exception, none of them unhandled. */
+    ERRORED,
+    /** At least one event carried an unhandled exception. */
+    UNHANDLED
+  }
+
+  private static @NotNull EnvelopeEventState eventStateOf(
+      final @NotNull IchnoisCoreEnvelope envelope, final @NotNull ISerializer serializer)
+      throws Exception {
+    boolean unhandled = false;
+    boolean errored = false;
+    for (IchnoisCoreEnvelopeItem item : envelope.getItems()) {
+      final IchnoisCoreEvent event = item.getEvent(serializer);
+      if (event != null) {
+        if (event.isCrashed()) {
+          unhandled = true;
+        }
+        if (event.isCrashed() || event.isErrored()) {
+          errored = true;
+        }
+      }
+    }
+    if (unhandled) {
+      return EnvelopeEventState.UNHANDLED;
+    }
+    return errored ? EnvelopeEventState.ERRORED : EnvelopeEventState.NONE;
+  }
+
+  private static @Nullable IchnoisCoreEnvelope readEnvelope(
+      final @NotNull IchnoisCoreOptions options, final @NotNull byte[] envelopeData) {
+    try (final InputStream envelopeInputStream = new ByteArrayInputStream(envelopeData)) {
+      return options.getEnvelopeReader().read(envelopeInputStream);
+    } catch (IOException | IllegalArgumentException e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Failed to read envelope", e);
+      return null;
+    }
+  }
+
+  public static Map<String, Object> getAppStartMeasurement() {
+    final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+    final @NotNull List<Map<String, Object>> spans = new ArrayList<>();
+
+    addTimeSpanToSerializedSpans(metrics.createProcessInitSpan(), spans);
+    addTimeSpanToSerializedSpans(metrics.getApplicationOnCreateTimeSpan(), spans);
+
+    for (final TimeSpan span : metrics.getContentProviderOnCreateTimeSpans()) {
+      addTimeSpanToSerializedSpans(span, spans);
+    }
+
+    for (final ActivityLifecycleTimeSpan span : metrics.getActivityLifecycleTimeSpans()) {
+      addTimeSpanToSerializedSpans(span.getOnCreate(), spans);
+      addTimeSpanToSerializedSpans(span.getOnStart(), spans);
+    }
+
+    final @NotNull Map<String, Object> result = new HashMap<>();
+    result.put("spans", spans);
+    result.put("type", metrics.getAppStartType().toString().toLowerCase(Locale.ROOT));
+    if (metrics.getAppStartTimeSpan().hasStarted()) {
+      result.put("app_start_timestamp_ms", metrics.getAppStartTimeSpan().getStartTimestampMs());
+    }
+
+    return result;
+  }
+
+  private static void addTimeSpanToSerializedSpans(TimeSpan span, List<Map<String, Object>> spans) {
+    if (span.hasNotStarted()) {
+      ScopesAdapter.getInstance()
+          .getOptions()
+          .getLogger()
+          .log(WARNING, "Can not convert not-started TimeSpan to Map for Hybrid SDKs.");
+      return;
+    }
+
+    if (span.hasNotStopped()) {
+      ScopesAdapter.getInstance()
+          .getOptions()
+          .getLogger()
+          .log(WARNING, "Can not convert not-stopped TimeSpan to Map for Hybrid SDKs.");
+      return;
+    }
+
+    final @NotNull Map<String, Object> spanMap = new HashMap<>();
+    spanMap.put("description", span.getDescription());
+    spanMap.put("start_timestamp_ms", span.getStartTimestampMs());
+    spanMap.put("end_timestamp_ms", span.getProjectedStopTimestampMs());
+    spans.add(spanMap);
+  }
+
+  private static void deleteCurrentSessionFile(
+      final @NotNull IchnoisCoreOptions options, boolean isSync) {
+    if (!isSync) {
+      try {
+        options
+            .getExecutorService()
+            .submit(
+                () -> {
+                  deleteCurrentSessionFile(options);
+                });
+      } catch (Throwable e) {
+        options
+            .getLogger()
+            .log(WARNING, "Submission of deletion of the current session file rejected.", e);
+      }
+    } else {
+      deleteCurrentSessionFile(options);
+    }
+  }
+
+  private static void deleteCurrentSessionFile(final @NotNull IchnoisCoreOptions options) {
+    final String cacheDirPath = options.getCacheDirPath();
+    if (cacheDirPath == null) {
+      options.getLogger().log(INFO, "Cache dir is not set, not deleting the current session.");
+      return;
+    }
+
+    final File sessionFile = EnvelopeCache.getCurrentSessionFile(cacheDirPath);
+    if (!sessionFile.delete()) {
+      options.getLogger().log(WARNING, "Failed to delete the current session file.");
+    }
+  }
+
+  @Nullable
+  private static Session updateSession(
+      final @NotNull IScopes scopes,
+      final @NotNull IchnoisCoreOptions options,
+      final @Nullable Session.State status,
+      final boolean crashedOrErrored) {
+    final @NotNull AtomicReference<Session> sessionRef = new AtomicReference<>();
+    scopes.configureScope(
+        scope -> {
+          scope.withSession(
+              session -> {
+                if (session != null) {
+                  final boolean updated = session.update(status, null, crashedOrErrored, null);
+                  // if we have an uncaughtExceptionHint we can end the session.
+                  if (updated) {
+                    if (session.getStatus() == Session.State.Crashed) {
+                      session.end();
+                      // Session needs to be removed from the scope, otherwise it will be send twice
+                      // standalone and with the crash event
+                      scope.clearSession();
+                    }
+                    // fromSession serializes lazily, on the transport thread, so handing out the
+                    // live session would race a later mutation
+                    sessionRef.set(session.clone());
+                  }
+                } else {
+                  options.getLogger().log(INFO, "Session is null on updateSession");
+                }
+              });
+        });
+    return sessionRef.get();
+  }
+
+  /**
+   * Allows a Hybrid SDK to set the trace on the native layer
+   *
+   * @param traceId the trace ID
+   * @param spanId the trace origin's span ID
+   * @param sampleRate the sample rate used by the origin of the trace
+   * @param sampleRand the random value used to sample with by the origin of the trace
+   */
+  public static void setTrace(
+      final @NotNull String traceId,
+      final @NotNull String spanId,
+      final @Nullable Double sampleRate,
+      final @Nullable Double sampleRand) {
+    TracingUtils.setTrace(
+        getCurrentScopes(),
+        PropagationContext.fromExistingTrace(traceId, spanId, sampleRate, sampleRand));
+  }
+}

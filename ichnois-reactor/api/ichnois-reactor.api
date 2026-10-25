@@ -1,0 +1,26 @@
+public final class io/ichnois/reactor/BuildConfig {
+	public static final field ICHNOIS_REACTOR_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/reactor/IchnoisCoreReactorThreadLocalAccessor : io/micrometer/context/ThreadLocalAccessor {
+	public static final field KEY Ljava/lang/String;
+	public fun <init> ()V
+	public fun getValue ()Lio/ichnois/IScopes;
+	public synthetic fun getValue ()Ljava/lang/Object;
+	public fun key ()Ljava/lang/Object;
+	public fun reset ()V
+	public fun setValue (Lio/ichnois/IScopes;)V
+	public synthetic fun setValue (Ljava/lang/Object;)V
+}
+
+public class io/ichnois/reactor/IchnoisCoreReactorUtils {
+	public fun <init> ()V
+	public static fun withIchnoisCore (Lreactor/core/publisher/Flux;)Lreactor/core/publisher/Flux;
+	public static fun withIchnoisCore (Lreactor/core/publisher/Mono;)Lreactor/core/publisher/Mono;
+	public static fun withIchnoisCoreForkedRoots (Lreactor/core/publisher/Flux;)Lreactor/core/publisher/Flux;
+	public static fun withIchnoisCoreForkedRoots (Lreactor/core/publisher/Mono;)Lreactor/core/publisher/Mono;
+	public static fun withIchnoisCoreScopes (Lreactor/core/publisher/Flux;Lio/ichnois/IScopes;)Lreactor/core/publisher/Flux;
+	public static fun withIchnoisCoreScopes (Lreactor/core/publisher/Mono;Lio/ichnois/IScopes;)Lreactor/core/publisher/Mono;
+}
+

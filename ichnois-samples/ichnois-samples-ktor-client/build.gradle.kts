@@ -1,0 +1,26 @@
+plugins {
+  alias(libs.plugins.kotlin.jvm)
+  application
+  alias(libs.plugins.gradle.versions)
+}
+
+application { mainClass.set("io.ichnois.samples.ktorClient.Main") }
+
+configure<JavaPluginExtension> {
+  sourceCompatibility = JavaVersion.VERSION_1_8
+  targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+  compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+}
+
+dependencies {
+  implementation(libs.ktor.client.core)
+  implementation(libs.ktor.client.java)
+  implementation(libs.kotlinx.coroutines)
+  implementation(projects.ichnois)
+  implementation(projects.ichnoisKtorClient)
+}
+
+tasks.test { useJUnitPlatform() }

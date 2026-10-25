@@ -1,0 +1,70 @@
+package io.ichnois
+
+import io.ichnois.cache.EnvelopeCache.CRASH_MARKER_FILE
+import io.ichnois.cache.EnvelopeCache.NATIVE_CRASH_MARKER_FILE
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class IchnoisCoreCrashLastRunStateTest {
+  private val ichnoisCrashLastRunState = IchnoisCoreCrashLastRunState.getInstance()
+
+  private lateinit var file: File
+
+  @BeforeTest
+  fun `before test`() {
+    file = Files.createTempDirectory("ichnois-disk-cache-test").toAbsolutePath().toFile()
+    ichnoisCrashLastRunState.reset()
+  }
+
+  @AfterTest
+  fun shutdown() {
+    file.deleteRecursively()
+  }
+
+  @Test
+  fun `reset returns null if no cacheDirPath given`() {
+    assertNull(ichnoisCrashLastRunState.isCrashedLastRun(null, false))
+  }
+
+  @Test
+  fun `returns true if Java Marker exists`() {
+    val javaMarker = File(file.absolutePath, CRASH_MARKER_FILE)
+    javaMarker.createNewFile()
+
+    assertTrue(ichnoisCrashLastRunState.isCrashedLastRun(file.absolutePath, false)!!)
+    assertFalse(javaMarker.exists())
+  }
+
+  @Test
+  fun `returns true if Native Marker exists`() {
+    val nativeMarker = File(file.absolutePath, NATIVE_CRASH_MARKER_FILE)
+    nativeMarker.mkdirs()
+    nativeMarker.createNewFile()
+
+    assertTrue(ichnoisCrashLastRunState.isCrashedLastRun(file.absolutePath, false)!!)
+    assertTrue(nativeMarker.exists())
+  }
+
+  @Test
+  fun `returns true if Native Marker exists and should delete the file`() {
+    val nativeMarker = File(file.absolutePath, NATIVE_CRASH_MARKER_FILE)
+    nativeMarker.mkdirs()
+    nativeMarker.createNewFile()
+
+    assertTrue(ichnoisCrashLastRunState.isCrashedLastRun(file.absolutePath, true)!!)
+    assertFalse(nativeMarker.exists())
+  }
+
+  @Test
+  fun `returns cached value if already checked`() {
+    ichnoisCrashLastRunState.setCrashedLastRun(true)
+
+    assertTrue(ichnoisCrashLastRunState.isCrashedLastRun(file.absolutePath, false)!!)
+  }
+}

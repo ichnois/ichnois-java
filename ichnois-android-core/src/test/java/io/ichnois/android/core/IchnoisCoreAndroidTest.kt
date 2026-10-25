@@ -1,0 +1,627 @@
+package io.ichnois.android.core
+
+import android.app.ActivityManager
+import android.app.Application
+import android.app.ApplicationExitInfo
+import android.content.Context
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.Breadcrumb
+import io.ichnois.DateUtils
+import io.ichnois.Hint
+import io.ichnois.ILogger
+import io.ichnois.IIchnoisCoreClient
+import io.ichnois.NoOpIchnoisCoreExecutorService
+import io.ichnois.IchnoisCore
+import io.ichnois.IchnoisCore.OptionsConfiguration
+import io.ichnois.IchnoisCoreEnvelope
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreLevel.DEBUG
+import io.ichnois.IchnoisCoreLevel.FATAL
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreOptions.BeforeSendCallback
+import io.ichnois.Session
+import io.ichnois.ShutdownHookIntegration
+import io.ichnois.SystemOutLogger
+import io.ichnois.UncaughtExceptionHandlerIntegration
+import io.ichnois.android.core.anr.AnrProfilingIntegration
+import io.ichnois.android.core.cache.AndroidEnvelopeCache
+import io.ichnois.android.core.performance.AppStartMetrics
+import io.ichnois.android.fragment.FragmentLifecycleIntegration
+import io.ichnois.android.replay.ReplayIntegration
+import io.ichnois.android.timber.IchnoisCoreTimberIntegration
+import io.ichnois.cache.IEnvelopeCache
+import io.ichnois.cache.PersistingOptionsObserver
+import io.ichnois.cache.PersistingOptionsObserver.ENVIRONMENT_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.OPTIONS_CACHE
+import io.ichnois.cache.PersistingOptionsObserver.RELEASE_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.BREADCRUMBS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.REPLAY_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.SCOPE_CACHE
+import io.ichnois.cache.PersistingScopeObserver.TRANSACTION_FILENAME
+import io.ichnois.cache.tape.QueueFile
+import io.ichnois.protocol.Contexts
+import io.ichnois.spotlight.SpotlightIntegration
+import io.ichnois.test.applyTestOptions
+import io.ichnois.transport.NoOpEnvelopeCache
+import io.ichnois.util.StringUtils
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.nio.file.Files
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.io.path.absolutePathString
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.awaitility.kotlin.await
+import org.awaitility.kotlin.withAlias
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.mockito.Mockito
+import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.spy
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+import org.robolectric.Shadows
+import org.robolectric.annotation.Config
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowActivityManager
+import org.robolectric.shadows.ShadowActivityManager.ApplicationExitInfoBuilder
+
+@RunWith(AndroidJUnit4::class)
+@Config(sdk = [Build.VERSION_CODES.N], shadows = [IchnoisCoreShadowProcess::class])
+class IchnoisCoreAndroidTest {
+  @get:Rule val tmpDir = TemporaryFolder()
+
+  class Fixture {
+    lateinit var shadowActivityManager: ShadowActivityManager
+
+    fun initSut(
+      context: Context? = null,
+      autoInit: Boolean = false,
+      logger: ILogger? = null,
+      options: IchnoisCore.OptionsConfiguration<IchnoisCoreAndroidOptions>? = null,
+    ) {
+      val metadata =
+        Bundle().apply {
+          putString(ManifestMetadataReader.DSN, "https://key@ichnois.io/123")
+          putBoolean(ManifestMetadataReader.AUTO_INIT, autoInit)
+        }
+      val mockContext = context ?: ContextUtilsTestHelper.mockMetaData(metaData = metadata)
+      when {
+        logger != null -> initForTest(mockContext, logger)
+        options != null -> initForTest(mockContext, options)
+        else -> initForTest(mockContext)
+      }
+    }
+
+    fun addAppExitInfo(
+      reason: Int? = ApplicationExitInfo.REASON_ANR,
+      timestamp: Long? = null,
+      importance: Int? = null,
+    ) {
+      val builder = ApplicationExitInfoBuilder.newBuilder()
+      if (reason != null) {
+        builder.setReason(reason)
+      }
+      if (timestamp != null) {
+        builder.setTimestamp(timestamp)
+      }
+      if (importance != null) {
+        builder.setImportance(importance)
+      }
+      val exitInfo =
+        spy(builder.build()) {
+          whenever(mock.traceInputStream)
+            .thenReturn(
+              """
+              "main" prio=5 tid=1 Blocked
+                | group="main" sCount=1 ucsCount=0 flags=1 obj=0x72a985e0 self=0xb400007cabc57380
+                | sysTid=28941 nice=-10 cgrp=top-app sched=0/0 handle=0x7deceb74f8
+                | state=S schedstat=( 324804784 183300334 997 ) utm=23 stm=8 core=3 HZ=100
+                | stack=0x7ff93a9000-0x7ff93ab000 stackSize=8188KB
+                | held mutexes=
+                at io.ichnois.samples.android.MainActivity${'$'}2.run(MainActivity.java:177)
+                - waiting to lock <0x0d3a2f0a> (a java.lang.Object) held by thread 5
+                at android.os.Handler.handleCallback(Handler.java:942)
+                at android.os.Handler.dispatchMessage(Handler.java:99)
+                at android.os.Looper.loopOnce(Looper.java:201)
+                at android.os.Looper.loop(Looper.java:288)
+                at android.app.ActivityThread.main(ActivityThread.java:7872)
+                at java.lang.reflect.Method.invoke(Native method)
+                at com.android.internal.os.RuntimeInit${'$'}MethodAndArgsCaller.run(RuntimeInit.java:548)
+                at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:936)
+
+              "perfetto_hprof_listener" prio=10 tid=7 Native (still starting up)
+                | group="" sCount=1 ucsCount=0 flags=1 obj=0x0 self=0xb400007cabc5ab20
+                | sysTid=28959 nice=-20 cgrp=top-app sched=0/0 handle=0x7b2021bcb0
+                | state=S schedstat=( 72750 1679167 1 ) utm=0 stm=0 core=3 HZ=100
+                | stack=0x7b20124000-0x7b20126000 stackSize=991KB
+                | held mutexes=
+                native: #00 pc 00000000000a20f4  /apex/com.android.runtime/lib64/bionic/libc.so (read+4) (BuildId: 01331f74b0bb2cb958bdc15282b8ec7b)
+                native: #01 pc 000000000001d840  /apex/com.android.art/lib64/libperfetto_hprof.so (void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ArtPlugin_Initialize::${'$'}_34> >(void*)+260) (BuildId: 525cc92a7dc49130157aeb74f6870364)
+                native: #02 pc 00000000000b63b0  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start(void*)+208) (BuildId: 01331f74b0bb2cb958bdc15282b8ec7b)
+                native: #03 pc 00000000000530b8  /apex/com.android.runtime/lib64/bionic/libc.so (__start_thread+64) (BuildId: 01331f74b0bb2cb958bdc15282b8ec7b)
+                (no managed stack frames)
+              """
+                .trimIndent()
+                .byteInputStream()
+            )
+        }
+      shadowActivityManager.addApplicationExitInfo(exitInfo)
+    }
+  }
+
+  private val fixture = Fixture()
+  private lateinit var context: Context
+
+  @BeforeTest
+  fun `set up`() {
+    IchnoisCore.close()
+    AppStartMetrics.getInstance().clear()
+    context = ApplicationProvider.getApplicationContext()
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager?
+    fixture.shadowActivityManager = Shadow.extract(activityManager)
+  }
+
+  @Test
+  fun `when auto-init is disabled and user calls init manually, SDK initializes`() {
+    assertFalse(IchnoisCore.isEnabled())
+
+    fixture.initSut()
+
+    assertTrue(IchnoisCore.isEnabled())
+  }
+
+  @Test
+  fun `when auto-init is disabled and user calls init manually with a logger, SDK initializes`() {
+    assertFalse(IchnoisCore.isEnabled())
+
+    fixture.initSut(logger = mock())
+
+    assertTrue(IchnoisCore.isEnabled())
+  }
+
+  @Test
+  fun `when auto-init is disabled and user calls init manually with configuration handler, options should be set`() {
+    assertFalse(IchnoisCore.isEnabled())
+
+    var refOptions: IchnoisCoreAndroidOptions? = null
+    fixture.initSut {
+      it.anrTimeoutIntervalMillis = 3000
+      refOptions = it
+    }
+
+    assertEquals(3000, refOptions!!.anrTimeoutIntervalMillis)
+    assertTrue(IchnoisCore.isEnabled())
+  }
+
+  @Test
+  fun `init won't throw exception`() {
+    val logger = mock<ILogger>()
+
+    fixture.initSut(autoInit = true, logger = logger)
+
+    verify(logger, never()).log(eq(IchnoisCoreLevel.FATAL), any<String>(), any())
+  }
+
+  @Test
+  fun `set app start if provider is disabled`() {
+    fixture.initSut(autoInit = true)
+
+    // done by ActivityLifecycleIntegration so forcing it here
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartMetrics.AppStartType.COLD
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(1 + SystemClock.uptimeMillis())
+      }
+    }
+
+    assertNotEquals(0, AppStartMetrics.getInstance().appStartTimeSpan.durationMs)
+  }
+
+  @Test
+  fun `deduplicates fragment, timber and system events integrations`() {
+    var refOptions: IchnoisCoreAndroidOptions? = null
+    fixture.initSut(autoInit = true) {
+      it.addIntegration(FragmentLifecycleIntegration(ApplicationProvider.getApplicationContext()))
+
+      it.addIntegration(IchnoisCoreTimberIntegration(minEventLevel = FATAL, minBreadcrumbLevel = DEBUG))
+
+      it.addIntegration(
+        SystemEventsBreadcrumbsIntegration(
+          ApplicationProvider.getApplicationContext(),
+          CustomHandler(Looper.getMainLooper()),
+        )
+      )
+      refOptions = it
+    }
+
+    assertEquals(refOptions!!.integrations.filterIsInstance<IchnoisCoreTimberIntegration>().size, 1)
+    val timberIntegration =
+      refOptions!!.integrations.find { it is IchnoisCoreTimberIntegration } as IchnoisCoreTimberIntegration
+    assertEquals(timberIntegration.minEventLevel, FATAL)
+    assertEquals(timberIntegration.minBreadcrumbLevel, DEBUG)
+
+    // fragment integration is not auto-installed in the test, since the context is not Application
+    // but we just verify here that the single integration is preserved
+    assertEquals(refOptions!!.integrations.filterIsInstance<FragmentLifecycleIntegration>().size, 1)
+
+    val systemEventsIntegrations =
+      refOptions!!.integrations.filterIsInstance<SystemEventsBreadcrumbsIntegration>()
+    assertEquals(systemEventsIntegrations.size, 1)
+    assertTrue(systemEventsIntegrations.first().customHandler is CustomHandler)
+  }
+
+  @Test
+  fun `AndroidEnvelopeCache is reset if the user disabled caching via cacheDirPath`() {
+    var refOptions: IchnoisCoreAndroidOptions? = null
+
+    fixture.initSut {
+      it.cacheDirPath = null
+
+      refOptions = it
+    }
+
+    assertTrue { refOptions!!.envelopeDiskCache is NoOpEnvelopeCache }
+  }
+
+  @Test
+  fun `envelopeCache remains unchanged if the user set their own IEnvelopCache impl`() {
+    var refOptions: IchnoisCoreAndroidOptions? = null
+
+    fixture.initSut {
+      it.cacheDirPath = null
+      it.setEnvelopeDiskCache(CustomEnvelopCache())
+
+      refOptions = it
+    }
+
+    assertTrue { refOptions!!.envelopeDiskCache is CustomEnvelopCache }
+  }
+
+  @Test
+  fun `When initializing IchnoisCore manually and changing both cache dir and dsn, the corresponding options should reflect that change`() {
+    var options: IchnoisCoreOptions? = null
+
+    val mockContext = ContextUtilsTestHelper.createMockContext(true)
+    val cacheDirPath = Files.createTempDirectory("new_cache").absolutePathString()
+    initForTest(mockContext) {
+      it.dsn = "https://key@ichnois.io/123"
+      it.cacheDirPath = cacheDirPath
+      options = it
+    }
+
+    val dsnHash = StringUtils.calculateStringHash(options!!.dsn, options!!.logger)
+    val expectedCacheDir = "$cacheDirPath/$dsnHash"
+    assertEquals(expectedCacheDir, options!!.cacheDirPath)
+    assertEquals(
+      expectedCacheDir,
+      (options!!.envelopeDiskCache as AndroidEnvelopeCache).directory.absolutePath,
+    )
+  }
+
+  @Test
+  fun `init starts a session if auto session tracking is enabled and app is in foreground`() {
+    initIchnoisCoreWithForegroundImportance(true) { session: Session? -> assertNotNull(session) }
+  }
+
+  @Test
+  fun `init does not start a session if auto session tracking is enabled but the app is in background`() {
+    initIchnoisCoreWithForegroundImportance(false) { session: Session? -> assertNull(session) }
+  }
+
+  @Test
+  fun `init does not start a session if one is already running`() {
+    val client = mock<IIchnoisCoreClient>()
+    whenever(client.isEnabled).thenReturn(true)
+
+    initIchnoisCoreWithForegroundImportance(
+      true,
+      { options ->
+        options.addIntegration { scopes, _ ->
+          scopes.bindClient(client)
+          // usually done by LifecycleWatcher
+          scopes.startSession()
+        }
+      },
+    ) {}
+
+    verify(client, times(1)).captureSession(any(), any())
+  }
+
+  @Test
+  @Config(sdk = [26])
+  fun `init starts session replay if app is in foreground`() {
+    initIchnoisCoreWithForegroundImportance(true) { _ ->
+      Shadows.shadowOf(Looper.getMainLooper()).idle()
+      assertTrue(IchnoisCore.getCurrentHub().options.replayController.isRecording())
+    }
+  }
+
+  @Test
+  @Config(sdk = [26])
+  fun `init does not start session replay if the app is in background`() {
+    initIchnoisCoreWithForegroundImportance(false) { _ ->
+      Shadows.shadowOf(Looper.getMainLooper()).idle()
+      assertFalse(IchnoisCore.getCurrentHub().options.replayController.isRecording())
+    }
+  }
+
+  @Test
+  fun `When initializing IchnoisCore a callback is added to application by appStartMetrics`() {
+    val mockContext = ContextUtilsTestHelper.createMockContext(true)
+    initForTest(mockContext) { it.dsn = "https://key@ichnois.io/123" }
+    verify(mockContext.applicationContext as Application)
+      .registerActivityLifecycleCallbacks(eq(AppStartMetrics.getInstance()))
+  }
+
+  private fun initIchnoisCoreWithForegroundImportance(
+    inForeground: Boolean,
+    optionsConfig: (IchnoisCoreAndroidOptions) -> Unit = {},
+    callback: (session: Session?) -> Unit,
+  ) {
+    Mockito.mockStatic(ContextUtils::class.java, Mockito.CALLS_REAL_METHODS).use {
+      mockedContextUtils ->
+      mockedContextUtils
+        .`when`<Any> { ContextUtils.isForegroundImportance() }
+        .thenReturn(inForeground)
+      initForTest(context) { options ->
+        options.release = "prod"
+        options.dsn = "https://key@ichnois.io/123"
+        options.isEnableAutoSessionTracking = true
+        options.sessionReplay.onErrorSampleRate = 1.0
+        optionsConfig(options)
+      }
+
+      var session: Session? = null
+      IchnoisCore.getCurrentScopes().configureScope { scope -> session = scope.session }
+      callback(session)
+    }
+  }
+
+  @Test
+  fun `init does not start a session by if auto session tracking is disabled`() {
+    fixture.initSut { options -> options.isEnableAutoSessionTracking = false }
+    IchnoisCore.getCurrentScopes().withScope { scope -> assertNull(scope.session) }
+  }
+
+  @Test
+  @Config(sdk = [30])
+  fun `AnrV2 events get enriched with previously persisted scope and options data, the new data gets persisted after that`() {
+    val cacheDir = tmpDir.newFolder().absolutePath
+    fixture.addAppExitInfo(timestamp = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(1))
+    val asserted = AtomicBoolean(false)
+    lateinit var options: IchnoisCoreOptions
+
+    fixture.initSut(context) {
+      it.dsn = "https://key@ichnois.io/123"
+      it.cacheDirPath = cacheDir
+      it.isDebug = true
+      it.setLogger(SystemOutLogger())
+      // beforeSend is called after event processors are applied, so we can assert here
+      // against the enriched ANR event
+      it.beforeSend = BeforeSendCallback { event, hint ->
+        assertEquals("MainActivity", event.transaction)
+        assertEquals("Debug!", event.breadcrumbs!![0].message)
+        assertEquals("staging", event.environment)
+        assertEquals("io.ichnois.sample@2.0.0", event.release)
+        assertEquals("afcb46b1140ade5187c4bbb5daa804df", event.contexts[Contexts.REPLAY_ID])
+        asserted.set(true)
+        null
+      }
+
+      // have to do it after the cacheDir is set to options, because it adds a dsn hash after
+      prefillOptionsCache(it.cacheDirPath!!)
+      prefillScopeCache(it, it.cacheDirPath!!)
+
+      it.release = "io.ichnois.sample@1.1.0+220"
+      it.environment = "debug"
+      options = it
+    }
+    val scopeObserver = assertNotNull(options.findPersistingScopeObserver())
+    val resetAssertions =
+      options.executorService.submit {
+        // verify we reset the persisted scope values after the init bg tasks have run to ensure
+        // clean state for a new process.
+        assertEquals(
+          emptyList<Breadcrumb>(),
+          scopeObserver.read(options, BREADCRUMBS_FILENAME, List::class.java),
+        )
+      }
+    IchnoisCore.configureScope {
+      it.setTransaction("TestActivity")
+      it.addBreadcrumb(Breadcrumb.error("Error!"))
+    }
+    await
+      .withAlias(
+        "Failed because of BeforeSend callback above, but we swallow BeforeSend exceptions, hence the timeout"
+      )
+      .untilTrue(asserted)
+
+    // Execute all posted tasks
+    Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+    // the reset assertions run on the executor, so nothing reports their AssertionError unless we
+    // observe the Future: without this the test would pass no matter what they found
+    try {
+      resetAssertions.get(2, TimeUnit.SECONDS)
+    } catch (e: ExecutionException) {
+      throw requireNotNull(e.cause)
+    }
+
+    // Both values are persisted from the IchnoisCore executor, and nothing above joins it: the
+    // beforeSend callback we awaited runs on an earlier task in the same queue, so it flipping
+    // says nothing about the writes. Poll instead of reading once and racing them.
+    await
+      .withAlias("Persisted scope and options values are written from the IchnoisCore executor")
+      .atMost(2, TimeUnit.SECONDS)
+      .untilAsserted {
+        assertEquals(
+          "TestActivity",
+          scopeObserver.read(options, TRANSACTION_FILENAME, String::class.java),
+        )
+        assertEquals(
+          "io.ichnois.sample@1.1.0+220",
+          PersistingOptionsObserver.read(options, RELEASE_FILENAME, String::class.java),
+        )
+      }
+  }
+
+  @Test
+  fun `init can remove all integrations`() {
+    lateinit var optionsRef: IchnoisCoreOptions
+    fixture.initSut(context = mock<Application>()) { options ->
+      optionsRef = options
+      options.dsn = "https://key@ichnois.io/123"
+      assertEquals(20, options.integrations.size)
+      options.integrations.removeAll {
+        it is UncaughtExceptionHandlerIntegration ||
+          it is ShutdownHookIntegration ||
+          it is SendCachedEnvelopeIntegration ||
+          it is NdkIntegration ||
+          it is EnvelopeFileObserverIntegration ||
+          it is AppLifecycleIntegration ||
+          it is AnrIntegration ||
+          it is AnrProfilingIntegration ||
+          it is ActivityLifecycleIntegration ||
+          it is ActivityBreadcrumbsIntegration ||
+          it is UserInteractionIntegration ||
+          it is FeedbackShakeIntegration ||
+          it is FragmentLifecycleIntegration ||
+          it is IchnoisCoreTimberIntegration ||
+          it is AppComponentsBreadcrumbsIntegration ||
+          it is SystemEventsBreadcrumbsIntegration ||
+          it is NetworkBreadcrumbsIntegration ||
+          it is SpotlightIntegration ||
+          it is ReplayIntegration
+      }
+    }
+    assertEquals(0, optionsRef.integrations.size)
+  }
+
+  @Test
+  fun `init backfills sdk init and app start time`() {
+    AppStartMetrics.getInstance().clear()
+    IchnoisCoreShadowProcess.setStartUptimeMillis(42)
+
+    fixture.initSut(context = mock<Application>()) { options ->
+      options.dsn = "https://key@ichnois.io/123"
+      options.isEnablePerformanceV2 = true
+    }
+    assertEquals(42, AppStartMetrics.getInstance().appStartTimeSpan.startUptimeMs)
+    assertTrue(AppStartMetrics.getInstance().sdkInitTimeSpan.hasStarted())
+  }
+
+  @Test
+  fun `init does not backfill sdk init and app start times if already set`() {
+    AppStartMetrics.getInstance().clear()
+    AppStartMetrics.getInstance().sdkInitTimeSpan.setStartedAt(99)
+    AppStartMetrics.getInstance().appStartTimeSpan.setStartedAt(99)
+
+    IchnoisCoreShadowProcess.setStartUptimeMillis(42)
+    fixture.initSut(context = mock<Application>()) { options ->
+      options.dsn = "https://key@ichnois.io/123"
+      options.isEnablePerformanceV2 = true
+    }
+
+    assertEquals(99, AppStartMetrics.getInstance().sdkInitTimeSpan.startUptimeMs)
+    assertEquals(99, AppStartMetrics.getInstance().appStartTimeSpan.startUptimeMs)
+  }
+
+  @Test
+  fun `executor service is not NoOp when AndroidConnectionStatusProvider is initialized`() {
+    var executorServiceIsNoOp = true
+    fixture.initSut(context = context) { options ->
+      options.dsn = "https://key@ichnois.io/123"
+      // the config callback runs before initializeIntegrationsAndProcessors, which creates
+      // AndroidConnectionStatusProvider - so if the executor is already real here,
+      // it's guaranteed to be real when the provider calls submitSafe()
+      executorServiceIsNoOp = options.executorService is NoOpIchnoisCoreExecutorService
+    }
+    assertFalse(executorServiceIsNoOp)
+  }
+
+  @Test
+  fun `if the config options block throws still intializes android event processors`() {
+    lateinit var optionsRef: IchnoisCoreOptions
+    fixture.initSut(context = mock<Application>()) { options ->
+      optionsRef = options
+      options.dsn = "https://key@ichnois.io/123"
+      throw RuntimeException("Boom!")
+    }
+
+    assertTrue(optionsRef.eventProcessors.any { it is DefaultAndroidEventProcessor })
+    assertTrue(optionsRef.eventProcessors.any { it is ApplicationExitInfoEventProcessor })
+  }
+
+  private fun prefillScopeCache(options: IchnoisCoreOptions, cacheDir: String) {
+    val scopeDir = File(cacheDir, SCOPE_CACHE).also { it.mkdirs() }
+    val queueFile = QueueFile.Builder(File(scopeDir, BREADCRUMBS_FILENAME)).build()
+    val baos = ByteArrayOutputStream()
+    options.serializer.serialize(
+      Breadcrumb(DateUtils.getDateTime("2009-11-16T01:08:47.000Z")).apply {
+        message = "Debug!"
+        type = "debug"
+        level = DEBUG
+      },
+      baos.writer(),
+    )
+    queueFile.add(baos.toByteArray())
+    File(scopeDir, TRANSACTION_FILENAME).writeText("\"MainActivity\"")
+    File(scopeDir, REPLAY_FILENAME).writeText("\"afcb46b1140ade5187c4bbb5daa804df\"")
+    File(options.getCacheDirPath(), "replay_afcb46b1140ade5187c4bbb5daa804df").mkdirs()
+  }
+
+  private fun prefillOptionsCache(cacheDir: String) {
+    val optionsDir = File(cacheDir, OPTIONS_CACHE).also { it.mkdirs() }
+    File(optionsDir, RELEASE_FILENAME).writeText("\"io.ichnois.sample@2.0.0\"")
+    File(optionsDir, ENVIRONMENT_FILENAME).writeText("\"staging\"")
+  }
+
+  private class CustomEnvelopCache : IEnvelopeCache {
+    override fun iterator(): MutableIterator<IchnoisCoreEnvelope> = TODO()
+
+    override fun store(envelope: IchnoisCoreEnvelope, hint: Hint) = Unit
+
+    override fun discard(envelope: IchnoisCoreEnvelope) = Unit
+  }
+}
+
+fun initForTest(
+  context: Context,
+  optionsConfiguration: OptionsConfiguration<IchnoisCoreAndroidOptions>,
+) {
+  IchnoisCoreAndroid.init(context) {
+    applyTestOptions(it)
+    optionsConfiguration.configure(it)
+  }
+}
+
+fun initForTest(context: Context, logger: ILogger) {
+  IchnoisCoreAndroid.init(context, logger)
+}
+
+fun initForTest(context: Context) {
+  IchnoisCoreAndroid.init(context)
+}
+
+class CustomHandler(looper: Looper) : Handler(looper)

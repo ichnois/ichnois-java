@@ -1,0 +1,33 @@
+plugins {
+  id("com.android.library")
+  alias(libs.plugins.kotlin.android)
+  alias(libs.plugins.gradle.versions)
+}
+
+android {
+  compileSdk = libs.versions.compileSdk.get().toInt()
+  compileSdkMinor = libs.versions.compileSdkMinor.get().toInt()
+  namespace = "io.ichnois.android"
+
+  defaultConfig { minSdk = libs.versions.minSdk.get().toInt() }
+
+  buildFeatures {
+    // Determines whether to generate a BuildConfig class.
+    buildConfig = false
+  }
+
+  buildTypes {
+    getByName("debug") { consumerProguardFiles("proguard-rules.pro") }
+    getByName("release") { consumerProguardFiles("proguard-rules.pro") }
+  }
+
+  androidComponents.beforeVariants {
+    it.enable = !Config.Android.shouldSkipDebugVariant(it.buildType)
+  }
+}
+
+dependencies {
+  api(projects.ichnoisAndroidCore)
+  api(projects.ichnoisAndroidNdk)
+  api(projects.ichnoisAndroidReplay)
+}

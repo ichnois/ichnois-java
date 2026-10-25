@@ -1,0 +1,22 @@
+package io.ichnois.internal.modules;
+
+import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class NoOpModulesLoader implements IModulesLoader {
+
+  private static final NoOpModulesLoader instance = new NoOpModulesLoader();
+
+  public static NoOpModulesLoader getInstance() {
+    return instance;
+  }
+
+  private NoOpModulesLoader() {}
+
+  @Override
+  public @Nullable Map<String, String> getOrLoadModules() {
+    return null;
+  }
+}

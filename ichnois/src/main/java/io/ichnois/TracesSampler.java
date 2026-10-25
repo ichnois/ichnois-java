@@ -1,0 +1,110 @@
+package io.ichnois;
+
+import io.ichnois.clientreport.DiscardReason;
+import io.ichnois.util.Objects;
+import io.ichnois.util.SampleRateUtils;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class TracesSampler {
+  private final @NotNull IchnoisCoreOptions options;
+
+  public TracesSampler(final @NotNull IchnoisCoreOptions options) {
+    this.options = Objects.requireNonNull(options, "options are required");
+  }
+
+  @SuppressWarnings("deprecation")
+  @NotNull
+  public TracesSamplingDecision sample(final @NotNull SamplingContext samplingContext) {
+    final @NotNull Double sampleRand = samplingContext.getSampleRand();
+    final TracesSamplingDecision samplingContextSamplingDecision =
+        samplingContext.getTransactionContext().getSamplingDecision();
+    if (samplingContextSamplingDecision != null) {
+      return SampleRateUtils.backfilledSampleRand(samplingContextSamplingDecision);
+    }
+
+    Double profilesSampleRate = null;
+    boolean profilesSamplerFailed = false;
+    if (options.getProfilesSampler() != null) {
+      try {
+        profilesSampleRate = options.getProfilesSampler().sample(samplingContext);
+      } catch (Throwable t) {
+        profilesSamplerFailed = true;
+        options
+            .getLogger()
+            .log(IchnoisCoreLevel.ERROR, "Error in the 'ProfilesSamplerCallback' callback.", t);
+      }
+    }
+    if (profilesSampleRate == null && !profilesSamplerFailed) {
+      profilesSampleRate = options.getProfilesSampleRate();
+    }
+    Boolean profilesSampled = profilesSampleRate != null && sample(profilesSampleRate, sampleRand);
+
+    if (options.getTracesSampler() != null) {
+      final Double samplerResult;
+      try {
+        samplerResult = options.getTracesSampler().sample(samplingContext);
+      } catch (Throwable t) {
+        options
+            .getLogger()
+            .log(IchnoisCoreLevel.ERROR, "Error in the 'TracesSamplerCallback' callback.", t);
+        options
+            .getClientReportRecorder()
+            .recordLostEvent(DiscardReason.CALLBACK_ERROR, DataCategory.Transaction);
+        options
+            .getClientReportRecorder()
+            .recordLostEvent(DiscardReason.CALLBACK_ERROR, DataCategory.Span);
+        return new TracesSamplingDecision(false, null, sampleRand, false, null);
+      }
+      if (samplerResult != null) {
+        return new TracesSamplingDecision(
+            sample(samplerResult, sampleRand),
+            samplerResult,
+            sampleRand,
+            profilesSampled,
+            profilesSampleRate);
+      }
+    }
+
+    final TracesSamplingDecision parentSamplingDecision =
+        samplingContext.getTransactionContext().getParentSamplingDecision();
+    if (parentSamplingDecision != null) {
+      if (profilesSamplerFailed) {
+        return SampleRateUtils.backfilledSampleRand(
+            new TracesSamplingDecision(
+                parentSamplingDecision.getSampled(),
+                parentSamplingDecision.getSampleRate(),
+                parentSamplingDecision.getSampleRand()));
+      }
+      return SampleRateUtils.backfilledSampleRand(parentSamplingDecision);
+    }
+
+    final @Nullable Double tracesSampleRateFromOptions = options.getTracesSampleRate();
+    final @NotNull Double downsampleFactor =
+        Math.pow(2, options.getBackpressureMonitor().getDownsampleFactor());
+    final @Nullable Double downsampledTracesSampleRate =
+        tracesSampleRateFromOptions == null ? null : tracesSampleRateFromOptions / downsampleFactor;
+
+    if (downsampledTracesSampleRate != null) {
+      return new TracesSamplingDecision(
+          sample(downsampledTracesSampleRate, sampleRand),
+          downsampledTracesSampleRate,
+          sampleRand,
+          profilesSampled,
+          profilesSampleRate);
+    }
+
+    return new TracesSamplingDecision(false, null, sampleRand, false, null);
+  }
+
+  public boolean sampleSessionProfile(final double sampleRand) {
+    final @Nullable Double sampling = options.getProfileSessionSampleRate();
+    return sampling != null && sample(sampling, sampleRand);
+  }
+
+  private boolean sample(final @NotNull Double sampleRate, final @NotNull Double sampleRand) {
+    return !(sampleRate < sampleRand);
+  }
+}

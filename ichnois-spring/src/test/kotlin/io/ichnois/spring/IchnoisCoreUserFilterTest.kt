@@ -1,0 +1,200 @@
+package io.ichnois.spring
+
+import io.ichnois.IScopes
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.protocol.User
+import javax.servlet.FilterChain
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
+import org.assertj.core.api.Assertions.assertThat
+import org.mockito.kotlin.check
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+import org.springframework.mock.web.MockHttpServletRequest
+import org.springframework.mock.web.MockHttpServletResponse
+
+class IchnoisCoreUserFilterTest {
+  class Fixture {
+    val scopes = mock<IScopes>()
+    val request = MockHttpServletRequest()
+    val response = MockHttpServletResponse()
+    val chain = mock<FilterChain>()
+
+    fun getSut(
+      isSendDefaultPii: Boolean = false,
+      userInfo: Boolean? = null,
+      userProviders: List<IchnoisCoreUserProvider>,
+    ): IchnoisCoreUserFilter {
+      val options =
+        IchnoisCoreOptions().apply {
+          this.isSendDefaultPii = isSendDefaultPii
+          userInfo?.let { dataCollection.setUserInfo(it) }
+        }
+      whenever(scopes.options).thenReturn(options)
+      return IchnoisCoreUserFilter(scopes, userProviders)
+    }
+  }
+
+  private val fixture = Fixture()
+
+  private val sampleUser =
+    User().apply {
+      username = "john.doe"
+      id = "user-id"
+      ipAddress = "192.168.0.1"
+      email = "john.doe@example.com"
+      data = mapOf("key" to "value")
+    }
+
+  @Test
+  fun `sets provided user data on the scope`() {
+    val filter = fixture.getSut(userProviders = listOf(IchnoisCoreUserProvider { sampleUser }))
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals(sampleUser, it) })
+  }
+
+  @Test
+  fun `when processor returns empty User, user data is not changed`() {
+    val filter =
+      fixture.getSut(
+        userProviders = listOf(IchnoisCoreUserProvider { sampleUser }, IchnoisCoreUserProvider { User() })
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals(sampleUser, it) })
+  }
+
+  @Test
+  fun `when processor returns null, user data is not changed`() {
+    val filter =
+      fixture.getSut(
+        userProviders = listOf(IchnoisCoreUserProvider { sampleUser }, IchnoisCoreUserProvider { null })
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals(sampleUser, it) })
+  }
+
+  @Test
+  fun `merges user#data with existing user#data set on IchnoisCoreEvent`() {
+    val filter =
+      fixture.getSut(
+        userProviders =
+          listOf(
+            IchnoisCoreUserProvider { User().apply { data = mapOf("key" to "value") } },
+            IchnoisCoreUserProvider { User().apply { data = mapOf("new-key" to "new-value") } },
+          )
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes)
+      .setUser(check { assertEquals(mapOf("key" to "value", "new-key" to "new-value"), it.data) })
+  }
+
+  @Test
+  fun `when isSendDefaultPii is true and user is set with custom ip address, user ip is unchanged`() {
+    val filter =
+      fixture.getSut(
+        isSendDefaultPii = true,
+        userProviders = listOf(IchnoisCoreUserProvider { User().apply { ipAddress = "192.168.0.1" } }),
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals("192.168.0.1", it.ipAddress) })
+  }
+
+  @Test
+  fun `when isSendDefaultPii is true and user is set with {{auto}} ip address, user ip is set to null`() {
+    val filter =
+      fixture.getSut(
+        isSendDefaultPii = true,
+        userProviders = listOf(IchnoisCoreUserProvider { User().apply { ipAddress = "{{auto}}" } }),
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertNull(it.ipAddress) })
+  }
+
+  @Test
+  fun `when user info is disabled, preserves auto ip from a custom provider`() {
+    val filter =
+      fixture.getSut(
+        isSendDefaultPii = true,
+        userInfo = false,
+        userProviders = listOf(IchnoisCoreUserProvider { User().apply { ipAddress = "{{auto}}" } }),
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals("{{auto}}", it.ipAddress) })
+  }
+
+  @Test
+  fun `when user info is enabled, removes auto ip from a custom provider`() {
+    val filter =
+      fixture.getSut(
+        isSendDefaultPii = false,
+        userInfo = true,
+        userProviders = listOf(IchnoisCoreUserProvider { User().apply { ipAddress = "{{auto}}" } }),
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertNull(it.ipAddress) })
+  }
+
+  @Test
+  fun `provider failure discards user data while later providers and request continue`() {
+    val failure = RuntimeException("provider failed")
+    val laterProvider = mock<IchnoisCoreUserProvider>()
+    whenever(laterProvider.provideUser()).thenReturn(sampleUser)
+    val filter =
+      fixture.getSut(
+        userProviders =
+          listOf(
+            IchnoisCoreUserProvider { sampleUser },
+            IchnoisCoreUserProvider { throw failure },
+            laterProvider,
+          )
+      )
+
+    filter.doFilter(fixture.request, fixture.response, fixture.chain)
+
+    verify(fixture.scopes).setUser(check { assertEquals(User(), it) })
+    verify(laterProvider).provideUser()
+    verify(fixture.chain).doFilter(fixture.request, fixture.response)
+  }
+
+  @Test
+  fun `fatal provider failure propagates`() {
+    val failure = OutOfMemoryError("fatal")
+    val filter = fixture.getSut(userProviders = listOf(IchnoisCoreUserProvider { throw failure }))
+
+    assertThat(
+        assertFailsWith<OutOfMemoryError> {
+          filter.doFilter(fixture.request, fixture.response, fixture.chain)
+        }
+      )
+      .isSameAs(failure)
+    verify(fixture.chain, never()).doFilter(fixture.request, fixture.response)
+  }
+
+  private fun assertEquals(user1: User, user2: User) {
+    assertEquals(user1.username, user2.username)
+    assertEquals(user1.id, user2.id)
+    assertEquals(user1.ipAddress, user2.ipAddress)
+    assertEquals(user1.email, user2.email)
+    assertEquals(user1.data, user2.data)
+  }
+}

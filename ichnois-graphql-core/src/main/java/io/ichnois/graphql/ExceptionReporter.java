@@ -1,0 +1,178 @@
+package io.ichnois.graphql;
+
+import graphql.ExecutionResult;
+import graphql.execution.instrumentation.parameters.InstrumentationExecutionParameters;
+import graphql.language.AstPrinter;
+import graphql.schema.DataFetchingEnvironment;
+import io.ichnois.Hint;
+import io.ichnois.IScopes;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.exception.ExceptionMechanismException;
+import io.ichnois.protocol.Mechanism;
+import io.ichnois.protocol.Request;
+import io.ichnois.protocol.Response;
+import java.util.HashMap;
+import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class ExceptionReporter {
+  private final boolean captureRequestBodyForNonSubscriptions;
+
+  public ExceptionReporter(final boolean captureRequestBodyForNonSubscriptions) {
+    this.captureRequestBodyForNonSubscriptions = captureRequestBodyForNonSubscriptions;
+  }
+
+  private static final @NotNull String MECHANISM_TYPE = "GraphqlInstrumentation";
+
+  public void captureThrowable(
+      final @NotNull Throwable throwable,
+      final @NotNull ExceptionDetails exceptionDetails,
+      final @Nullable ExecutionResult result) {
+    final @NotNull IScopes scopes = exceptionDetails.getScopes();
+    final @NotNull Mechanism mechanism = new Mechanism();
+    mechanism.setType(MECHANISM_TYPE);
+    mechanism.setHandled(false);
+    final @NotNull Throwable mechanismException =
+        new ExceptionMechanismException(mechanism, throwable, Thread.currentThread());
+    final @NotNull IchnoisCoreEvent event = new IchnoisCoreEvent(mechanismException);
+    event.setLevel(IchnoisCoreLevel.FATAL);
+
+    final @NotNull Hint hint = new Hint();
+    setRequestDetailsOnEvent(scopes, exceptionDetails, event);
+
+    if (result != null && isAllowedToAttachResponseBody(scopes)) {
+      final @NotNull Response response = new Response();
+      final @NotNull Map<String, Object> responseBody = result.toSpecification();
+      response.setData(responseBody);
+      event.getContexts().setResponse(response);
+    }
+
+    scopes.captureEvent(event, hint);
+  }
+
+  private boolean isAllowedToAttachRequestBody(final @NotNull IScopes scopes) {
+    final @NotNull IchnoisCoreOptions options = scopes.getOptions();
+    return options.getDataCollectionResolver().isGraphqlDocumentWithLegacyBodyGate()
+        || options.getDataCollectionResolver().isGraphqlVariablesWithLegacyBodyGate();
+  }
+
+  private boolean isAllowedToAttachResponseBody(final @NotNull IScopes scopes) {
+    return scopes
+        .getOptions()
+        .getDataCollectionResolver()
+        .isOutgoingResponseBodyWithLegacyBodyGate();
+  }
+
+  private void setRequestDetailsOnEvent(
+      final @NotNull IScopes scopes,
+      final @NotNull ExceptionDetails exceptionDetails,
+      final @NotNull IchnoisCoreEvent event) {
+    scopes.configureScope(
+        (scope) -> {
+          final @Nullable Request scopeRequest = scope.getRequest();
+          final @NotNull Request request = scopeRequest == null ? new Request() : scopeRequest;
+          setDetailsOnRequest(scopes, exceptionDetails, request);
+          event.setRequest(request);
+        });
+  }
+
+  private void setDetailsOnRequest(
+      final @NotNull IScopes scopes,
+      final @NotNull ExceptionDetails exceptionDetails,
+      final @NotNull Request request) {
+    request.setApiTarget("graphql");
+
+    if (isAllowedToAttachRequestBody(scopes)
+        && (exceptionDetails.isSubscription() || captureRequestBodyForNonSubscriptions)) {
+      final @NotNull Map<String, Object> data = new HashMap<>();
+      final @NotNull IchnoisCoreOptions options = scopes.getOptions();
+
+      if (options.getDataCollectionResolver().isGraphqlDocumentWithLegacyBodyGate()) {
+        data.put("query", exceptionDetails.getQuery());
+      }
+
+      if (options.getDataCollectionResolver().isGraphqlVariablesWithLegacyBodyGate()) {
+        final @Nullable Map<String, Object> variables = exceptionDetails.getVariables();
+        if (variables != null && !variables.isEmpty()) {
+          data.put("variables", variables);
+        }
+      }
+
+      // for Spring HTTP this will be replaced by RequestBodyExtractingEventProcessor
+      // for non subscription (websocket) errors
+      if (!data.isEmpty()) {
+        request.setData(data);
+      }
+    }
+  }
+
+  public static final class ExceptionDetails {
+
+    private final @NotNull IScopes scopes;
+    private final @Nullable InstrumentationExecutionParameters instrumentationExecutionParameters;
+    private final @Nullable DataFetchingEnvironment dataFetchingEnvironment;
+
+    private final boolean isSubscription;
+
+    public ExceptionDetails(
+        final @NotNull IScopes scopes,
+        final @Nullable InstrumentationExecutionParameters instrumentationExecutionParameters,
+        final boolean isSubscription) {
+      this.scopes = scopes;
+      this.instrumentationExecutionParameters = instrumentationExecutionParameters;
+      dataFetchingEnvironment = null;
+      this.isSubscription = isSubscription;
+    }
+
+    public ExceptionDetails(
+        final @NotNull IScopes scopes,
+        final @Nullable DataFetchingEnvironment dataFetchingEnvironment,
+        final boolean isSubscription) {
+      this.scopes = scopes;
+      this.dataFetchingEnvironment = dataFetchingEnvironment;
+      instrumentationExecutionParameters = null;
+      this.isSubscription = isSubscription;
+    }
+
+    public @Nullable String getQuery() {
+      if (instrumentationExecutionParameters != null) {
+        return instrumentationExecutionParameters.getQuery();
+      }
+      if (dataFetchingEnvironment != null) {
+        return AstPrinter.printAst(dataFetchingEnvironment.getDocument());
+      }
+      return null;
+    }
+
+    public @Nullable Map<String, Object> getVariables() {
+      if (instrumentationExecutionParameters != null) {
+        return instrumentationExecutionParameters.getVariables();
+      }
+      if (dataFetchingEnvironment != null) {
+        return dataFetchingEnvironment.getVariables();
+      }
+      return null;
+    }
+
+    public boolean isSubscription() {
+      return isSubscription;
+    }
+
+    /**
+     * @deprecated please use {@link ExceptionDetails#getScopes()} instead.
+     */
+    @Deprecated
+    public @NotNull IScopes getHub() {
+      return scopes;
+    }
+
+    public @NotNull IScopes getScopes() {
+      return scopes;
+    }
+  }
+}

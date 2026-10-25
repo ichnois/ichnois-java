@@ -1,0 +1,70 @@
+public final class io/ichnois/graphql/BuildConfig {
+	public static final field ICHNOIS_GRAPHQL_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/graphql/ExceptionReporter {
+	public fun <init> (Z)V
+	public fun captureThrowable (Ljava/lang/Throwable;Lio/ichnois/graphql/ExceptionReporter$ExceptionDetails;Lgraphql/ExecutionResult;)V
+}
+
+public final class io/ichnois/graphql/ExceptionReporter$ExceptionDetails {
+	public fun <init> (Lio/ichnois/IScopes;Lgraphql/execution/instrumentation/parameters/InstrumentationExecutionParameters;Z)V
+	public fun <init> (Lio/ichnois/IScopes;Lgraphql/schema/DataFetchingEnvironment;Z)V
+	public fun getHub ()Lio/ichnois/IScopes;
+	public fun getQuery ()Ljava/lang/String;
+	public fun getScopes ()Lio/ichnois/IScopes;
+	public fun getVariables ()Ljava/util/Map;
+	public fun isSubscription ()Z
+}
+
+public final class io/ichnois/graphql/GraphqlStringUtils {
+	public fun <init> ()V
+	public static fun fieldToString (Lgraphql/execution/MergedField;)Ljava/lang/String;
+	public static fun objectTypeToString (Lgraphql/schema/GraphQLObjectType;)Ljava/lang/String;
+	public static fun typeToString (Lgraphql/schema/GraphQLOutputType;)Ljava/lang/String;
+}
+
+public final class io/ichnois/graphql/NoOpSubscriptionHandler : io/ichnois/graphql/IchnoisCoreSubscriptionHandler {
+	public static fun getInstance ()Lio/ichnois/graphql/NoOpSubscriptionHandler;
+	public fun onSubscriptionResult (Ljava/lang/Object;Lio/ichnois/IScopes;Lio/ichnois/graphql/ExceptionReporter;Lgraphql/execution/instrumentation/parameters/InstrumentationFieldFetchParameters;)Ljava/lang/Object;
+}
+
+public final class io/ichnois/graphql/IchnoisCoreGenericDataFetcherExceptionHandler : graphql/execution/DataFetcherExceptionHandler {
+	public fun <init> (Lgraphql/execution/DataFetcherExceptionHandler;)V
+	public fun <init> (Lio/ichnois/IScopes;Lgraphql/execution/DataFetcherExceptionHandler;)V
+	public fun handleException (Lgraphql/execution/DataFetcherExceptionHandlerParameters;)Ljava/util/concurrent/CompletableFuture;
+	public fun onException (Lgraphql/execution/DataFetcherExceptionHandlerParameters;)Lgraphql/execution/DataFetcherExceptionHandlerResult;
+}
+
+public final class io/ichnois/graphql/IchnoisCoreGraphqlExceptionHandler {
+	public fun <init> (Lgraphql/execution/DataFetcherExceptionHandler;)V
+	public fun handleException (Ljava/lang/Throwable;Lgraphql/schema/DataFetchingEnvironment;Lgraphql/execution/DataFetcherExceptionHandlerParameters;)Ljava/util/concurrent/CompletableFuture;
+}
+
+public final class io/ichnois/graphql/IchnoisCoreGraphqlInstrumentation {
+	public static final field ICHNOIS_EXCEPTIONS_CONTEXT_KEY Ljava/lang/String;
+	public static final field ICHNOIS_SCOPES_CONTEXT_KEY Ljava/lang/String;
+	public fun <init> (Lio/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$BeforeSpanCallback;Lio/ichnois/graphql/IchnoisCoreSubscriptionHandler;Lio/ichnois/graphql/ExceptionReporter;Ljava/util/List;Ljava/lang/String;)V
+	public fun <init> (Lio/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$BeforeSpanCallback;Lio/ichnois/graphql/IchnoisCoreSubscriptionHandler;ZLjava/util/List;Ljava/lang/String;)V
+	public fun beginExecuteOperation (Lgraphql/execution/instrumentation/parameters/InstrumentationExecuteOperationParameters;)V
+	public fun beginExecution (Lgraphql/execution/instrumentation/parameters/InstrumentationExecutionParameters;Lio/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$TracingState;)V
+	public fun createState ()Lgraphql/execution/instrumentation/InstrumentationState;
+	public fun instrumentDataFetcher (Lgraphql/schema/DataFetcher;Lgraphql/execution/instrumentation/parameters/InstrumentationFieldFetchParameters;Lio/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$TracingState;)Lgraphql/schema/DataFetcher;
+	public fun instrumentExecutionResultComplete (Lgraphql/execution/instrumentation/parameters/InstrumentationExecutionParameters;Lgraphql/ExecutionResult;Ljava/lang/Throwable;)V
+}
+
+public abstract interface class io/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$BeforeSpanCallback {
+	public abstract fun execute (Lio/ichnois/ISpan;Lgraphql/schema/DataFetchingEnvironment;Ljava/lang/Object;)Lio/ichnois/ISpan;
+}
+
+public final class io/ichnois/graphql/IchnoisCoreGraphqlInstrumentation$TracingState : graphql/execution/instrumentation/InstrumentationState {
+	public fun <init> ()V
+	public fun getTransaction ()Lio/ichnois/ISpan;
+	public fun setTransaction (Lio/ichnois/ISpan;)V
+}
+
+public abstract interface class io/ichnois/graphql/IchnoisCoreSubscriptionHandler {
+	public abstract fun onSubscriptionResult (Ljava/lang/Object;Lio/ichnois/IScopes;Lio/ichnois/graphql/ExceptionReporter;Lgraphql/execution/instrumentation/parameters/InstrumentationFieldFetchParameters;)Ljava/lang/Object;
+}
+

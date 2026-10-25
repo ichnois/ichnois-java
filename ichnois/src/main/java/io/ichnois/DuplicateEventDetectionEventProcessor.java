@@ -1,0 +1,74 @@
+package io.ichnois;
+
+import io.ichnois.internal.eventprocessor.IchnoisCoreEventProcessor;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/** Deduplicates events containing throwable that has been already processed. */
+public final class DuplicateEventDetectionEventProcessor implements IchnoisCoreEventProcessor {
+  private final @NotNull Map<Throwable, Object> capturedObjects =
+      Collections.synchronizedMap(new WeakHashMap<>());
+  private final @NotNull IchnoisCoreOptions options;
+
+  public DuplicateEventDetectionEventProcessor(final @NotNull IchnoisCoreOptions options) {
+    this.options = options;
+  }
+
+  @Override
+  public @Nullable IchnoisCoreEvent process(final @NotNull IchnoisCoreEvent event, final @NotNull Hint hint) {
+    if (options.isEnableDeduplication()) {
+      final Throwable throwable = event.getThrowable();
+      if (throwable != null) {
+        if (capturedObjects.containsKey(throwable)
+            || containsAnyKey(capturedObjects, allCauses(throwable))) {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.DEBUG,
+                  "Duplicate Exception detected. Event %s will be discarded.",
+                  event.getEventId());
+          return null;
+        } else {
+          capturedObjects.put(throwable, null);
+        }
+      }
+    } else {
+      options.getLogger().log(IchnoisCoreLevel.DEBUG, "Event deduplication is disabled.");
+    }
+    return event;
+  }
+
+  private static <T> boolean containsAnyKey(
+      final @NotNull Map<T, Object> map, final @NotNull List<T> list) {
+    for (T entry : list) {
+      if (map.containsKey(entry)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static @NotNull List<Throwable> allCauses(final @NotNull Throwable throwable) {
+    final List<Throwable> causes = new ArrayList<>();
+    final Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+    visited.add(throwable);
+    Throwable cause = throwable.getCause();
+    while (cause != null && visited.add(cause)) {
+      causes.add(cause);
+      cause = cause.getCause();
+    }
+    return causes;
+  }
+
+  @Override
+  public @Nullable Long getOrder() {
+    return 1000L;
+  }
+}

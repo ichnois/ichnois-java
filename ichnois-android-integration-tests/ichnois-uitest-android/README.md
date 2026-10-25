@@ -1,0 +1,29 @@
+Ui tests for Android
+===========
+Here will be put all ui tests for Android, running through Google's Espresso.
+By default the envelopes sent to relay are caught by a mock server which allows us to check the envelopes sent.
+
+# How to use
+
+Simply run `./gradlew connectedCheck` to run all ui tests of all modules (requires a connected device, either physical or an emulator).
+
+# SauceLabs
+To run on saucelabs execute following commands (need also `SAUCE_USERNAME` and `SAUCE_ACCESS_KEY` environment variables):
+For End 2 End:
+```
+./gradlew :ichnois-android-integration-tests:ichnois-uitest-android:assembleRelease :ichnois-android-integration-tests:ichnois-uitest-android:assembleAndroidTest
+saucectl run -c .sauce/ichnois-uitest-android-end2end.yml
+```
+
+# Troubleshooting
+
+There is an issue with Android 11+ (Xiaomi only?).
+In order to start an activity from the background (which the test orchestrator does internally), the app needs a special permission, which cannot be granted without user interaction.
+To allow it on the device go in Settings -> apps -> manage apps -> Select the app, like `IchnoisCore End2End Tests` -> Other permissions -> `Display pop-up windows while running in the background`.
+The path may be different on other devices.
+On older versions of Android there is no problem.
+
+For this reason we cannot use the `testInstrumentationRunnerArguments["clearPackageData"] = "true"` in the build.gradle file, as clearing package data resets permissions.
+This flag is used to run each test in its own instance of Instrumentation. This way they are isolated from one another and get their own Application instance.
+More on https://developer.android.com/training/testing/instrumented-tests/androidx-test-libraries/runner#enable-gradle 
+

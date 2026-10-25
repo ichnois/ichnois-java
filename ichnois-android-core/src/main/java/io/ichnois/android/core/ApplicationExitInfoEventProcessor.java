@@ -1,0 +1,1108 @@
+package io.ichnois.android.core;
+
+import static io.ichnois.cache.PersistingOptionsObserver.DIST_FILENAME;
+import static io.ichnois.cache.PersistingOptionsObserver.ENVIRONMENT_FILENAME;
+import static io.ichnois.cache.PersistingOptionsObserver.PROGUARD_UUID_FILENAME;
+import static io.ichnois.cache.PersistingOptionsObserver.RELEASE_FILENAME;
+import static io.ichnois.cache.PersistingOptionsObserver.REPLAY_ERROR_SAMPLE_RATE_FILENAME;
+import static io.ichnois.cache.PersistingOptionsObserver.SDK_VERSION_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.BREADCRUMBS_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.CONTEXTS_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.EXTRAS_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.FINGERPRINT_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.LEVEL_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.REPLAY_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.REQUEST_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.TRACE_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.TRANSACTION_FILENAME;
+import static io.ichnois.cache.PersistingScopeObserver.USER_FILENAME;
+import static io.ichnois.protocol.Contexts.REPLAY_ID;
+
+import android.annotation.SuppressLint;
+import android.app.ActivityManager;
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.os.Build;
+import android.util.DisplayMetrics;
+import androidx.annotation.WorkerThread;
+import io.ichnois.BackfillingEventProcessor;
+import io.ichnois.Breadcrumb;
+import io.ichnois.Hint;
+import io.ichnois.IpAddressUtils;
+import io.ichnois.ProfileChunk;
+import io.ichnois.ProfileContext;
+import io.ichnois.IchnoisCore;
+import io.ichnois.IchnoisCoreBaseEvent;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreExceptionFactory;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.IchnoisCoreStackTraceFactory;
+import io.ichnois.SpanContext;
+import io.ichnois.android.core.anr.AggregatedStackTrace;
+import io.ichnois.android.core.anr.AnrCulpritIdentifier;
+import io.ichnois.android.core.anr.AnrProfile;
+import io.ichnois.android.core.anr.AnrProfileManager;
+import io.ichnois.android.core.anr.AnrProfileRotationHelper;
+import io.ichnois.android.core.anr.StackTraceConverter;
+import io.ichnois.android.core.internal.util.CpuInfoUtils;
+import io.ichnois.cache.PersistingOptionsObserver;
+import io.ichnois.cache.PersistingScopeObserver;
+import io.ichnois.exception.ExceptionMechanismException;
+import io.ichnois.hints.AbnormalExit;
+import io.ichnois.hints.Backfillable;
+import io.ichnois.hints.NativeCrashExit;
+import io.ichnois.internal.eventprocessor.IchnoisCoreEventProcessor;
+import io.ichnois.protocol.App;
+import io.ichnois.protocol.Contexts;
+import io.ichnois.protocol.DebugImage;
+import io.ichnois.protocol.DebugMeta;
+import io.ichnois.protocol.Device;
+import io.ichnois.protocol.Mechanism;
+import io.ichnois.protocol.OperatingSystem;
+import io.ichnois.protocol.Request;
+import io.ichnois.protocol.SdkVersion;
+import io.ichnois.protocol.IchnoisCoreException;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.IchnoisCoreStackFrame;
+import io.ichnois.protocol.IchnoisCoreStackTrace;
+import io.ichnois.protocol.IchnoisCoreThread;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.protocol.User;
+import io.ichnois.protocol.profiling.IchnoisCoreProfile;
+import io.ichnois.util.HintUtils;
+import io.ichnois.util.IchnoisCoreRandom;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/**
+ * Processes cached ApplicationExitInfo events (ANRs, tombstones) on a background thread, so we can
+ * safely read data from disk synchronously.
+ */
+@ApiStatus.Internal
+@WorkerThread
+public final class ApplicationExitInfoEventProcessor
+    implements BackfillingEventProcessor, IchnoisCoreEventProcessor {
+
+  private final @NotNull Context context;
+
+  private final @NotNull IchnoisCoreAndroidOptions options;
+
+  private final @NotNull BuildInfoProvider buildInfoProvider;
+
+  private final @NotNull IchnoisCoreExceptionFactory ichnoisExceptionFactory;
+
+  private final @Nullable PersistingScopeObserver persistingScopeObserver;
+
+  // Only ANRv2 events are currently enriched with hint-specific content.
+  // This can be extended to other hints like NativeCrashExit.
+  private final @NotNull List<HintEnricher> hintEnrichers =
+      Collections.singletonList(new AnrHintEnricher());
+
+  public ApplicationExitInfoEventProcessor(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    this.context = ContextUtils.getApplicationContext(context);
+    this.options = options;
+    this.buildInfoProvider = buildInfoProvider;
+    this.persistingScopeObserver = options.findPersistingScopeObserver();
+
+    final IchnoisCoreStackTraceFactory ichnoisStackTraceFactory =
+        new IchnoisCoreStackTraceFactory(this.options);
+
+    ichnoisExceptionFactory = new IchnoisCoreExceptionFactory(ichnoisStackTraceFactory);
+  }
+
+  private @Nullable HintEnricher findEnricher(final @NotNull Object hint) {
+    for (HintEnricher enricher : hintEnrichers) {
+      if (enricher.supports(hint)) {
+        return enricher;
+      }
+    }
+    return null;
+  }
+
+  @Override
+  public @NotNull IchnoisCoreTransaction process(
+      @NotNull IchnoisCoreTransaction transaction, @NotNull Hint hint) {
+    // that's only necessary because on newer versions of Unity, if not overriding this method, it's
+    // throwing 'java.lang.AbstractMethodError: abstract method' and the reason is probably
+    // compilation mismatch
+    return transaction;
+  }
+
+  @Override
+  public @Nullable IchnoisCoreEvent process(@NotNull IchnoisCoreEvent event, @NotNull Hint hint) {
+    final Object unwrappedHint = HintUtils.getIchnoisCoreSdkHint(hint);
+    if (!(unwrappedHint instanceof Backfillable)) {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.WARNING,
+              "The event is not Backfillable, but has been passed to BackfillingEventProcessor, skipping.");
+      return event;
+    }
+    final @NotNull Backfillable backfillable = (Backfillable) unwrappedHint;
+    final @Nullable HintEnricher hintEnricher = findEnricher(unwrappedHint);
+
+    if (hintEnricher != null) {
+      hintEnricher.applyPreEnrichment(event, backfillable, unwrappedHint);
+    }
+
+    // We always set  os and device even if the ApplicationExitInfo event is not enrich-able.
+    // The OS context may change in the meantime (OS update); we consider this an edge-case.
+    mergeOS(event);
+    setDevice(event);
+
+    final OptionsSource optionsSource = getOptionsSource(backfillable);
+
+    if (!backfillable.shouldEnrich()) {
+      setRelease(event, optionsSource);
+      setEnvironment(event, optionsSource);
+      setDist(event, optionsSource);
+      setAppVersionAndBuild(event);
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "The event is Backfillable, but should not be enriched, skipping.");
+      return event;
+    }
+
+    backfillScope(event, optionsSource);
+
+    backfillOptions(event, optionsSource);
+
+    setStaticValues(event);
+
+    if (hintEnricher != null) {
+      hintEnricher.applyPostEnrichment(event, backfillable, unwrappedHint, optionsSource);
+    }
+
+    return event;
+  }
+
+  // region scope persisted values
+  private void backfillScope(
+      final @NotNull IchnoisCoreEvent event, final @NotNull OptionsSource optionsSource) {
+    setRequest(event);
+    setUser(event);
+    setScopeTags(event);
+    setBreadcrumbs(event);
+    setExtras(event);
+    setContexts(event);
+    setTransaction(event);
+    setFingerprints(event);
+    setLevel(event);
+    setTrace(event);
+    setReplayId(event, optionsSource);
+  }
+
+  private boolean sampleReplay(
+      final @NotNull IchnoisCoreEvent event, final @NotNull OptionsSource optionsSource) {
+    final @Nullable Double currentSampleRate = options.getSessionReplay().getOnErrorSampleRate();
+    final @Nullable String replayErrorSampleRate =
+        getLaunchOption(
+            REPLAY_ERROR_SAMPLE_RATE_FILENAME,
+            String.class,
+            currentSampleRate == null ? null : currentSampleRate.toString(),
+            optionsSource);
+
+    if (replayErrorSampleRate == null) {
+      return false;
+    }
+
+    try {
+      // Sample with the rate from the relevant launch because it may change between launches.
+      final double replayErrorSampleRateDouble = Double.parseDouble(replayErrorSampleRate);
+      if (replayErrorSampleRateDouble < IchnoisCoreRandom.current().nextDouble()) {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.DEBUG,
+                "Not capturing replay for ANR %s due to not being sampled.",
+                event.getEventId());
+        return false;
+      }
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Error parsing replay sample rate.", e);
+      return false;
+    }
+
+    return true;
+  }
+
+  private void setReplayId(
+      final @NotNull IchnoisCoreEvent event, final @NotNull OptionsSource optionsSource) {
+    @Nullable String persistedReplayId = readFromDisk(options, REPLAY_FILENAME, String.class);
+    @Nullable String cacheDirPath = options.getCacheDirPath();
+    if (cacheDirPath == null) {
+      return;
+    }
+    final @NotNull File replayFolder = new File(cacheDirPath, "replay_" + persistedReplayId);
+    if (!replayFolder.exists()) {
+      if (!sampleReplay(event, optionsSource)) {
+        return;
+      }
+      // if the replay folder does not exist (e.g. running in buffer mode), we need to find the
+      // latest replay folder that was modified before the ANR event.
+      persistedReplayId = null;
+      long lastModified = Long.MIN_VALUE;
+      final File[] dirs = new File(cacheDirPath).listFiles();
+      if (dirs != null) {
+        for (File dir : dirs) {
+          if (dir.isDirectory() && dir.getName().startsWith("replay_")) {
+            if (dir.lastModified() > lastModified
+                && dir.lastModified() <= event.getTimestamp().getTime()) {
+              lastModified = dir.lastModified();
+              persistedReplayId = dir.getName().substring("replay_".length());
+            }
+          }
+        }
+      }
+    }
+
+    if (persistedReplayId == null) {
+      return;
+    }
+
+    // store the relevant replayId so ReplayIntegration can pick it up and finalize that replay
+    PersistingScopeObserver.store(options, persistedReplayId, REPLAY_FILENAME);
+    event.getContexts().put(REPLAY_ID, persistedReplayId);
+  }
+
+  private void setTrace(final @NotNull IchnoisCoreEvent event) {
+    final SpanContext spanContext = readFromDisk(options, TRACE_FILENAME, SpanContext.class);
+    if (event.getContexts().getTrace() == null) {
+      if (spanContext != null) {
+        event.getContexts().setTrace(spanContext);
+      }
+    }
+  }
+
+  private void setLevel(final @NotNull IchnoisCoreEvent event) {
+    final IchnoisCoreLevel level = readFromDisk(options, LEVEL_FILENAME, IchnoisCoreLevel.class);
+    if (event.getLevel() == null) {
+      event.setLevel(level);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void setFingerprints(final @NotNull IchnoisCoreEvent event) {
+    final List<String> fingerprint =
+        (List<String>) readFromDisk(options, FINGERPRINT_FILENAME, List.class);
+    if (event.getFingerprints() == null) {
+      event.setFingerprints(fingerprint);
+    }
+  }
+
+  private void setTransaction(final @NotNull IchnoisCoreEvent event) {
+    final String transaction = readFromDisk(options, TRANSACTION_FILENAME, String.class);
+    if (event.getTransaction() == null) {
+      event.setTransaction(transaction);
+    }
+  }
+
+  private void setContexts(final @NotNull IchnoisCoreBaseEvent event) {
+    final Contexts persistedContexts = readFromDisk(options, CONTEXTS_FILENAME, Contexts.class);
+    if (persistedContexts == null) {
+      return;
+    }
+    final Contexts eventContexts = event.getContexts();
+    for (Map.Entry<String, Object> entry : new Contexts(persistedContexts).entrySet()) {
+      final Object value = entry.getValue();
+      if (SpanContext.TYPE.equals(entry.getKey()) && value instanceof SpanContext) {
+        // we fill it in setTrace later on
+        continue;
+      }
+      if (!eventContexts.containsKey(entry.getKey())) {
+        eventContexts.put(entry.getKey(), value);
+      }
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void setExtras(final @NotNull IchnoisCoreBaseEvent event) {
+    final Map<String, Object> extras =
+        (Map<String, Object>) readFromDisk(options, EXTRAS_FILENAME, Map.class);
+    if (extras == null) {
+      return;
+    }
+    if (event.getExtras() == null) {
+      event.setExtras(new HashMap<>(extras));
+    } else {
+      for (Map.Entry<String, Object> item : extras.entrySet()) {
+        if (!event.getExtras().containsKey(item.getKey())) {
+          event.getExtras().put(item.getKey(), item.getValue());
+        }
+      }
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void setBreadcrumbs(final @NotNull IchnoisCoreBaseEvent event) {
+    final List<Breadcrumb> eventBreadcrumbs = event.getBreadcrumbs();
+    if (eventBreadcrumbs != null && !eventBreadcrumbs.isEmpty()) {
+      // the event already carries its own breadcrumbs (e.g. a tombstone-merged native
+      // crash event), so appending the persisted ones here would duplicate entries. Skip the
+      // disk read altogether since the result would be discarded anyway.
+      return;
+    }
+    final List<Breadcrumb> breadcrumbs =
+        (List<Breadcrumb>) readFromDisk(options, BREADCRUMBS_FILENAME, List.class);
+    if (breadcrumbs == null) {
+      return;
+    }
+    event.setBreadcrumbs(breadcrumbs);
+  }
+
+  @SuppressWarnings("unchecked")
+  private void setScopeTags(final @NotNull IchnoisCoreBaseEvent event) {
+    final Map<String, String> tags =
+        (Map<String, String>)
+            readFromDisk(options, PersistingScopeObserver.TAGS_FILENAME, Map.class);
+    if (tags == null) {
+      return;
+    }
+    if (event.getTags() == null) {
+      event.setTags(new HashMap<>(tags));
+    } else {
+      for (Map.Entry<String, String> item : tags.entrySet()) {
+        if (!event.getTags().containsKey(item.getKey())) {
+          event.setTag(item.getKey(), item.getValue());
+        }
+      }
+    }
+  }
+
+  private void setUser(final @NotNull IchnoisCoreBaseEvent event) {
+    if (event.getUser() == null) {
+      final User user = readFromDisk(options, USER_FILENAME, User.class);
+      event.setUser(user);
+    }
+  }
+
+  private void setRequest(final @NotNull IchnoisCoreBaseEvent event) {
+    if (event.getRequest() == null) {
+      final Request request = readFromDisk(options, REQUEST_FILENAME, Request.class);
+      event.setRequest(request);
+    }
+  }
+
+  private <T> @Nullable T readFromDisk(
+      final @NotNull IchnoisCoreOptions options,
+      final @NotNull String fileName,
+      final @NotNull Class<T> clazz) {
+    if (persistingScopeObserver == null) {
+      return null;
+    }
+
+    return persistingScopeObserver.read(options, fileName, clazz);
+  }
+
+  // endregion
+
+  // region options persisted values
+  private void backfillOptions(
+      final @NotNull IchnoisCoreEvent event, final @NotNull OptionsSource optionsSource) {
+    setRelease(event, optionsSource);
+    setEnvironment(event, optionsSource);
+    setDist(event, optionsSource);
+    setDebugMeta(event, optionsSource);
+    setSdk(event, optionsSource);
+    setApp(event);
+    setOptionsTags(event, optionsSource);
+  }
+
+  private void setApp(final @NotNull IchnoisCoreBaseEvent event) {
+    App app = event.getContexts().getApp();
+    if (app == null) {
+      app = new App();
+    }
+    app.setAppName(ContextUtils.getApplicationName(context));
+
+    final PackageInfo packageInfo = ContextUtils.getPackageInfo(context, buildInfoProvider);
+    if (packageInfo != null) {
+      app.setAppIdentifier(packageInfo.packageName);
+    }
+
+    try {
+      final ContextUtils.SplitApksInfo splitApksInfo =
+          DeviceInfoUtil.getInstance(context, options).getSplitApksInfo();
+      if (splitApksInfo != null) {
+        app.setSplitApks(splitApksInfo.isSplitApks());
+        if (splitApksInfo.getSplitNames() != null) {
+          app.setSplitNames(Arrays.asList(splitApksInfo.getSplitNames()));
+        }
+      }
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Error getting split apks info.", e);
+    }
+
+    event.getContexts().setApp(app);
+    setAppVersionAndBuild(event);
+  }
+
+  private void setAppVersionAndBuild(final @NotNull IchnoisCoreBaseEvent event) {
+    final String release = event.getRelease();
+    if (release != null) {
+      try {
+        @Nullable App app = event.getContexts().getApp();
+        if (app == null) {
+          app = new App();
+        }
+        final String versionName =
+            release.substring(release.indexOf('@') + 1, release.indexOf('+'));
+        final String versionCode = release.substring(release.indexOf('+') + 1);
+        app.setAppVersion(versionName);
+        app.setAppBuild(versionCode);
+        event.getContexts().setApp(app);
+      } catch (Throwable e) {
+        options
+            .getLogger()
+            .log(IchnoisCoreLevel.WARNING, "Failed to parse release from scope cache: %s", release);
+      }
+    }
+  }
+
+  private void setRelease(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    if (event.getRelease() == null) {
+      event.setRelease(
+          getLaunchOption(RELEASE_FILENAME, String.class, options.getRelease(), optionsSource));
+    }
+  }
+
+  private void setEnvironment(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    if (event.getEnvironment() == null) {
+      event.setEnvironment(
+          getLaunchOption(
+              ENVIRONMENT_FILENAME, String.class, options.getEnvironment(), optionsSource));
+    }
+  }
+
+  private void setDebugMeta(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    DebugMeta debugMeta = event.getDebugMeta();
+
+    if (debugMeta == null) {
+      debugMeta = new DebugMeta();
+    }
+    if (debugMeta.getImages() == null) {
+      debugMeta.setImages(new ArrayList<>());
+    }
+    List<DebugImage> images = debugMeta.getImages();
+    if (images != null) {
+      final String proguardUuid =
+          getBuildOption(
+              PROGUARD_UUID_FILENAME, String.class, options.getProguardUuid(), optionsSource);
+
+      if (proguardUuid != null) {
+        images.add(createProguardDebugImage(proguardUuid));
+      }
+      event.setDebugMeta(debugMeta);
+    }
+  }
+
+  private void setDist(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    if (event.getDist() == null) {
+      event.setDist(getLaunchOption(DIST_FILENAME, String.class, options.getDist(), optionsSource));
+    }
+    // if there's no user-set dist, fall back to versionCode from the release string
+    if (event.getDist() == null) {
+      final String release = event.getRelease();
+      if (release != null) {
+        try {
+          final String versionCode = release.substring(release.indexOf('+') + 1);
+          event.setDist(versionCode);
+        } catch (Throwable e) {
+          options
+              .getLogger()
+              .log(IchnoisCoreLevel.WARNING, "Failed to parse release from scope cache: %s", release);
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolves an option that may change between launches of the same build, such as environment or
+   * tags. A matching persisted value is preferred; the current value is used only when the source
+   * identifies the current app generation or permits a fallback for a missing persisted value.
+   */
+  private <T> @Nullable T getLaunchOption(
+      final @NotNull String fileName,
+      final @NotNull Class<T> clazz,
+      final @Nullable T currentValue,
+      final @NotNull OptionsSource optionsSource) {
+    if (optionsSource == OptionsSource.CURRENT) {
+      return currentValue;
+    } else if (optionsSource == OptionsSource.NONE) {
+      return null;
+    }
+
+    final T persistedValue = PersistingOptionsObserver.read(options, fileName, clazz);
+    return persistedValue != null || optionsSource == OptionsSource.PERSISTED
+        ? persistedValue
+        : currentValue;
+  }
+
+  /**
+   * Resolves metadata that cannot change between launches of the same build, such as the ProGuard
+   * UUID or SDK version. Current metadata is used for exits from the current app generation, while
+   * persisted metadata is reserved for historical exits.
+   */
+  private <T> @Nullable T getBuildOption(
+      final @NotNull String fileName,
+      final @NotNull Class<T> clazz,
+      final @Nullable T currentValue,
+      final @NotNull OptionsSource optionsSource) {
+    if (optionsSource == OptionsSource.CURRENT
+        || optionsSource == OptionsSource.PERSISTED_WITH_CURRENT_FALLBACK) {
+      return currentValue;
+    } else if (optionsSource == OptionsSource.NONE) {
+      return null;
+    }
+    return PersistingOptionsObserver.read(options, fileName, clazz);
+  }
+
+  /**
+   * Chooses the options snapshot that can safely describe an exit by comparing its timestamp with
+   * the current app update time and the persisted cache generation. A markerless legacy cache is
+   * accepted for compatibility; {@link OptionsSource#NONE} is returned when neither current nor
+   * persisted options can be matched to the exit.
+   */
+  private @NotNull OptionsSource getOptionsSource(final @NotNull Backfillable hint) {
+    final @Nullable Long timestamp;
+    if (hint instanceof AbnormalExit) {
+      timestamp = ((AbnormalExit) hint).timestamp();
+    } else if (hint instanceof NativeCrashExit) {
+      timestamp = ((NativeCrashExit) hint).timestamp();
+    } else {
+      timestamp = null;
+    }
+    final Long cachedLastUpdateTime = PersistingOptionsCacheGenerationObserver.read(options);
+    final PackageInfo packageInfo = ContextUtils.getPackageInfo(context, buildInfoProvider);
+    final long currentLastUpdateTime = packageInfo == null ? 0 : packageInfo.lastUpdateTime;
+
+    if (timestamp != null && currentLastUpdateTime > 0 && currentLastUpdateTime <= timestamp) {
+      return cachedLastUpdateTime != null && cachedLastUpdateTime == currentLastUpdateTime
+          ? OptionsSource.PERSISTED_WITH_CURRENT_FALLBACK
+          : OptionsSource.CURRENT;
+    }
+    if (cachedLastUpdateTime == null) {
+      return OptionsSource.PERSISTED;
+    }
+    // A cache generation created after the exit cannot describe that exit.
+    if (timestamp != null && cachedLastUpdateTime > 0 && cachedLastUpdateTime <= timestamp) {
+      return OptionsSource.PERSISTED;
+    }
+    return OptionsSource.NONE;
+  }
+
+  private void setSdk(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    if (event.getSdk() == null) {
+      final SdkVersion sdkVersion =
+          getBuildOption(
+              SDK_VERSION_FILENAME, SdkVersion.class, options.getSdkVersion(), optionsSource);
+      event.setSdk(sdkVersion);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void setOptionsTags(
+      final @NotNull IchnoisCoreBaseEvent event, final @NotNull OptionsSource optionsSource) {
+    final Map<String, String> tags =
+        (Map<String, String>)
+            getLaunchOption(
+                PersistingOptionsObserver.TAGS_FILENAME,
+                Map.class,
+                options.getTags(),
+                optionsSource);
+    if (tags == null) {
+      return;
+    }
+    if (event.getTags() == null) {
+      event.setTags(new HashMap<>(tags));
+    } else {
+      for (Map.Entry<String, String> item : tags.entrySet()) {
+        if (!event.getTags().containsKey(item.getKey())) {
+          event.setTag(item.getKey(), item.getValue());
+        }
+      }
+    }
+  }
+
+  // endregion
+
+  private enum OptionsSource {
+    CURRENT,
+    PERSISTED,
+    PERSISTED_WITH_CURRENT_FALLBACK,
+    NONE
+  }
+
+  @Override
+  public @Nullable Long getOrder() {
+    return 12000L;
+  }
+
+  // region static values
+  private void setStaticValues(final @NotNull IchnoisCoreEvent event) {
+    mergeUser(event);
+    setSideLoadedInfo(event);
+  }
+
+  private void setDefaultPlatform(final @NotNull IchnoisCoreBaseEvent event) {
+    if (event.getPlatform() == null) {
+      // this actually means JVM related.
+      event.setPlatform(IchnoisCoreBaseEvent.DEFAULT_PLATFORM);
+    }
+  }
+
+  private void mergeUser(final @NotNull IchnoisCoreBaseEvent event) {
+    @Nullable User user = event.getUser();
+    if (user == null) {
+      user = new User();
+      event.setUser(user);
+    }
+
+    // userId should be set even if event is Cached as the userId is static and won't change anyway.
+    if (user.getId() == null) {
+      user.setId(getDeviceId());
+    }
+    if (user.getIpAddress() == null && options.getDataCollectionResolver().isUserInfo()) {
+      user.setIpAddress(IpAddressUtils.DEFAULT_IP_ADDRESS);
+    }
+  }
+
+  private @Nullable String getDeviceId() {
+    try {
+      return Installation.id(context);
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Error getting installationId.", e);
+    }
+    return null;
+  }
+
+  private void setSideLoadedInfo(final @NotNull IchnoisCoreBaseEvent event) {
+    try {
+      final ContextUtils.SideLoadedInfo sideLoadedInfo =
+          DeviceInfoUtil.getInstance(context, options).getSideLoadedInfo();
+      if (sideLoadedInfo != null) {
+        final @NotNull Map<String, String> tags = sideLoadedInfo.asTags();
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
+          event.setTag(entry.getKey(), entry.getValue());
+        }
+      }
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Error getting side loaded info.", e);
+    }
+  }
+
+  private void setDevice(final @NotNull IchnoisCoreBaseEvent event) {
+    if (event.getContexts().getDevice() == null) {
+      event.getContexts().setDevice(getDevice());
+    }
+  }
+
+  // only use static data that does not change between app launches (e.g. timezone, boottime,
+  // battery level will change)
+  @SuppressLint("NewApi")
+  private @NotNull Device getDevice() {
+    Device device = new Device();
+    device.setManufacturer(Build.MANUFACTURER);
+    device.setBrand(Build.BRAND);
+    device.setFamily(ContextUtils.getFamily(options.getLogger()));
+    device.setModel(Build.MODEL);
+    device.setModelId(Build.ID);
+    device.setArchs(ContextUtils.getArchitectures());
+
+    final ActivityManager.MemoryInfo memInfo =
+        ContextUtils.getMemInfo(context, options.getLogger());
+    if (memInfo != null) {
+      // in bytes
+      device.setMemorySize(getMemorySize(memInfo));
+    }
+
+    device.setSimulator(buildInfoProvider.isEmulator());
+
+    DisplayMetrics displayMetrics = ContextUtils.getDisplayMetrics(context, options.getLogger());
+    if (displayMetrics != null) {
+      device.setScreenWidthPixels(displayMetrics.widthPixels);
+      device.setScreenHeightPixels(displayMetrics.heightPixels);
+      device.setScreenDensity(displayMetrics.density);
+      device.setScreenDpi(displayMetrics.densityDpi);
+    }
+
+    if (device.getId() == null) {
+      device.setId(getDeviceId());
+    }
+
+    final @NotNull List<Integer> cpuFrequencies = CpuInfoUtils.getInstance().readMaxFrequencies();
+    if (!cpuFrequencies.isEmpty()) {
+      device.setProcessorFrequency(Collections.max(cpuFrequencies).doubleValue());
+      device.setProcessorCount(cpuFrequencies.size());
+    }
+
+    return device;
+  }
+
+  private @NotNull Long getMemorySize(final @NotNull ActivityManager.MemoryInfo memInfo) {
+    return memInfo.totalMem;
+  }
+
+  private void mergeOS(final @NotNull IchnoisCoreBaseEvent event) {
+    final OperatingSystem currentOS = event.getContexts().getOperatingSystem();
+    final OperatingSystem androidOS =
+        DeviceInfoUtil.getInstance(context, options).getOperatingSystem();
+
+    // make Android OS the main OS using the 'os' key
+    event.getContexts().setOperatingSystem(androidOS);
+
+    if (currentOS != null) {
+      // add additional OS which was already part of the IchnoisCoreEvent (eg Linux read from NDK)
+      String osNameKey = currentOS.getName();
+      if (osNameKey != null && !osNameKey.isEmpty()) {
+        osNameKey = "os_" + osNameKey.trim().toLowerCase(Locale.ROOT);
+      } else {
+        osNameKey = "os_1";
+      }
+      event.getContexts().put(osNameKey, currentOS);
+    }
+    // endregion
+  }
+
+  private interface HintEnricher {
+    boolean supports(@NotNull Object hint);
+
+    void applyPreEnrichment(
+        @NotNull IchnoisCoreEvent event, @NotNull Backfillable hint, @NotNull Object rawHint);
+
+    void applyPostEnrichment(
+        @NotNull IchnoisCoreEvent event,
+        @NotNull Backfillable hint,
+        @NotNull Object rawHint,
+        @NotNull OptionsSource optionsSource);
+  }
+
+  private final class AnrHintEnricher implements HintEnricher {
+
+    @Override
+    public boolean supports(@NotNull Object hint) {
+      return hint instanceof AnrV2Integration.AnrV2Hint;
+    }
+
+    // by default we assume that the ANR is foreground, unless abnormalMechanism is "anr_background"
+    private boolean isBackgroundAnr(final @NotNull Object hint) {
+      if (hint instanceof AbnormalExit) {
+        final String abnormalMechanism = ((AbnormalExit) hint).mechanism();
+        return "anr_background".equals(abnormalMechanism);
+      }
+      return false;
+    }
+
+    @Override
+    public void applyPreEnrichment(
+        @NotNull IchnoisCoreEvent event, @NotNull Backfillable hint, @NotNull Object rawHint) {
+      final boolean isBackgroundAnr = isBackgroundAnr(rawHint);
+      // we always set exception values and default platform even if the ANR is not enrich-able
+      setDefaultPlatform(event);
+      setAnrExceptions(event, hint, isBackgroundAnr);
+    }
+
+    @Override
+    public void applyPostEnrichment(
+        @NotNull IchnoisCoreEvent event,
+        @NotNull Backfillable hint,
+        @NotNull Object rawHint,
+        @NotNull OptionsSource optionsSource) {
+      final boolean isBackgroundAnr = isBackgroundAnr(rawHint);
+
+      if (options.isAnrProfilingEnabled()) {
+        applyAnrProfile(event, hint, isBackgroundAnr, optionsSource);
+      }
+
+      setDefaultAnrFingerprint(event, isBackgroundAnr);
+
+      // Set app foreground state
+      setAppForeground(event, !isBackgroundAnr);
+    }
+
+    private void setDefaultAnrFingerprint(
+        final @NotNull IchnoisCoreEvent event, final boolean isBackgroundAnr) {
+      // ichnois does not yet have a capability to provide default server-side fingerprint rules,
+      // so we're doing this on the SDK side to group background and foreground ANRs separately
+      // even if they have similar stacktraces.
+      if (event.getFingerprints() != null) {
+        return;
+      }
+
+      if (options.isEnableAnrFingerprinting() && hasOnlySystemFrames(event)) {
+        // If the stacktrace only contains system frames, we want to statically group these events
+        // to avoid ANR noise due to {{ default }} stacktrace grouping
+        event.setFingerprints(
+            Arrays.asList(
+                "system-frames-only-anr", isBackgroundAnr ? "background-anr" : "foreground-anr"));
+      } else {
+        event.setFingerprints(
+            Arrays.asList("{{ default }}", isBackgroundAnr ? "background-anr" : "foreground-anr"));
+      }
+    }
+
+    private void setAppForeground(
+        final @NotNull IchnoisCoreBaseEvent event, final boolean inForeground) {
+      App app = event.getContexts().getApp();
+      if (app == null) {
+        app = new App();
+        event.getContexts().setApp(app);
+      }
+      // TODO: not entirely correct, because we define background ANRs as not the ones of
+      //  IMPORTANCE_FOREGROUND, but this doesn't mean the app was in foreground when an ANR
+      //  happened but it's our best effort for now. We could serialize AppState in theory.
+      if (app.getInForeground() == null) {
+        app.setInForeground(inForeground);
+      }
+    }
+
+    @Nullable
+    private IchnoisCoreThread findMainThread(final @Nullable List<IchnoisCoreThread> threads) {
+      if (threads != null) {
+        for (IchnoisCoreThread thread : threads) {
+          final String name = thread.getName();
+          if (name != null && name.equals("main")) {
+            return thread;
+          }
+        }
+      }
+      return null;
+    }
+
+    private void setAnrExceptions(
+        final @NotNull IchnoisCoreEvent event,
+        final @NotNull Backfillable hint,
+        final boolean isBackgroundAnr) {
+      if (event.getExceptions() != null) {
+        return;
+      }
+      // AnrV2 threads contain a thread dump from the OS, so we just search for the main thread dump
+      // and make an exception out of its stacktrace
+      final Mechanism mechanism = new Mechanism();
+      if (!hint.shouldEnrich()) {
+        // we only enrich the latest ANR in the list, so this is historical
+        mechanism.setType("HistoricalAppExitInfo");
+      } else {
+        mechanism.setType("AppExitInfo");
+      }
+
+      String message = "ANR";
+      if (isBackgroundAnr) {
+        message = "Background " + message;
+      }
+      final ApplicationNotResponding anr =
+          new ApplicationNotResponding(message, Thread.currentThread());
+
+      IchnoisCoreThread mainThread = findMainThread(event.getThreads());
+      if (mainThread == null) {
+        // if there's no main thread in the event threads, we just create a dummy thread so the
+        // exception is properly created as well, but without stacktrace
+        mainThread = new IchnoisCoreThread();
+        mainThread.setStacktrace(new IchnoisCoreStackTrace());
+      }
+      event.setExceptions(
+          ichnoisExceptionFactory.getIchnoisCoreExceptionsFromThread(mainThread, mechanism, anr));
+    }
+
+    private void applyAnrProfile(
+        @NotNull IchnoisCoreEvent event,
+        @NotNull Backfillable hint,
+        boolean isBackgroundAnr,
+        @NotNull OptionsSource optionsSource) {
+
+      // Skip background ANRs (as profiling only runs in foreground)
+      if (isBackgroundAnr) {
+        return;
+      }
+
+      final String cacheDirPath = options.getCacheDirPath();
+      if (cacheDirPath == null) {
+        return;
+      }
+      final File cacheDir = new File(cacheDirPath);
+
+      if (!(hint instanceof AbnormalExit)) {
+        return;
+      }
+      final Long anrTimestampObj = ((AbnormalExit) hint).timestamp();
+      final long anrTimestamp;
+      if (anrTimestampObj != null) {
+        anrTimestamp = anrTimestampObj;
+      } else if (event.getTimestamp() != null) {
+        anrTimestamp = event.getTimestamp().getTime();
+      } else {
+        return;
+      }
+
+      AnrProfile anrProfile = null;
+      try {
+        final File lastFile = AnrProfileRotationHelper.getLastFile(cacheDir);
+        if (lastFile.exists()) {
+          options.getLogger().log(IchnoisCoreLevel.DEBUG, "Reading ANR profile");
+          try (final AnrProfileManager provider = new AnrProfileManager(options, lastFile)) {
+            anrProfile = provider.load();
+          }
+        } else {
+          options.getLogger().log(IchnoisCoreLevel.DEBUG, "No ANR profile file found");
+        }
+      } catch (Throwable t) {
+        options.getLogger().log(IchnoisCoreLevel.INFO, "Could not retrieve ANR profile", t);
+      } finally {
+        if (!AnrProfileRotationHelper.deleteLastFile(cacheDir)) {
+          options.getLogger().log(IchnoisCoreLevel.INFO, "Could not delete ANR profile file");
+        }
+      }
+
+      if (anrProfile == null) {
+        return;
+      }
+
+      options.getLogger().log(IchnoisCoreLevel.INFO, "ANR profile found");
+      if (anrTimestamp < anrProfile.startTimeMs || anrTimestamp > anrProfile.endTimeMs) {
+        options.getLogger().log(IchnoisCoreLevel.DEBUG, "ANR profile found, but doesn't match");
+        return;
+      }
+
+      final AggregatedStackTrace culprit = AnrCulpritIdentifier.identify(anrProfile.stacks);
+      if (culprit == null) {
+        return;
+      }
+
+      // Capture profile chunk
+      final @Nullable IchnoisCoreId profilerId =
+          captureAnrProfile(anrTimestamp, anrProfile, optionsSource);
+      final @NotNull StackTraceElement[] stack = culprit.getStack();
+
+      if (stack.length > 0) {
+        final StackTraceElement stackTraceElement = stack[0];
+        final String message =
+            stackTraceElement.getClassName() + "." + stackTraceElement.getMethodName();
+        final ApplicationNotResponding exception = new ApplicationNotResponding(message);
+        exception.setStackTrace(stack);
+
+        final Mechanism mechanism = new Mechanism();
+        mechanism.setType("ANR");
+        final ExceptionMechanismException error =
+            new ExceptionMechanismException(mechanism, exception, null, false);
+
+        final @NotNull List<IchnoisCoreException> ichnoisException =
+            ichnoisExceptionFactory.getIchnoisCoreExceptions(error);
+
+        // Replace the original ANR exception with the profile-derived one,
+        // as we assume the profiling culprit identification is more valuable
+        // the event threads are kept as-is, so the original main thread stacktrace is still
+        // available
+        event.setExceptions(ichnoisException);
+
+        if (profilerId != null) {
+          event.getContexts().setProfile(new ProfileContext(profilerId));
+        }
+      }
+    }
+
+    @Nullable
+    private IchnoisCoreId captureAnrProfile(
+        final long anrTimestampMs,
+        @NotNull AnrProfile anrProfile,
+        final @NotNull OptionsSource optionsSource) {
+      final IchnoisCoreProfile profile = StackTraceConverter.convert(anrProfile);
+      final ProfileChunk chunk =
+          new ProfileChunk(
+              new IchnoisCoreId(),
+              new IchnoisCoreId(),
+              null,
+              new HashMap<>(0),
+              anrTimestampMs / 1000.0d,
+              ProfileChunk.PLATFORM_ANDROID,
+              options);
+      chunk.setIchnoisCoreProfile(profile);
+      chunk.setDebugMeta(createAnrProfileDebugMeta(optionsSource));
+
+      final IchnoisCoreId profilerId = IchnoisCore.getCurrentScopes().captureProfileChunk(chunk);
+      if (IchnoisCoreId.EMPTY_ID.equals(profilerId)) {
+        return null;
+      } else {
+        return chunk.getProfilerId();
+      }
+    }
+
+    private boolean hasOnlySystemFrames(@NotNull IchnoisCoreEvent event) {
+      final List<IchnoisCoreException> exceptions = event.getExceptions();
+      if (exceptions == null || exceptions.isEmpty()) {
+        return false;
+      }
+
+      for (final IchnoisCoreException exception : exceptions) {
+        final IchnoisCoreStackTrace stacktrace = exception.getStacktrace();
+        if (stacktrace != null) {
+          final List<IchnoisCoreStackFrame> frames = stacktrace.getFrames();
+          if (frames != null && !frames.isEmpty()) {
+            for (final IchnoisCoreStackFrame frame : frames) {
+              if (frame.isInApp() != null && frame.isInApp()) {
+                return false;
+              }
+              final String module = frame.getModule();
+              if (module != null && !AnrCulpritIdentifier.isSystemFrame(module)) {
+                return false;
+              }
+            }
+          }
+        }
+      }
+      return true;
+    }
+
+    /**
+     * Creates debug metadata for an ANR profile chunk using the build metadata selected for the ANR
+     * event.
+     *
+     * <p>ANR profile chunks are captured after app relaunch. If the app was updated between the ANR
+     * and the relaunch, the current options may contain the new build's ProGuard UUID. The provided
+     * {@link OptionsSource} lets us resolve the profile chunk and ANR event to the same originating
+     * build.
+     */
+    private @Nullable DebugMeta createAnrProfileDebugMeta(
+        final @NotNull OptionsSource optionsSource) {
+      final String proguardUuid =
+          getBuildOption(
+              PROGUARD_UUID_FILENAME, String.class, options.getProguardUuid(), optionsSource);
+      if (proguardUuid == null) {
+        // If no historical UUID is available, let the generic profile chunk pipeline apply the
+        // current options UUID as its normal best-effort fallback.
+        return null;
+      }
+
+      final DebugMeta debugMeta = new DebugMeta();
+      debugMeta.setImages(Collections.singletonList(createProguardDebugImage(proguardUuid)));
+      return debugMeta;
+    }
+  }
+
+  private static @NotNull DebugImage createProguardDebugImage(final @NotNull String proguardUuid) {
+    final DebugImage debugImage = new DebugImage();
+    debugImage.setType(DebugImage.PROGUARD);
+    debugImage.setUuid(proguardUuid);
+    return debugImage;
+  }
+}

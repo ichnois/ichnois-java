@@ -1,0 +1,85 @@
+package io.ichnois;
+
+import io.ichnois.protocol.IchnoisCoreId;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class NoOpReplayController implements ReplayController {
+
+  private static final NoOpReplayController instance = new NoOpReplayController();
+
+  public static NoOpReplayController getInstance() {
+    return instance;
+  }
+
+  private NoOpReplayController() {}
+
+  @Override
+  public void start() {}
+
+  @Override
+  public void startBuffering() {}
+
+  @Override
+  public void stop() {}
+
+  @Override
+  public void pause() {}
+
+  @Override
+  public void resume() {}
+
+  @Override
+  public void flush() {}
+
+  @Override
+  public void onAppForegrounded(boolean startNewReplay) {}
+
+  @Override
+  public void onAppBackgrounded() {}
+
+  @Override
+  public void onAppSessionEnded() {}
+
+  @Override
+  public boolean isRecording() {
+    return false;
+  }
+
+  @Override
+  public @NotNull IchnoisCoreId captureReplay(@Nullable Boolean isTerminating) {
+    return IchnoisCoreId.EMPTY_ID;
+  }
+
+  @Override
+  public @NotNull IchnoisCoreId getReplayId() {
+    return IchnoisCoreId.EMPTY_ID;
+  }
+
+  @Override
+  public void setBreadcrumbConverter(@NotNull ReplayBreadcrumbConverter converter) {}
+
+  @Override
+  public @NotNull ReplayBreadcrumbConverter getBreadcrumbConverter() {
+    return NoOpReplayBreadcrumbConverter.getInstance();
+  }
+
+  @Override
+  public boolean isDebugMaskingOverlayEnabled() {
+    return false;
+  }
+
+  @Override
+  public void enableDebugMaskingOverlay() {}
+
+  @Override
+  public void disableDebugMaskingOverlay() {}
+
+  @Override
+  public void registerTraceId(@NotNull IchnoisCoreId traceId) {}
+
+  @Override
+  public void registerSegmentName(@NotNull String segmentName) {}
+}

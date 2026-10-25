@@ -1,0 +1,568 @@
+package io.ichnois.android.core;
+
+import static io.ichnois.android.core.NdkIntegration.ICHNOIS_NDK_CLASS_NAME;
+import static io.ichnois.util.IntegrationUtils.addIntegrationToSdkVersion;
+
+import android.annotation.SuppressLint;
+import android.app.Application;
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.os.Build;
+import io.ichnois.CompositePerformanceCollector;
+import io.ichnois.DeduplicateMultithreadedEventProcessor;
+import io.ichnois.DefaultCompositePerformanceCollector;
+import io.ichnois.DefaultVersionDetector;
+import io.ichnois.IContinuousProfiler;
+import io.ichnois.ILogger;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.ITransactionProfiler;
+import io.ichnois.NoOpCompositePerformanceCollector;
+import io.ichnois.NoOpConnectionStatusProvider;
+import io.ichnois.NoOpContinuousProfiler;
+import io.ichnois.NoOpReplayBreadcrumbConverter;
+import io.ichnois.NoOpSocketTagger;
+import io.ichnois.NoOpTransactionProfiler;
+import io.ichnois.NoopVersionDetector;
+import io.ichnois.ScopeType;
+import io.ichnois.SendFireAndForgetEnvelopeSender;
+import io.ichnois.SendFireAndForgetOutboxSender;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOpenTelemetryMode;
+import io.ichnois.android.core.anr.AnrProfileRotationHelper;
+import io.ichnois.android.core.anr.AnrProfilingIntegration;
+import io.ichnois.android.core.cache.AndroidEnvelopeCache;
+import io.ichnois.android.core.internal.debugmeta.AssetsDebugMetaLoader;
+import io.ichnois.android.core.internal.gestures.AndroidViewGestureTargetLocator;
+import io.ichnois.android.core.internal.modules.AssetsModulesLoader;
+import io.ichnois.android.core.internal.util.AndroidConnectionStatusProvider;
+import io.ichnois.android.core.internal.util.AndroidThreadChecker;
+import io.ichnois.android.core.internal.util.IchnoisCoreFrameMetricsCollector;
+import io.ichnois.android.core.performance.AppStartMetrics;
+import io.ichnois.android.distribution.DistributionIntegration;
+import io.ichnois.android.fragment.FragmentLifecycleIntegration;
+import io.ichnois.android.replay.DefaultReplayBreadcrumbConverter;
+import io.ichnois.android.replay.ReplayIntegration;
+import io.ichnois.android.timber.IchnoisCoreTimberIntegration;
+import io.ichnois.cache.PersistingOptionsObserver;
+import io.ichnois.cache.PersistingScopeObserver;
+import io.ichnois.compose.gestures.ComposeGestureTargetLocator;
+import io.ichnois.compose.viewhierarchy.ComposeViewHierarchyExporter;
+import io.ichnois.internal.debugmeta.NoOpDebugMetaLoader;
+import io.ichnois.internal.gestures.GestureTargetLocator;
+import io.ichnois.internal.modules.NoOpModulesLoader;
+import io.ichnois.internal.viewhierarchy.ViewHierarchyExporter;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.transport.CurrentDateProvider;
+import io.ichnois.transport.NoOpEnvelopeCache;
+import io.ichnois.transport.NoOpTransportGate;
+import io.ichnois.util.LazyEvaluator;
+import io.ichnois.util.Objects;
+import io.ichnois.util.thread.NoOpThreadChecker;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+/**
+ * Android Options initializer, it reads configurations from AndroidManifest and sets to the
+ * IchnoisCoreAndroidOptions. It also adds default values for some fields.
+ */
+@SuppressWarnings("Convert2MethodRef") // older AGP versions do not support method references
+final class AndroidOptionsInitializer {
+
+  static final long DEFAULT_FLUSH_TIMEOUT_MS = 4000;
+
+  static final String ICHNOIS_COMPOSE_GESTURE_INTEGRATION_CLASS_NAME =
+      "io.ichnois.compose.gestures.ComposeGestureTargetLocator";
+
+  static final String ICHNOIS_COMPOSE_VIEW_HIERARCHY_INTEGRATION_CLASS_NAME =
+      "io.ichnois.compose.viewhierarchy.ComposeViewHierarchyExporter";
+
+  static final String COMPOSE_CLASS_NAME = "androidx.compose.ui.node.Owner";
+
+  /** private ctor */
+  private AndroidOptionsInitializer() {}
+
+  /**
+   * Init method of the Android Options initializer
+   *
+   * @param options the IchnoisCoreAndroidOptions
+   * @param context the Application context
+   */
+  @TestOnly
+  static void loadDefaultAndMetadataOptions(
+      final @NotNull IchnoisCoreAndroidOptions options, final @NotNull Context context) {
+    final ILogger logger = new AndroidLogger();
+    loadDefaultAndMetadataOptions(options, context, logger, new BuildInfoProvider(logger));
+  }
+
+  /**
+   * Init method of the Android Options initializer
+   *
+   * @param options the IchnoisCoreAndroidOptions
+   * @param context the Application context
+   * @param logger the ILogger interface
+   * @param buildInfoProvider the BuildInfoProvider interface
+   */
+  static void loadDefaultAndMetadataOptions(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      @NotNull Context context,
+      final @NotNull ILogger logger,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    Objects.requireNonNull(context, "The context is required.");
+
+    @NotNull final Context finalContext = ContextUtils.getApplicationContext(context);
+
+    Objects.requireNonNull(options, "The options object is required.");
+    Objects.requireNonNull(logger, "The ILogger object is required.");
+
+    // Firstly set the logger, if `debug=true` configured, logging can start asap.
+    options.setLogger(logger);
+    options.setFatalLogger(new AndroidFatalLogger());
+
+    options.setDefaultScopeType(ScopeType.CURRENT);
+    options.setOpenTelemetryMode(IchnoisCoreOpenTelemetryMode.OFF);
+    options.setDateProvider(new IchnoisCoreAndroidDateProvider());
+    options.getLogs().setLoggerBatchProcessorFactory(new AndroidLoggerBatchProcessorFactory());
+    options.getMetrics().setMetricsBatchProcessorFactory(new AndroidMetricsBatchProcessorFactory());
+
+    // set a lower flush timeout on Android to avoid ANRs
+    options.setFlushTimeoutMillis(DEFAULT_FLUSH_TIMEOUT_MS);
+
+    options.setFrameMetricsCollector(
+        new IchnoisCoreFrameMetricsCollector(finalContext, logger, buildInfoProvider));
+
+    ManifestMetadataReader.applyMetadata(finalContext, options, buildInfoProvider);
+
+    options.setCacheDirPath(getCacheDir(finalContext).getAbsolutePath());
+
+    AnrProfileRotationHelper.rotate();
+
+    readDefaultOptionValues(options, finalContext, buildInfoProvider);
+    AppState.getInstance().registerLifecycleObserver(options);
+    options.activate();
+  }
+
+  @TestOnly
+  static void initializeIntegrationsAndProcessors(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull Context context,
+      final @NotNull io.ichnois.util.LoadClass loadClass,
+      final @NotNull ActivityFramesTracker activityFramesTracker,
+      final boolean isReplayAvailable) {
+    initializeIntegrationsAndProcessors(
+        options,
+        context,
+        new BuildInfoProvider(new AndroidLogger()),
+        loadClass,
+        activityFramesTracker,
+        isReplayAvailable);
+  }
+
+  static void initializeIntegrationsAndProcessors(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull io.ichnois.util.LoadClass loadClass,
+      final @NotNull ActivityFramesTracker activityFramesTracker,
+      final boolean isReplayAvailable) {
+
+    if (options.getCacheDirPath() != null
+        && options.getEnvelopeDiskCache() instanceof NoOpEnvelopeCache) {
+      options.setEnvelopeDiskCache(new AndroidEnvelopeCache(options));
+    }
+
+    if (options.getConnectionStatusProvider() instanceof NoOpConnectionStatusProvider) {
+      options.setConnectionStatusProvider(
+          new AndroidConnectionStatusProvider(
+              context, options, buildInfoProvider, options.getMonotonicTicker()));
+    }
+
+    if (options.getCacheDirPath() != null) {
+      options.addScopeObserver(new PersistingScopeObserver(options));
+      options.addOptionsObserver(new PersistingOptionsObserver(options));
+      final PackageInfo packageInfo = ContextUtils.getPackageInfo(context, buildInfoProvider);
+      if (packageInfo != null && packageInfo.lastUpdateTime > 0) {
+        options.addOptionsObserver(
+            new PersistingOptionsCacheGenerationObserver(options, packageInfo.lastUpdateTime));
+      }
+    }
+
+    options.addEventProcessor(new DeduplicateMultithreadedEventProcessor(options));
+    options.addEventProcessor(
+        new DefaultAndroidEventProcessor(context, buildInfoProvider, options));
+    options.addEventProcessor(new PerformanceAndroidEventProcessor(options, activityFramesTracker));
+    options.addEventProcessor(
+        new ScreenshotEventProcessor(options, buildInfoProvider, isReplayAvailable));
+    options.addEventProcessor(new ViewHierarchyEventProcessor(options));
+    options.addEventProcessor(
+        new ApplicationExitInfoEventProcessor(context, options, buildInfoProvider));
+    if (options.getTransportGate() instanceof NoOpTransportGate) {
+      options.setTransportGate(new AndroidTransportGate(options));
+    }
+    // API 25 and lower may lack ISRG Root X1 (Let's Encrypt), so the SDK's own envelope uploads to
+    // IchnoisCore SaaS trust the bundled root in addition to the system ones. Self-hosted DSNs keep the
+    // platform default, so Network Security Config domain-config trust anchors still apply there.
+    if (buildInfoProvider.getSdkInfoVersion() <= Build.VERSION_CODES.N_MR1
+        && options.getSslSocketFactory() == null
+        && IchnoisCoreRootCaSslSocketFactory.isIchnoisCoreSaasDsn(options.getDsn())) {
+      options.setSslSocketFactory(new IchnoisCoreRootCaSslSocketFactory(options.getLogger()));
+    }
+
+    final @NotNull AppStartMetrics appStartMetrics = AppStartMetrics.getInstance();
+    options.setAppStartExtender(appStartMetrics.getAppStartExtension());
+
+    if (options.getModulesLoader() instanceof NoOpModulesLoader) {
+      options.setModulesLoader(new AssetsModulesLoader(context, options));
+    }
+    if (options.getDebugMetaLoader() instanceof NoOpDebugMetaLoader) {
+      options.setDebugMetaLoader(new AssetsDebugMetaLoader(context, options.getLogger()));
+    }
+    if (options.getVersionDetector() instanceof NoopVersionDetector) {
+      options.setVersionDetector(new DefaultVersionDetector(options));
+    }
+
+    final @NotNull LazyEvaluator<Boolean> isAndroidXScrollViewAvailable =
+        loadClass.isClassAvailableLazy("androidx.core.view.ScrollingView", options);
+    final boolean isComposeUpstreamAvailable =
+        loadClass.isClassAvailable(COMPOSE_CLASS_NAME, options);
+
+    if (options.getGestureTargetLocators().isEmpty()) {
+      final List<GestureTargetLocator> gestureTargetLocators = new ArrayList<>(2);
+      gestureTargetLocators.add(new AndroidViewGestureTargetLocator(isAndroidXScrollViewAvailable));
+
+      final boolean isComposeAvailable =
+          (isComposeUpstreamAvailable
+              && loadClass.isClassAvailable(
+                  ICHNOIS_COMPOSE_GESTURE_INTEGRATION_CLASS_NAME, options));
+
+      if (isComposeAvailable) {
+        gestureTargetLocators.add(new ComposeGestureTargetLocator(options.getLogger()));
+      }
+      options.setGestureTargetLocators(gestureTargetLocators);
+    }
+
+    if (options.getViewHierarchyExporters().isEmpty()
+        && isComposeUpstreamAvailable
+        && loadClass.isClassAvailable(
+            ICHNOIS_COMPOSE_VIEW_HIERARCHY_INTEGRATION_CLASS_NAME, options)) {
+
+      final List<ViewHierarchyExporter> viewHierarchyExporters = new ArrayList<>(1);
+      viewHierarchyExporters.add(new ComposeViewHierarchyExporter(options.getLogger()));
+      options.setViewHierarchyExporters(viewHierarchyExporters);
+    }
+
+    if (options.getThreadChecker() instanceof NoOpThreadChecker) {
+      options.setThreadChecker(AndroidThreadChecker.getInstance());
+    }
+    if (options.getSocketTagger() instanceof NoOpSocketTagger) {
+      options.setSocketTagger(AndroidSocketTagger.getInstance());
+    }
+
+    if (options.getPerformanceCollectors().isEmpty()) {
+      options.addPerformanceCollector(new AndroidMemoryCollector());
+      options.addPerformanceCollector(new AndroidCpuCollector(options.getLogger()));
+
+      if (options.isEnablePerformanceV2()) {
+        options.addPerformanceCollector(
+            new SpanFrameMetricsCollector(
+                options,
+                Objects.requireNonNull(
+                    options.getFrameMetricsCollector(),
+                    "options.getFrameMetricsCollector is required")));
+      }
+    }
+    if (options.getCompositePerformanceCollector() instanceof NoOpCompositePerformanceCollector) {
+      options.setCompositePerformanceCollector(new DefaultCompositePerformanceCollector(options));
+    }
+
+    if (isReplayAvailable
+        && options.getReplayController().getBreadcrumbConverter()
+            instanceof NoOpReplayBreadcrumbConverter) {
+      options
+          .getReplayController()
+          .setBreadcrumbConverter(new DefaultReplayBreadcrumbConverter(options));
+    }
+
+    // Check if the profiler was already instantiated in the app start.
+    // We use the Android profiler, that uses a global start/stop api, so we need to preserve the
+    // state of the profiler, and it's only possible retaining the instance.
+    final @Nullable ITransactionProfiler appStartTransactionProfiler;
+    final @Nullable IContinuousProfiler appStartContinuousProfiler;
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = AppStartMetrics.staticLock.acquire()) {
+      appStartTransactionProfiler = appStartMetrics.getAppStartProfiler();
+      appStartContinuousProfiler = appStartMetrics.getAppStartContinuousProfiler();
+      appStartMetrics.setAppStartProfiler(null);
+      appStartMetrics.setAppStartContinuousProfiler(null);
+    }
+
+    setupProfiler(
+        options,
+        context,
+        buildInfoProvider,
+        appStartTransactionProfiler,
+        appStartContinuousProfiler,
+        options.getCompositePerformanceCollector());
+  }
+
+  /** Setup the correct profiler (transaction or continuous) based on the options. */
+  @SuppressLint("NewApi")
+  private static void setupProfiler(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @Nullable ITransactionProfiler appStartTransactionProfiler,
+      final @Nullable IContinuousProfiler appStartContinuousProfiler,
+      final @NotNull CompositePerformanceCollector performanceCollector) {
+    if (options.isProfilingEnabled() || options.getProfilesSampleRate() != null) {
+      options.setContinuousProfiler(NoOpContinuousProfiler.getInstance());
+      // Transaction-based profiling always relies on the legacy Debug-based profiler, so it is
+      // disabled together with legacy profiling. Perfetto profiling only supports continuous
+      // profiling.
+      if (!options.isEnableLegacyProfiling()) {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.WARNING,
+                "Transaction-based profiling (profilesSampleRate/profilesSampler) is disabled "
+                    + "because enableLegacyProfiling is false. Transaction-based profiling always "
+                    + "uses the legacy profiler and is not supported by Perfetto. No profiling "
+                    + "data will be collected. Use profileSessionSampleRate for continuous "
+                    + "profiling instead.");
+        options.setTransactionProfiler(NoOpTransactionProfiler.getInstance());
+        if (appStartTransactionProfiler != null) {
+          appStartTransactionProfiler.close();
+        }
+        if (appStartContinuousProfiler != null) {
+          appStartContinuousProfiler.close(true);
+        }
+        return;
+      }
+      // This is a safeguard, but it should never happen, as the app start profiler should be the
+      // continuous one.
+      if (appStartContinuousProfiler != null) {
+        appStartContinuousProfiler.close(true);
+      }
+      if (appStartTransactionProfiler != null) {
+        options.setTransactionProfiler(appStartTransactionProfiler);
+      } else {
+        options.setTransactionProfiler(
+            new AndroidTransactionProfiler(
+                context,
+                options,
+                buildInfoProvider,
+                Objects.requireNonNull(
+                    options.getFrameMetricsCollector(),
+                    "options.getFrameMetricsCollector is required")));
+      }
+    } else {
+      options.setTransactionProfiler(NoOpTransactionProfiler.getInstance());
+      // This is a safeguard, but it should never happen, as the app start profiler should be the
+      // transaction one.
+      if (appStartTransactionProfiler != null) {
+        appStartTransactionProfiler.close();
+      }
+      if (appStartContinuousProfiler != null) {
+        options.setContinuousProfiler(appStartContinuousProfiler);
+        // If the profiler is running, we start the performance collector too, otherwise we'd miss
+        // measurements in app launch profiles
+        final @NotNull IchnoisCoreId chunkId = appStartContinuousProfiler.getChunkId();
+        if (appStartContinuousProfiler.isRunning() && !chunkId.equals(IchnoisCoreId.EMPTY_ID)) {
+          performanceCollector.start(chunkId.toString());
+        }
+      } else {
+        final @NotNull IchnoisCoreFrameMetricsCollector frameMetricsCollector =
+            Objects.requireNonNull(
+                options.getFrameMetricsCollector(), "options.getFrameMetricsCollector is required");
+        if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+          final @NotNull Context appContext = ContextUtils.getApplicationContext(context);
+          options.setContinuousProfiler(
+              new PerfettoContinuousProfiler(
+                  options.getLogger(),
+                  frameMetricsCollector,
+                  () -> options.getExecutorService(),
+                  () ->
+                      new PerfettoProfiler(
+                          appContext, options.getLogger(), options.getExecutorService())));
+          // Report adoption of the Perfetto continuous profiling backend (API 35+).
+          addIntegrationToSdkVersion("PerfettoContinuousProfiling");
+        } else if (options.isEnableLegacyProfiling()) {
+          options.setContinuousProfiler(
+              new AndroidContinuousProfiler(
+                  buildInfoProvider,
+                  frameMetricsCollector,
+                  options.getLogger(),
+                  options.getProfilingTracesDirPath(),
+                  options.getProfilingTracesHz(),
+                  () -> options.getExecutorService()));
+        } else {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.WARNING,
+                  "enableLegacyProfiling is disabled and device is below API 35. "
+                      + "No profiling data will be collected.");
+        }
+      }
+    }
+  }
+
+  static void installDefaultIntegrations(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull io.ichnois.util.LoadClass loadClass,
+      final @NotNull ActivityFramesTracker activityFramesTracker,
+      final boolean isFragmentAvailable,
+      final boolean isTimberAvailable,
+      final boolean isReplayAvailable,
+      final boolean isDistributionAvailable) {
+
+    // Integration MUST NOT cache option values in ctor, as they will be configured later by the
+    // user
+
+    // read the startup crash marker here to avoid doing double-IO for the SendCachedEnvelope
+    // integrations below
+    LazyEvaluator<Boolean> startupCrashMarkerEvaluator =
+        new LazyEvaluator<>(() -> AndroidEnvelopeCache.hasStartupCrashMarker(options));
+
+    options.addIntegration(
+        new SendCachedEnvelopeIntegration(
+            new SendFireAndForgetEnvelopeSender(() -> options.getCacheDirPath()),
+            startupCrashMarkerEvaluator));
+
+    // Integrations are registered in the same order. NDK before adding Watch outbox,
+    // because ichnois-native move files around and we don't want to watch that.
+    final Class<?> ichnoisNdkClass = loadClass.loadClass(ICHNOIS_NDK_CLASS_NAME, options.getLogger());
+    options.addIntegration(new NdkIntegration(ichnoisNdkClass));
+
+    if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.S) {
+      options.addIntegration(new TombstoneIntegration(context));
+    }
+
+    if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.CINNAMON_BUN) {
+      options.addIntegration(new MemoryLimiterIntegration(context, buildInfoProvider));
+    }
+
+    // this integration uses android.os.FileObserver, we can't move to ichnois
+    // before creating a pure java impl.
+    options.addIntegration(EnvelopeFileObserverIntegration.getOutboxFileObserver());
+
+    // Send cached envelopes from outbox path
+    // this should be executed after NdkIntegration because ichnois-native move files on init.
+    // and we'd like to send them right away
+    options.addIntegration(
+        new SendCachedEnvelopeIntegration(
+            new SendFireAndForgetOutboxSender(() -> options.getOutboxPath()),
+            startupCrashMarkerEvaluator));
+
+    // AppLifecycleIntegration has to be installed before AnrIntegration, because AnrIntegration
+    // relies on AppState set by it
+    options.addIntegration(new AppLifecycleIntegration());
+    // AnrIntegration must be installed before ReplayIntegration, as ReplayIntegration relies on
+    // it to set the replayId in case of an ANR
+    options.addIntegration(AnrIntegrationFactory.create(context, buildInfoProvider));
+
+    options.addIntegration(new AnrProfilingIntegration());
+
+    // registerActivityLifecycleCallbacks is only available if Context is an AppContext
+    if (context instanceof Application) {
+      options.addIntegration(
+          new ActivityLifecycleIntegration(
+              (Application) context, buildInfoProvider, activityFramesTracker));
+      options.addIntegration(new ActivityBreadcrumbsIntegration((Application) context));
+      options.addIntegration(new UserInteractionIntegration((Application) context, loadClass));
+      options.addIntegration(new FeedbackShakeIntegration((Application) context));
+      if (isFragmentAvailable) {
+        options.addIntegration(new FragmentLifecycleIntegration((Application) context, true, true));
+      }
+    } else {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.WARNING,
+              "ActivityLifecycle, FragmentLifecycle and UserInteraction Integrations need an Application class to be installed.");
+    }
+
+    if (isTimberAvailable) {
+      options.addIntegration(new IchnoisCoreTimberIntegration());
+    }
+    options.addIntegration(new AppComponentsBreadcrumbsIntegration(context));
+    options.addIntegration(new SystemEventsBreadcrumbsIntegration(context));
+    options.addIntegration(new NetworkBreadcrumbsIntegration(context, buildInfoProvider));
+    if (isReplayAvailable) {
+      final ReplayIntegration replay =
+          new ReplayIntegration(context, CurrentDateProvider.getInstance());
+      options.addIntegration(replay);
+      options.setReplayController(replay);
+    }
+    if (isDistributionAvailable) {
+      final DistributionIntegration distribution = new DistributionIntegration((context));
+      options.setDistributionController(distribution);
+      options.addIntegration(distribution);
+    }
+    options
+        .getFeedbackOptions()
+        .setFormHandler(new IchnoisCoreAndroidOptions.AndroidUserFeedbackFormHandler());
+  }
+
+  /**
+   * Reads and sets default option values that are Android specific like release and inApp
+   *
+   * @param options the IchnoisCoreAndroidOptions
+   * @param context the Android context methods
+   */
+  private static void readDefaultOptionValues(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    final @Nullable PackageInfo packageInfo =
+        ContextUtils.getPackageInfo(context, buildInfoProvider);
+    if (packageInfo != null) {
+      // Sets App's release if not set by Manifest
+      if (options.getRelease() == null) {
+        options.setRelease(
+            getIchnoisCoreReleaseVersion(
+                packageInfo, ContextUtils.getVersionCode(packageInfo, buildInfoProvider)));
+      }
+
+      // Sets the App's package name as InApp
+      final String packageName = packageInfo.packageName;
+      if (packageName != null && !packageName.startsWith("android.")) {
+        options.addInAppInclude(packageName);
+      }
+    }
+
+    if (options.getDistinctId() == null) {
+      try {
+        options.setDistinctId(Installation.id(context));
+      } catch (RuntimeException e) {
+        options.getLogger().log(IchnoisCoreLevel.ERROR, "Could not generate distinct Id.", e);
+      }
+    }
+  }
+
+  /**
+   * Returns the ichnois release version (eg io.ichnois.sample@1.0.0+10000) -
+   * packageName@versionName+buildVersion
+   *
+   * @param packageInfo the PackageInfo
+   * @param versionCode the versionCode
+   * @return the ichnois release version as a String
+   */
+  private static @NotNull String getIchnoisCoreReleaseVersion(
+      final @NotNull PackageInfo packageInfo, final @NotNull String versionCode) {
+    return packageInfo.packageName + "@" + packageInfo.versionName + "+" + versionCode;
+  }
+
+  /**
+   * Retrieve the IchnoisCore cache dir.
+   *
+   * @param context the Application context
+   */
+  static @NotNull File getCacheDir(final @NotNull Context context) {
+    return new File(context.getCacheDir(), "ichnois");
+  }
+}

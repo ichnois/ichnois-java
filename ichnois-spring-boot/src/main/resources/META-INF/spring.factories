@@ -1,0 +1,7 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+io.ichnois.spring.boot.IchnoisCoreAutoConfiguration,\
+io.ichnois.spring.boot.IchnoisCoreProfilerAutoConfiguration,\
+io.ichnois.spring.boot.IchnoisCoreLogbackAppenderAutoConfiguration,\
+io.ichnois.spring.boot.IchnoisCoreWebfluxAutoConfiguration
+
+org.springframework.context.ApplicationListener=io.ichnois.spring.boot.IchnoisCoreSpringVersionChecker

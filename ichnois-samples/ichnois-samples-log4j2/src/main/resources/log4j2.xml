@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
+    </Console>
+    <!-- NOTE: Replace the test DSN below with YOUR OWN DSN to see the events from this app in your IchnoisCore project/dashboard -->
+    <!-- Setting minimumBreadcrumbLevel modifies the default minimum level to add breadcrumbs from INFO to DEBUG  -->
+    <!-- Setting minimumEventLevel the default minimum level to capture an event from ERROR to WARN  -->
+    <IchnoisCore name="IchnoisCore"
+            dsn="https://test-public-key@ichnois-h2jw.onrender.com/5428563"
+            minimumBreadcrumbLevel="DEBUG"
+            minimumEventLevel="WARN"
+            minimumLevel="DEBUG"
+            debug="true"
+            contextTags="userId,requestId"
+    />
+  </Appenders>
+  <Loggers>
+    <Root level="debug">
+      <AppenderRef ref="IchnoisCore"/>
+      <AppenderRef ref="Console"/>
+    </Root>
+  </Loggers>
+</Configuration>

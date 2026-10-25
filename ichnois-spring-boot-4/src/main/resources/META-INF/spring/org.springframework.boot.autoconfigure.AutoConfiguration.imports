@@ -1,0 +1,5 @@
+io.ichnois.spring.boot4.IchnoisCoreAutoConfiguration
+io.ichnois.spring.boot4.IchnoisCoreProfilerAutoConfiguration
+io.ichnois.spring.boot4.IchnoisCoreLogbackAppenderAutoConfiguration
+io.ichnois.spring.boot4.IchnoisCoreLog4j2AppenderAutoConfiguration
+io.ichnois.spring.boot4.IchnoisCoreWebfluxAutoConfiguration

@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>MagicNumber:IchnoisCoreKtorClientUtils.kt$IchnoisCoreKtorClientUtils$1000L</ID>
+    <ID>MaxLineLength:IchnoisCoreKtorClientPluginTest.kt$IchnoisCoreKtorClientPluginTest$fun</ID>
+    <ID>TooGenericExceptionCaught:IchnoisCoreKtorClientPlugin.kt$t: Throwable</ID>
+    <ID>UnusedParameter:IchnoisCoreKtorClientPluginTest.kt$IchnoisCoreKtorClientPluginTest.Fixture$beforeSpan: IchnoisCoreKtorClientPluginConfig.BeforeSpanCallback? = null</ID>
+    <ID>WildcardImport:IchnoisCoreKtorClientPlugin.kt$import io.ktor.client.plugins.api.*</ID>
+    <ID>WildcardImport:IchnoisCoreKtorClientPlugin.kt$import io.ktor.client.request.*</ID>
+    <ID>WildcardImport:IchnoisCoreKtorClientPlugin.kt$import io.ktor.client.statement.*</ID>
+    <ID>WildcardImport:IchnoisCoreKtorClientPlugin.kt$import io.ktor.util.*</ID>
+    <ID>WildcardImport:IchnoisCoreKtorClientPlugin.kt$import io.ktor.util.pipeline.*</ID>
+  </CurrentIssues>
+</SmellBaseline>

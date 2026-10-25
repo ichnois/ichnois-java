@@ -1,0 +1,335 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE") // to access internal vals
+
+package io.ichnois.android.replay.viewhierarchy
+
+import android.annotation.SuppressLint
+import android.annotation.TargetApi
+import android.view.View
+import androidx.compose.ui.graphics.isUnspecified
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.findRootCoordinates
+import androidx.compose.ui.node.LayoutNode
+import androidx.compose.ui.node.Owner
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsConfiguration
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.TextUnit
+import io.ichnois.ILogger
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreMaskingOptions
+import io.ichnois.android.replay.IchnoisCoreReplayModifiers
+import io.ichnois.android.replay.util.ComposeTextLayout
+import io.ichnois.android.replay.util.IchnoisCoreReplayDebug
+import io.ichnois.android.replay.util.boundsInWindow
+import io.ichnois.android.replay.util.findPainter
+import io.ichnois.android.replay.util.findTextColor
+import io.ichnois.android.replay.util.isMaskable
+import io.ichnois.android.replay.util.toOpaque
+import io.ichnois.android.replay.util.toRect
+import io.ichnois.android.replay.viewhierarchy.ViewHierarchyNode.GenericViewHierarchyNode
+import io.ichnois.android.replay.viewhierarchy.ViewHierarchyNode.ImageViewHierarchyNode
+import io.ichnois.android.replay.viewhierarchy.ViewHierarchyNode.TextViewHierarchyNode
+import java.lang.ref.WeakReference
+import java.lang.reflect.Method
+
+@SuppressLint("UseRequiresApi")
+@TargetApi(26)
+internal object ComposeViewHierarchyNode {
+  private val getCollapsedSemanticsMethod: Method? by
+    lazy(LazyThreadSafetyMode.NONE) {
+      try {
+        return@lazy LayoutNode::class
+          .java
+          .getDeclaredMethod("getCollapsedSemantics\$ui_release")
+          .apply { isAccessible = true }
+      } catch (_: Throwable) {
+        // ignore, as this method may not be available
+      }
+      return@lazy null
+    }
+
+  private var semanticsRetrievalErrorLogged: Boolean = false
+
+  @JvmStatic
+  internal fun retrieveSemanticsConfiguration(node: LayoutNode): SemanticsConfiguration? {
+    return try {
+      node.semanticsConfiguration
+    } catch (t: Throwable) {
+      // for backwards compatibility
+      // Jetpack Compose 1.8 or older
+      if (getCollapsedSemanticsMethod != null) {
+        getCollapsedSemanticsMethod!!.invoke(node) as SemanticsConfiguration?
+      } else {
+        // re-throw t if there's no way to retrieve semantics
+        throw t
+      }
+    }
+  }
+
+  /**
+   * Since Compose doesn't have a concept of a View class (they are all composable functions), we
+   * need to map the semantics node to a corresponding old view system class.
+   */
+  private fun getProxyClassName(isImage: Boolean, config: SemanticsConfiguration?): String =
+    when {
+      isImage -> IchnoisCoreMaskingOptions.IMAGE_VIEW_CLASS_NAME
+      config != null &&
+        (config.contains(SemanticsProperties.Text) ||
+          config.contains(SemanticsActions.SetText) ||
+          config.contains(SemanticsProperties.EditableText)) ->
+        IchnoisCoreMaskingOptions.TEXT_VIEW_CLASS_NAME
+      else -> "android.view.View"
+    }
+
+  private fun SemanticsConfiguration?.shouldMask(
+    isImage: Boolean,
+    options: IchnoisCoreMaskingOptions,
+  ): Boolean {
+    val ichnoisPrivacyModifier = this?.getOrNull(IchnoisCoreReplayModifiers.IchnoisCorePrivacy)
+    if (ichnoisPrivacyModifier == "unmask") {
+      options.trackCustomMasking()
+      return false
+    }
+
+    if (ichnoisPrivacyModifier == "mask") {
+      options.trackCustomMasking()
+      return true
+    }
+
+    val className = getProxyClassName(isImage, this)
+    if (options.unmaskViewClasses.contains(className)) {
+      return false
+    }
+
+    return options.maskViewClasses.contains(className)
+  }
+
+  @Suppress("ktlint:standard:backing-property-naming")
+  private var _rootCoordinates: WeakReference<LayoutCoordinates>? = null
+
+  private fun fromComposeNode(
+    node: LayoutNode,
+    parent: ViewHierarchyNode?,
+    distance: Int,
+    isComposeRoot: Boolean,
+    options: IchnoisCoreMaskingOptions,
+    logger: ILogger,
+  ): ViewHierarchyNode? {
+    val isInTree = node.isPlaced && node.isAttached
+    if (!isInTree) {
+      return null
+    }
+
+    if (isComposeRoot) {
+      _rootCoordinates = WeakReference(node.coordinates.findRootCoordinates())
+    }
+
+    val visibleRect = node.coordinates.boundsInWindow(_rootCoordinates?.get())
+    val semantics: SemanticsConfiguration?
+
+    try {
+      semantics = retrieveSemanticsConfiguration(node)
+    } catch (t: Throwable) {
+      if (!semanticsRetrievalErrorLogged) {
+        semanticsRetrievalErrorLogged = true
+        logger.log(
+          IchnoisCoreLevel.ERROR,
+          t,
+          """
+          Error retrieving semantics information from Compose tree. Most likely you're using
+          an unsupported version of androidx.compose.ui:ui. The supported
+          version range is 1.5.0 - 1.10.2.
+          If you're using a newer version, please open a github issue with the version
+          you're using, so we can add support for it.
+          """
+            .trimIndent(),
+        )
+      }
+
+      // fail fast in our own sample/UI-test apps (see IchnoisCoreReplayDebug), so regressions surface
+      // as crashes instead of silently degrading masking
+      if (IchnoisCoreReplayDebug.failFast) {
+        throw t
+      }
+
+      // If we're unable to retrieve the semantics configuration
+      // we should play safe and mask the whole node.
+      return GenericViewHierarchyNode(
+        x = visibleRect.left,
+        y = visibleRect.top,
+        width = node.width,
+        height = node.height,
+        elevation = (parent?.elevation ?: 0f),
+        distance = distance,
+        parent = parent,
+        shouldMask = true,
+        isImportantForContentCapture = false, // will be set by children
+        isVisible =
+          !IchnoisCoreLayoutNodeHelper.isTransparent(node) &&
+            visibleRect.height > 0 &&
+            visibleRect.width > 0,
+        visibleRect = visibleRect.toRect(),
+      )
+    }
+
+    val isVisible =
+      !IchnoisCoreLayoutNodeHelper.isTransparent(node) &&
+        (semantics == null || !semantics.contains(SemanticsProperties.InvisibleToUser)) &&
+        visibleRect.height > 0 &&
+        visibleRect.width > 0
+    val isEditable =
+      semantics?.contains(SemanticsActions.SetText) == true ||
+        semantics?.contains(SemanticsProperties.EditableText) == true
+
+    return when {
+      semantics?.contains(SemanticsProperties.Text) == true || isEditable -> {
+        val shouldMask = isVisible && semantics.shouldMask(isImage = false, options)
+
+        parent?.setImportantForCaptureToAncestors(true)
+        // TODO: if we get reports that it's slow, we can drop this, and just mask
+        // TODO: the whole view instead of per-line
+        val textLayoutResults = mutableListOf<TextLayoutResult>()
+        semantics
+          ?.getOrNull(SemanticsActions.GetTextLayoutResult)
+          ?.action
+          ?.invoke(textLayoutResults)
+
+        val textLayoutResult = textLayoutResults.firstOrNull()
+        var textColor = textLayoutResult?.layoutInput?.style?.color
+        if (textColor?.isUnspecified == true) {
+          textColor = node.findTextColor()
+        }
+        val isLaidOut = textLayoutResult?.layoutInput?.style?.fontSize != TextUnit.Unspecified
+        // TODO: support editable text (currently there's a way to get @Composable's padding only
+        // via reflection, and we can't reliably mask input fields based on TextLayout, so we mask
+        // the whole view instead)
+        TextViewHierarchyNode(
+          layout =
+            if (textLayoutResult != null && !isEditable && isLaidOut) {
+              ComposeTextLayout(textLayoutResult)
+            } else {
+              null
+            },
+          dominantColor = textColor?.toArgb()?.toOpaque(),
+          x = visibleRect.left,
+          y = visibleRect.top,
+          width = node.width,
+          height = node.height,
+          elevation = (parent?.elevation ?: 0f),
+          distance = distance,
+          parent = parent,
+          shouldMask = shouldMask,
+          isImportantForContentCapture = true,
+          isVisible = isVisible,
+          visibleRect = visibleRect.toRect(),
+        )
+      }
+      else -> {
+        val painter = node.findPainter()
+        if (painter != null) {
+          val shouldMask = isVisible && semantics.shouldMask(isImage = true, options)
+
+          parent?.setImportantForCaptureToAncestors(true)
+          ImageViewHierarchyNode(
+            x = visibleRect.left,
+            y = visibleRect.top,
+            width = node.width,
+            height = node.height,
+            elevation = (parent?.elevation ?: 0f),
+            distance = distance,
+            parent = parent,
+            isVisible = isVisible,
+            isImportantForContentCapture = true,
+            shouldMask = shouldMask && painter.isMaskable(),
+            visibleRect = visibleRect.toRect(),
+          )
+        } else {
+          val shouldMask = isVisible && semantics.shouldMask(isImage = false, options)
+
+          // TODO: this currently does not support embedded AndroidViews, we'd have to
+          // TODO: traverse the ViewHierarchyNode here again. For now we can recommend
+          // TODO: using custom modifiers to obscure the entire node if it's sensitive
+          GenericViewHierarchyNode(
+            x = visibleRect.left,
+            y = visibleRect.top,
+            width = node.width,
+            height = node.height,
+            elevation = (parent?.elevation ?: 0f),
+            distance = distance,
+            parent = parent,
+            shouldMask = shouldMask,
+            isImportantForContentCapture = false, // will be set by children
+            isVisible = isVisible,
+            visibleRect = visibleRect.toRect(),
+          )
+        }
+      }
+    }
+  }
+
+  fun fromView(
+    view: View,
+    parent: ViewHierarchyNode?,
+    options: IchnoisCoreMaskingOptions,
+    logger: ILogger,
+  ): Boolean {
+    if (!view::class.java.name.contains("AndroidComposeView")) {
+      return false
+    }
+
+    if (parent == null) {
+      return false
+    }
+
+    try {
+      val rootNode = (view as? Owner)?.root ?: return false
+      rootNode.traverse(parent, isComposeRoot = true, options, logger)
+    } catch (e: Throwable) {
+      logger.log(
+        IchnoisCoreLevel.ERROR,
+        e,
+        """
+        Error traversing Compose tree. Most likely you're using an unsupported version of
+        androidx.compose.ui:ui. The minimum supported version is 1.5.0. If it's a newer
+        version, please open a github issue with the version you're using, so we can add
+        support for it.
+        """
+          .trimIndent(),
+      )
+      // fail fast in our own sample/UI-test apps (see IchnoisCoreReplayDebug), so regressions surface
+      // as crashes instead of silently skipping the whole Compose subtree (i.e. not masking it)
+      if (IchnoisCoreReplayDebug.failFast) {
+        throw e
+      }
+      return false
+    }
+
+    return true
+  }
+
+  private fun LayoutNode.traverse(
+    parentNode: ViewHierarchyNode,
+    isComposeRoot: Boolean,
+    options: IchnoisCoreMaskingOptions,
+    logger: ILogger,
+  ) {
+    val children = IchnoisCoreLayoutNodeHelper.getChildren(this)
+    if (children.isEmpty()) {
+      return
+    }
+
+    val childNodes = ArrayList<ViewHierarchyNode>(children.size)
+    for (index in children.indices) {
+      val child = children[index]
+      val childNode = fromComposeNode(child, parentNode, index, isComposeRoot, options, logger)
+      if (childNode != null) {
+        childNodes.add(childNode)
+        child.traverse(childNode, isComposeRoot = false, options, logger)
+      }
+    }
+    parentNode.children = childNodes
+  }
+}

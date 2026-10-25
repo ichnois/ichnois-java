@@ -1,0 +1,86 @@
+package io.ichnois.uitest.android
+
+import androidx.lifecycle.Lifecycle
+import androidx.test.core.app.launchActivity
+import io.ichnois.IchnoisCoreOptions
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.test.Test
+import leakcanary.LeakAssertions
+import leakcanary.LeakCanary
+import org.awaitility.kotlin.await
+import org.hamcrest.CoreMatchers.`is`
+import org.junit.Assume.assumeThat
+import org.junit.Before
+import shark.AndroidReferenceMatchers
+import shark.IgnoredReferenceMatcher
+import shark.ReferencePattern
+
+class ReplayTest : BaseUiTest() {
+  @Before
+  fun setup() {
+    // we can't run on GH actions emulator, because they don't allow capturing screenshots properly
+    @Suppress("KotlinConstantConditions")
+    assumeThat(BuildConfig.ENVIRONMENT != "github", `is`(true))
+    // crash on swallowed Compose masking errors (e.g. broken obfuscated internals) so regressions
+    // fail this on-device test instead of silently under-masking (see IchnoisCoreReplayDebug)
+    System.setProperty("io.ichnois.replay.compose.fail-fast", "true")
+  }
+
+  @Test
+  fun composeReplayDoesNotLeak() {
+    val sent = AtomicBoolean(false)
+
+    LeakCanary.config =
+      LeakCanary.config.copy(
+        referenceMatchers =
+          AndroidReferenceMatchers.appDefaults +
+            listOf(
+              IgnoredReferenceMatcher(
+                ReferencePattern.InstanceFieldPattern(
+                  "com.saucelabs.rdcinjector.testfairy.TestFairyEventQueue",
+                  "context",
+                )
+              ),
+              // Seems like a false-positive returned by LeakCanary when curtains is used in
+              // the host application (LeakCanary uses it itself internally). We use kind of
+              // the same approach which possibly clashes with LeakCanary's internal state.
+              // Only the case when replay is enabled.
+              // TODO: check if it's actually a leak on our side, or a false-positive and report to
+              // LeakCanary's github issue tracker
+              IgnoredReferenceMatcher(
+                ReferencePattern.InstanceFieldPattern(
+                  "curtains.internal.RootViewsSpy",
+                  "delegatingViewList",
+                )
+              ),
+            ) +
+            ('a'..'z').map { char ->
+              IgnoredReferenceMatcher(
+                ReferencePattern.StaticFieldPattern(
+                  "com.testfairy.modules.capture.TouchListener",
+                  "$char",
+                )
+              )
+            }
+      )
+
+    val activityScenario = launchActivity<ComposeActivity>()
+    activityScenario.moveToState(Lifecycle.State.RESUMED)
+
+    initIchnoisCore {
+      it.sessionReplay.sessionSampleRate = 1.0
+
+      it.beforeSendReplay = IchnoisCoreOptions.BeforeSendReplayCallback { event, _ ->
+        sent.set(true)
+        event
+      }
+    }
+
+    // wait until first segment is being sent
+    await.untilTrue(sent)
+
+    activityScenario.moveToState(Lifecycle.State.DESTROYED)
+
+    LeakAssertions.assertNoLeaks()
+  }
+}

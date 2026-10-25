@@ -1,0 +1,186 @@
+package io.ichnois.android.ndk;
+
+import io.ichnois.Attachment;
+import io.ichnois.Breadcrumb;
+import io.ichnois.DateUtils;
+import io.ichnois.IScope;
+import io.ichnois.ScopeObserverAdapter;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.SpanContext;
+import io.ichnois.ndk.INativeScope;
+import io.ichnois.ndk.NativeScope;
+import io.ichnois.protocol.User;
+import io.ichnois.util.Objects;
+import java.util.Locale;
+import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class NdkScopeObserver extends ScopeObserverAdapter {
+
+  private final @NotNull IchnoisCoreOptions options;
+  private final @NotNull INativeScope nativeScope;
+
+  public NdkScopeObserver(final @NotNull IchnoisCoreOptions options) {
+    this(options, new NativeScope());
+  }
+
+  NdkScopeObserver(final @NotNull IchnoisCoreOptions options, final @NotNull INativeScope nativeScope) {
+    this.options = Objects.requireNonNull(options, "The IchnoisCoreOptions object is required.");
+    this.nativeScope = Objects.requireNonNull(nativeScope, "The NativeScope object is required.");
+  }
+
+  @Override
+  public void setUser(final @Nullable User user) {
+    try {
+      options
+          .getExecutorService()
+          .submit(
+              () -> {
+                if (user == null) {
+                  // remove user if its null
+                  nativeScope.removeUser();
+                } else {
+                  nativeScope.setUser(
+                      user.getId(), user.getEmail(), user.getIpAddress(), user.getUsername());
+                }
+              });
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync setUser has an error.");
+    }
+  }
+
+  @Override
+  public void addBreadcrumb(final @NotNull Breadcrumb crumb) {
+    try {
+      options
+          .getExecutorService()
+          .submit(
+              () -> {
+                String level = null;
+                if (crumb.getLevel() != null) {
+                  level = crumb.getLevel().name().toLowerCase(Locale.ROOT);
+                }
+                final String timestamp = DateUtils.getTimestamp(crumb.getTimestamp());
+
+                String data = null;
+                try {
+                  final Map<String, Object> dataRef = crumb.getData();
+                  if (!dataRef.isEmpty()) {
+                    data = options.getSerializer().serialize(dataRef);
+                  }
+                } catch (Throwable e) {
+                  options
+                      .getLogger()
+                      .log(IchnoisCoreLevel.ERROR, e, "Breadcrumb data is not serializable.");
+                }
+
+                nativeScope.addBreadcrumb(
+                    level,
+                    crumb.getMessage(),
+                    crumb.getCategory(),
+                    crumb.getType(),
+                    timestamp,
+                    data);
+              });
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync addBreadcrumb has an error.");
+    }
+  }
+
+  @Override
+  public void setTag(final @NotNull String key, final @NotNull String value) {
+    try {
+      options.getExecutorService().submit(() -> nativeScope.setTag(key, value));
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync setTag(%s) has an error.", key);
+    }
+  }
+
+  @Override
+  public void removeTag(final @NotNull String key) {
+    try {
+      options.getExecutorService().submit(() -> nativeScope.removeTag(key));
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync removeTag(%s) has an error.", key);
+    }
+  }
+
+  @Override
+  public void setExtra(final @NotNull String key, final @NotNull String value) {
+    try {
+      options.getExecutorService().submit(() -> nativeScope.setExtra(key, value));
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync setExtra(%s) has an error.", key);
+    }
+  }
+
+  @Override
+  public void removeExtra(final @NotNull String key) {
+    try {
+      options.getExecutorService().submit(() -> nativeScope.removeExtra(key));
+    } catch (Throwable e) {
+      options
+          .getLogger()
+          .log(IchnoisCoreLevel.ERROR, e, "Scope sync removeExtra(%s) has an error.", key);
+    }
+  }
+
+  @Override
+  public void setTrace(@Nullable SpanContext spanContext, @NotNull IScope scope) {
+    if (spanContext == null) {
+      return;
+    }
+
+    try {
+      options
+          .getExecutorService()
+          .submit(
+              () ->
+                  nativeScope.setTrace(
+                      spanContext.getTraceId().toString(), spanContext.getSpanId().toString()));
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync setTrace failed.");
+    }
+  }
+
+  @Override
+  public void addAttachment(final @NotNull Attachment attachment) {
+    final String pathname = attachment.getPathname();
+    if (pathname != null) {
+      try {
+        options.getExecutorService().submit(() -> nativeScope.addAttachment(pathname));
+      } catch (Throwable e) {
+        options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync addAttachment has an error.");
+      }
+      return;
+    }
+
+    final byte[] bytes = attachment.getBytes();
+    if (bytes != null) {
+      final String filename = attachment.getFilename();
+      try {
+        options.getExecutorService().submit(() -> nativeScope.addAttachmentBytes(bytes, filename));
+      } catch (Throwable e) {
+        options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync addAttachment has an error.");
+      }
+      return;
+    }
+
+    options
+        .getLogger()
+        .log(IchnoisCoreLevel.DEBUG, "Scope sync addAttachment skips attachment without path or bytes.");
+  }
+
+  @Override
+  public void clearAttachments() {
+    try {
+      options.getExecutorService().submit(() -> nativeScope.clearAttachments());
+    } catch (Throwable e) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, e, "Scope sync clearAttachments has an error.");
+    }
+  }
+}

@@ -1,0 +1,166 @@
+package io.ichnois.android.replay.gestures
+
+import android.R
+import android.app.Activity
+import android.os.Bundle
+import android.view.MotionEvent
+import android.view.View
+import android.view.Window
+import android.widget.LinearLayout
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.android.core.internal.gestures.NoOpWindowCallback
+import io.ichnois.android.replay.gestures.GestureRecorder.IchnoisCoreReplayGestureRecorder
+import io.ichnois.android.replay.phoneWindow
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.annotation.Config
+
+@RunWith(AndroidJUnit4::class)
+@Config(sdk = [30])
+class GestureRecorderTest {
+  internal class Fixture {
+    val options = IchnoisCoreOptions()
+
+    fun getSut(
+      touchRecorderCallback: TouchRecorderCallback = NoOpTouchRecorderCallback()
+    ): GestureRecorder = GestureRecorder(options, touchRecorderCallback)
+  }
+
+  private val fixture = Fixture()
+
+  private class NoOpTouchRecorderCallback : TouchRecorderCallback {
+    override fun onTouchEvent(event: MotionEvent) = Unit
+  }
+
+  @Test
+  fun `does not double-wrap when root is added twice and another callback wraps on top`() {
+    val activity = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val gestureRecorder = fixture.getSut()
+
+    gestureRecorder.onRootViewsChanged(activity.root, true)
+    val ourWrapper = activity.root.phoneWindow?.callback as IchnoisCoreReplayGestureRecorder
+
+    val outer = WrapperCallback(ourWrapper)
+    activity.root.phoneWindow?.callback = outer
+
+    gestureRecorder.onRootViewsChanged(activity.root, true)
+
+    assertSame(outer, activity.root.phoneWindow?.callback)
+  }
+
+  @Test
+  fun `when stopped with another wrapper on top, inerts the buried recorder`() {
+    var called = false
+    val activity = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val gestureRecorder =
+      fixture.getSut(
+        touchRecorderCallback =
+          object : TouchRecorderCallback {
+            override fun onTouchEvent(event: MotionEvent) {
+              called = true
+            }
+          }
+      )
+
+    gestureRecorder.onRootViewsChanged(activity.root, true)
+    val ourWrapper = activity.root.phoneWindow?.callback as IchnoisCoreReplayGestureRecorder
+    activity.root.phoneWindow?.callback = WrapperCallback(ourWrapper)
+
+    gestureRecorder.onRootViewsChanged(activity.root, false)
+
+    val motionEvent = MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, 0f, 0f, 0)
+    ourWrapper.dispatchTouchEvent(motionEvent)
+    assertFalse(called)
+  }
+
+  @Test
+  fun `when new window added tracks touch events`() {
+    var called = false
+    val activity = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val motionEvent = MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, 0f, 0f, 0)
+    val gestureRecorder =
+      fixture.getSut(
+        touchRecorderCallback =
+          object : TouchRecorderCallback {
+            override fun onTouchEvent(event: MotionEvent) {
+              assertEquals(MotionEvent.ACTION_DOWN, event.action)
+              called = true
+            }
+          }
+      )
+
+    gestureRecorder.onRootViewsChanged(activity.root, true)
+
+    activity.root.phoneWindow?.callback?.dispatchTouchEvent(motionEvent)
+    assertTrue(called)
+  }
+
+  @Test
+  fun `when window removed and window is not ichnois recorder does nothing`() {
+    val activity = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val gestureRecorder = fixture.getSut()
+
+    activity.root.phoneWindow?.callback = NoOpWindowCallback()
+    gestureRecorder.onRootViewsChanged(activity.root, false)
+
+    assertTrue(activity.root.phoneWindow?.callback is NoOpWindowCallback)
+  }
+
+  @Test
+  fun `when window removed stops tracking touch events`() {
+    val activity = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val gestureRecorder = fixture.getSut()
+
+    gestureRecorder.onRootViewsChanged(activity.root, true)
+    gestureRecorder.onRootViewsChanged(activity.root, false)
+
+    assertFalse(activity.root.phoneWindow?.callback is IchnoisCoreReplayGestureRecorder)
+  }
+
+  @Test
+  fun `when stopped stops tracking all windows`() {
+    val activity1 = Robolectric.buildActivity(TestActivity::class.java).setup().get()
+    val activity2 = Robolectric.buildActivity(TestActivity2::class.java).setup().get()
+    val gestureRecorder = fixture.getSut()
+
+    gestureRecorder.onRootViewsChanged(activity1.root, true)
+    gestureRecorder.onRootViewsChanged(activity2.root, true)
+    gestureRecorder.stop()
+
+    assertFalse(activity1.root.phoneWindow?.callback is IchnoisCoreReplayGestureRecorder)
+    assertFalse(activity2.root.phoneWindow?.callback is IchnoisCoreReplayGestureRecorder)
+  }
+}
+
+private open class WrapperCallback(@JvmField val delegate: Window.Callback) :
+  Window.Callback by delegate
+
+private class TestActivity : Activity() {
+  lateinit var root: View
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    setTheme(R.style.Theme_Holo_Light)
+    root = LinearLayout(this)
+    setContentView(root)
+    actionBar!!.setIcon(R.drawable.ic_lock_power_off)
+  }
+}
+
+private class TestActivity2 : Activity() {
+  lateinit var root: View
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    setTheme(R.style.Theme_Holo_Light)
+    root = LinearLayout(this)
+    setContentView(root)
+    actionBar!!.setIcon(R.drawable.ic_lock_power_off)
+  }
+}

@@ -1,0 +1,1291 @@
+package io.ichnois.android.core
+
+import android.content.ContentProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.Hint
+import io.ichnois.IScopes
+import io.ichnois.ISpan
+import io.ichnois.ITransaction
+import io.ichnois.MeasurementUnit
+import io.ichnois.IchnoisCoreLongDate
+import io.ichnois.IchnoisCoreTracer
+import io.ichnois.SpanContext
+import io.ichnois.SpanDataConvention
+import io.ichnois.SpanId
+import io.ichnois.SpanStatus
+import io.ichnois.TracesSamplingDecision
+import io.ichnois.TransactionContext
+import io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_COLD
+import io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_EXTENDED_OP
+import io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_SCREEN_DATA
+import io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_TYPE_DATA
+import io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_WARM
+import io.ichnois.android.core.ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+import io.ichnois.android.core.ActivityLifecycleIntegration.UI_LOAD_OP
+import io.ichnois.android.core.performance.ActivityLifecycleTimeSpan
+import io.ichnois.android.core.performance.AppStartMetrics
+import io.ichnois.android.core.performance.AppStartMetrics.AppStartType
+import io.ichnois.protocol.MeasurementValue
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.IchnoisCoreSpan
+import io.ichnois.protocol.IchnoisCoreTransaction
+import java.util.concurrent.TimeUnit
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.junit.runner.RunWith
+import org.mockito.kotlin.any
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
+
+@RunWith(AndroidJUnit4::class)
+class PerformanceAndroidEventProcessorTest {
+  private class Fixture {
+    val options = IchnoisCoreAndroidOptions()
+
+    val scopes = mock<IScopes>()
+    val context = TransactionContext("name", "op", TracesSamplingDecision(true))
+    lateinit var tracer: IchnoisCoreTracer
+    val activityFramesTracker = mock<ActivityFramesTracker>()
+
+    fun getSut(
+      tracesSampleRate: Double? = 1.0,
+      enablePerformanceV2: Boolean = false,
+    ): PerformanceAndroidEventProcessor {
+      AppStartMetrics.getInstance().isAppLaunchedInForeground = true
+      options.tracesSampleRate = tracesSampleRate
+      options.isEnablePerformanceV2 = enablePerformanceV2
+      whenever(scopes.options).thenReturn(options)
+      tracer = IchnoisCoreTracer(context, scopes)
+      return PerformanceAndroidEventProcessor(options, activityFramesTracker)
+    }
+  }
+
+  private val fixture = Fixture()
+
+  private fun createAppStartSpan(traceId: IchnoisCoreId, coldStart: Boolean = true) =
+    IchnoisCoreSpan(
+        0.0,
+        1.0,
+        traceId,
+        SpanId(),
+        null,
+        if (coldStart) APP_START_COLD else APP_START_WARM,
+        "App Start",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+      .also {
+        AppStartMetrics.getInstance().onActivityCreated(mock(), if (coldStart) null else mock())
+      }
+
+  @BeforeTest
+  fun `reset instance`() {
+    AppStartMetrics.getInstance().clear()
+  }
+
+  @Test
+  fun `add cold start measurement`() {
+    val sut = fixture.getSut()
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    setAppStart(fixture.options)
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+  }
+
+  @Test
+  fun `add cold start measurement for standalone app start transaction launched from background`() {
+    val sut = fixture.getSut()
+
+    var tr = createStandaloneAppStartTransaction()
+    setStandaloneColdAppStartMetrics()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+  }
+
+  @Test
+  fun `standalone app start with instrumented application onCreate attaches process and application spans`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    setStandaloneColdAppStartMetrics(withApplicationOnCreate = true)
+
+    var tr = createStandaloneAppStartTransaction()
+    val rootSpanId = tr.contexts.trace!!.spanId
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+    assertEquals(listOf("process.load", "application.load"), tr.spans.map { it.op })
+    assertTrue(tr.spans.all { it.parentSpanId == rootSpanId })
+  }
+
+  @Test
+  fun `standalone app start without instrumented application onCreate attaches only process span`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    setStandaloneColdAppStartMetrics(withApplicationOnCreate = false)
+
+    var tr = createStandaloneAppStartTransaction()
+    val rootSpanId = tr.contexts.trace!!.spanId
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+    assertEquals(listOf("process.load"), tr.spans.map { it.op })
+    assertEquals(rootSpanId, tr.spans.single().parentSpanId)
+  }
+
+  @Test
+  fun `standalone app start uses the transaction root span id as parent`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    setStandaloneColdAppStartMetrics()
+
+    var tr = createStandaloneAppStartTransaction()
+    val rootSpanId = tr.contexts.trace!!.spanId
+
+    tr = sut.process(tr, Hint())
+
+    val processLoadSpan = tr.spans.first { it.op == "process.load" }
+    assertEquals(rootSpanId, processLoadSpan.parentSpanId)
+  }
+
+  @Test
+  fun `standalone app start spans do not carry TTID or TTFD contributing flags`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    setStandaloneColdAppStartMetrics(withApplicationOnCreate = true)
+
+    var tr = createStandaloneAppStartTransaction()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.spans.isNotEmpty())
+    for (span in tr.spans) {
+      assertNull(span.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+      assertNull(span.data?.get(SpanDataConvention.CONTRIBUTES_TTFD))
+    }
+  }
+
+  @Test
+  fun `foreground standalone app start sets screen and type on root and breakdown children`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.COLD
+      isAppLaunchedInForeground = true
+      classLoadedUptimeMs = 50
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(100)
+      }
+      applicationOnCreateTimeSpan.apply {
+        setStartedAt(10)
+        description = "com.example.App.onCreate"
+        setStoppedAt(42)
+      }
+    }
+
+    var tr = createStandaloneAppStartTransaction(appStartScreen = "Activity")
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.contexts.trace!!.data[APP_START_SCREEN_DATA]).isEqualTo("Activity")
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isEqualTo("cold")
+    assertThat(tr.spans).isNotEmpty()
+    for (span in tr.spans) {
+      assertThat(span.data?.get(APP_START_SCREEN_DATA)).isEqualTo("Activity")
+      assertThat(span.data?.get(APP_START_TYPE_DATA)).isEqualTo("cold")
+    }
+  }
+
+  @Test
+  fun `cold standalone app start reports the same type on measurement, contexts and spans`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.COLD
+      isAppLaunchedInForeground = true
+      classLoadedUptimeMs = 50
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(100)
+      }
+      applicationOnCreateTimeSpan.apply {
+        setStartedAt(10)
+        description = "com.example.App.onCreate"
+        setStoppedAt(42)
+      }
+    }
+
+    var tr = createStandaloneAppStartTransaction(appStartScreen = "Activity")
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.measurements).containsKey(MeasurementValue.KEY_APP_START_COLD)
+    assertThat(tr.measurements).doesNotContainKey(MeasurementValue.KEY_APP_START_WARM)
+    assertThat(tr.contexts.app!!.startType).isEqualTo("cold")
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isEqualTo("cold")
+    // cold starts attach the process init / Application.onCreate breakdown children
+    assertThat(tr.spans).isNotEmpty()
+    for (span in tr.spans) {
+      assertThat(span.data?.get(APP_START_TYPE_DATA)).isEqualTo("cold")
+    }
+  }
+
+  @Test
+  fun `warm standalone app start reports the same type on measurement, contexts and spans`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.WARM
+      isAppLaunchedInForeground = true
+      classLoadedUptimeMs = 50
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(100)
+      }
+    }
+
+    var tr = createStandaloneAppStartTransaction(appStartScreen = "Activity")
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.measurements).containsKey(MeasurementValue.KEY_APP_START_WARM)
+    assertThat(tr.measurements).doesNotContainKey(MeasurementValue.KEY_APP_START_COLD)
+    assertThat(tr.contexts.app!!.startType).isEqualTo("warm")
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isEqualTo("warm")
+    for (span in tr.spans) {
+      assertThat(span.data?.get(APP_START_TYPE_DATA)).isEqualTo("warm")
+    }
+  }
+
+  @Test
+  fun `standalone app start sets screen and type on user spans under the extended span`() {
+    val sut = fixture.getSut()
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.COLD
+      isAppLaunchedInForeground = true
+    }
+
+    var tr = createStandaloneAppStartTransaction(appStartScreen = "Activity")
+    val traceId = tr.contexts.trace!!.traceId
+    val extendedSpanId = SpanId()
+    val childSpanId = SpanId()
+    tr.spans.add(
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        traceId,
+        extendedSpanId,
+        tr.contexts.trace!!.spanId,
+        APP_START_EXTENDED_OP,
+        APP_START_EXTENDED_OP,
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+    )
+    tr.spans.add(
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        traceId,
+        childSpanId,
+        extendedSpanId,
+        "user.work",
+        "user.work",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+    )
+    tr.spans.add(
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        traceId,
+        SpanId(),
+        childSpanId,
+        "user.work.child",
+        "user.work.child",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+    )
+
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.contexts.trace!!.data[APP_START_SCREEN_DATA]).isEqualTo("Activity")
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isEqualTo("cold")
+    assertThat(tr.spans).hasSize(3)
+    assertThat(tr.spans.map { it.data?.get(APP_START_SCREEN_DATA) })
+      .containsExactly("Activity", "Activity", "Activity")
+    assertThat(tr.spans.map { it.data?.get(APP_START_TYPE_DATA) })
+      .containsExactly("cold", "cold", "cold")
+  }
+
+  @Test
+  fun `headless standalone app start sets type but not screen on children`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    setStandaloneColdAppStartMetrics(withApplicationOnCreate = true)
+
+    var tr = createStandaloneAppStartTransaction()
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.contexts.trace!!.data[APP_START_SCREEN_DATA]).isNull()
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isEqualTo("cold")
+    assertThat(tr.spans).isNotEmpty()
+    for (span in tr.spans) {
+      assertThat(span.data?.get(APP_START_SCREEN_DATA)).isNull()
+      assertThat(span.data?.get(APP_START_TYPE_DATA)).isEqualTo("cold")
+    }
+  }
+
+  @Test
+  fun `ui load attached app start child does not get standalone vitals attributes`() {
+    setAppStart(fixture.options, coldStart = true)
+
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    tr = sut.process(tr, Hint())
+
+    assertThat(tr.contexts.trace!!.data[APP_START_SCREEN_DATA]).isNull()
+    assertThat(tr.contexts.trace!!.data[APP_START_TYPE_DATA]).isNull()
+    val appStartSpan = tr.spans.single { it.op == APP_START_COLD }
+    assertThat(appStartSpan.data?.get(APP_START_SCREEN_DATA)).isNull()
+    assertThat(appStartSpan.data?.get(APP_START_TYPE_DATA)).isNull()
+  }
+
+  @Test
+  fun `foreground standalone app start measurement uses foreground fallback time span`() {
+    val sut = fixture.getSut(enablePerformanceV2 = false)
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.COLD
+      isAppLaunchedInForeground = true
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(101)
+      }
+      sdkInitTimeSpan.apply {
+        setStartedAt(10)
+        setStoppedAt(30)
+      }
+    }
+
+    var tr = createStandaloneAppStartTransaction(appStartScreen = "MainActivity")
+
+    tr = sut.process(tr, Hint())
+
+    assertEquals(20f, tr.measurements[MeasurementValue.KEY_APP_START_COLD]?.value)
+  }
+
+  private fun extendAppStartFinishedWith(status: SpanStatus, endMs: Long) {
+    val span = mock<ISpan>()
+    whenever(span.isFinished).thenReturn(true)
+    whenever(span.status).thenReturn(status)
+    whenever(span.finishDate).thenReturn(IchnoisCoreLongDate(endMs * 1_000_000L))
+    val ext = AppStartMetrics.getInstance().appStartExtension
+    ext.setExtendAppStartListener { AppStartExtension.ExtendedAppStart(mock<ITransaction>(), span) }
+    ext.extendAppStart()
+  }
+
+  @Test
+  fun `extended app start uses the extended end for the cold start measurement`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val metrics = AppStartMetrics.getInstance()
+    metrics.appStartType = AppStartType.COLD
+    metrics.isAppLaunchedInForeground = true
+    metrics.appStartTimeSpan.apply {
+      setStartedAt(1)
+      setStoppedAt(100)
+    }
+    val startMs = metrics.appStartTimeSpan.startTimestampMs
+    extendAppStartFinishedWith(SpanStatus.OK, startMs + 500)
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    tr = sut.process(tr, Hint())
+
+    assertEquals(500f, tr.measurements[MeasurementValue.KEY_APP_START_COLD]?.value)
+  }
+
+  @Test
+  fun `extended app start never reports shorter than the natural first frame duration`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val metrics = AppStartMetrics.getInstance()
+    metrics.appStartType = AppStartType.COLD
+    metrics.isAppLaunchedInForeground = true
+    metrics.appStartTimeSpan.apply {
+      setStartedAt(1)
+      setStoppedAt(1000)
+    }
+    val startMs = metrics.appStartTimeSpan.startTimestampMs
+    extendAppStartFinishedWith(SpanStatus.OK, startMs + 100)
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    tr = sut.process(tr, Hint())
+
+    assertEquals(999f, tr.measurements[MeasurementValue.KEY_APP_START_COLD]?.value)
+  }
+
+  @Test
+  fun `extended app start that hit the deadline suppresses the measurement`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val metrics = AppStartMetrics.getInstance()
+    metrics.appStartType = AppStartType.COLD
+    metrics.isAppLaunchedInForeground = true
+    metrics.appStartTimeSpan.apply {
+      setStartedAt(1)
+      setStoppedAt(100)
+    }
+    val startMs = metrics.appStartTimeSpan.startTimestampMs
+    extendAppStartFinishedWith(SpanStatus.DEADLINE_EXCEEDED, startMs + 30_000)
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    tr = sut.process(tr, Hint())
+
+    assertFalse(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+    assertFalse(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_WARM))
+  }
+
+  @Test
+  fun `add cold start measurement for performance-v2`() {
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    setAppStart(fixture.options)
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+  }
+
+  @Test
+  fun `add warm start measurement`() {
+    val sut = fixture.getSut()
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan(coldStart = false)
+    setAppStart(fixture.options, false)
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_APP_START_WARM))
+  }
+
+  @Test
+  fun `set app cold start unit measurement`() {
+    val sut = fixture.getSut()
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+    setAppStart(fixture.options)
+
+    tr = sut.process(tr, Hint())
+
+    val measurement = tr.measurements[MeasurementValue.KEY_APP_START_COLD]
+    assertEquals("millisecond", measurement?.unit)
+  }
+
+  @Test
+  fun `do not add app start metric twice`() {
+    val sut = fixture.getSut()
+
+    var tr1 = createUiLoadTransactionWithAppStartChildSpan()
+    setAppStart(fixture.options, false)
+
+    tr1 = sut.process(tr1, Hint())
+
+    var tr2 = createUiLoadTransaction()
+    tr2 = sut.process(tr2, Hint())
+
+    assertTrue(tr1.measurements.containsKey(MeasurementValue.KEY_APP_START_WARM))
+    assertTrue(tr2.measurements.isEmpty())
+  }
+
+  @Test
+  fun `do not add standalone app start metric twice`() {
+    val sut = fixture.getSut()
+
+    setStandaloneColdAppStartMetrics()
+
+    var tr1 = createStandaloneAppStartTransaction()
+    tr1 = sut.process(tr1, Hint())
+
+    var tr2 = createStandaloneAppStartTransaction()
+    tr2 = sut.process(tr2, Hint())
+
+    assertTrue(tr1.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+    assertFalse(tr2.measurements.containsKey(MeasurementValue.KEY_APP_START_COLD))
+    assertFalse(tr2.measurements.containsKey(MeasurementValue.KEY_APP_START_WARM))
+  }
+
+  @Test
+  fun `do not add app start metric if its not ready`() {
+    val sut = fixture.getSut()
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.isEmpty())
+  }
+
+  @Test
+  fun `do not add app start metric if performance is disabled`() {
+    val sut = fixture.getSut(tracesSampleRate = null)
+
+    var tr = createUiLoadTransactionWithAppStartChildSpan()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.isEmpty())
+  }
+
+  @Test
+  fun `do not add app start metric if no app_start span`() {
+    val sut = fixture.getSut(tracesSampleRate = null)
+
+    var tr = createUiLoadTransaction()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.isEmpty())
+  }
+
+  @Test
+  fun `do not add slow and frozen frames if not auto transaction`() {
+    val sut = fixture.getSut()
+    var tr = createTransaction("custom.op")
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.isEmpty())
+  }
+
+  @Test
+  fun `do not add slow and frozen frames if tracing is disabled`() {
+    val sut = fixture.getSut(null)
+    var tr = createUiLoadTransaction()
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.isEmpty())
+  }
+
+  @Test
+  fun `add slow and frozen frames if auto transaction`() {
+    val sut = fixture.getSut()
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    val metrics =
+      mapOf(
+        MeasurementValue.KEY_FRAMES_TOTAL to
+          MeasurementValue(1f, MeasurementUnit.Duration.MILLISECOND.apiName())
+      )
+    whenever(fixture.activityFramesTracker.takeMetrics(any())).thenReturn(metrics)
+
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.measurements.containsKey(MeasurementValue.KEY_FRAMES_TOTAL))
+  }
+
+  @Test
+  fun `adds app start metrics to app start txn`() {
+    // given some app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.isAppLaunchedInForeground = true
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(456)
+
+    val contentProvider = mock<ContentProvider>()
+    AppStartMetrics.onContentProviderCreate(contentProvider)
+    AppStartMetrics.onContentProviderPostCreate(contentProvider)
+
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+
+    val activityTimeSpan = ActivityLifecycleTimeSpan()
+    activityTimeSpan.onCreate.description = "MainActivity.onCreate"
+    activityTimeSpan.onStart.description = "MainActivity.onStart"
+
+    activityTimeSpan.onCreate.setStartedAt(200)
+    activityTimeSpan.onStart.setStartedAt(220)
+    activityTimeSpan.onStart.setStoppedAt(240)
+    activityTimeSpan.onCreate.setStoppedAt(260)
+    appStartMetrics.addActivityLifecycleTimeSpans(activityTimeSpan)
+
+    // when an activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // and it contains an app.start.cold span
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // then the app start metrics should be attached
+    tr = sut.process(tr, Hint())
+
+    assertTrue(tr.spans.any { "process.load" == it.op && appStartSpan.spanId == it.parentSpanId })
+
+    assertTrue(
+      tr.spans.any { "contentprovider.load" == it.op && appStartSpan.spanId == it.parentSpanId }
+    )
+
+    assertTrue(tr.spans.any { "application.load" == it.op })
+  }
+
+  @Test
+  fun `does not add app start metrics to app warm start txn`() {
+    // given some app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.WARM
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(456)
+
+    val contentProvider = mock<ContentProvider>()
+    AppStartMetrics.onContentProviderCreate(contentProvider)
+    AppStartMetrics.onContentProviderPostCreate(contentProvider)
+
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+
+    val activityTimeSpan = ActivityLifecycleTimeSpan()
+    activityTimeSpan.onCreate.description = "MainActivity.onCreate"
+    activityTimeSpan.onStart.description = "MainActivity.onStart"
+
+    activityTimeSpan.onCreate.setStartedAt(200)
+    activityTimeSpan.onStart.setStartedAt(220)
+    activityTimeSpan.onStart.setStoppedAt(240)
+    activityTimeSpan.onCreate.setStoppedAt(260)
+    appStartMetrics.addActivityLifecycleTimeSpans(activityTimeSpan)
+
+    // when an activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // and it contains an app.start.warm span
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId, false)
+    tr.spans.add(appStartSpan)
+
+    // then the app start metrics should be attached
+    tr = sut.process(tr, Hint())
+
+    // process init, content provider and application span should not be attached
+    assertFalse(tr.spans.any { "process.load" == it.op })
+    assertFalse(tr.spans.any { "contentprovider.load" == it.op })
+    assertFalse(tr.spans.any { "application.load" == it.op })
+  }
+
+  @Test
+  fun `when app launched from background, app start spans are dropped`() {
+    // given some app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(456)
+
+    val contentProvider = mock<ContentProvider>()
+    AppStartMetrics.onContentProviderCreate(contentProvider)
+    AppStartMetrics.onContentProviderPostCreate(contentProvider)
+
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+
+    val activityTimeSpan = ActivityLifecycleTimeSpan()
+    activityTimeSpan.onCreate.description = "MainActivity.onCreate"
+    activityTimeSpan.onStart.description = "MainActivity.onStart"
+
+    activityTimeSpan.onCreate.setStartedAt(200)
+    activityTimeSpan.onStart.setStartedAt(220)
+    activityTimeSpan.onStart.setStoppedAt(240)
+    activityTimeSpan.onCreate.setStoppedAt(260)
+    appStartMetrics.addActivityLifecycleTimeSpans(activityTimeSpan)
+
+    // when an activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // and it contains an app.start.cold span
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // but app is launched in background
+    AppStartMetrics.getInstance().isAppLaunchedInForeground = false
+
+    // then the app start metrics are not attached
+    tr = sut.process(tr, Hint())
+
+    assertFalse(
+      tr.spans.any {
+        "process.load" == it.op ||
+          "contentprovider.load" == it.op ||
+          "application.load" == it.op ||
+          "activity.load" == it.op
+      }
+    )
+  }
+
+  @Test
+  fun `when app start takes more than 1 minute, app start spans are dropped`() {
+    // given some app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    // and app start takes more than 1 minute
+    appStartMetrics.appStartTimeSpan.setStoppedAt(TimeUnit.MINUTES.toMillis(1) + 124)
+
+    val contentProvider = mock<ContentProvider>()
+    AppStartMetrics.onContentProviderCreate(contentProvider)
+    AppStartMetrics.onContentProviderPostCreate(contentProvider)
+
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+
+    val activityTimeSpan = ActivityLifecycleTimeSpan()
+    activityTimeSpan.onCreate.description = "MainActivity.onCreate"
+    activityTimeSpan.onStart.description = "MainActivity.onStart"
+
+    activityTimeSpan.onCreate.setStartedAt(200)
+    activityTimeSpan.onStart.setStartedAt(220)
+    activityTimeSpan.onStart.setStoppedAt(240)
+    activityTimeSpan.onCreate.setStoppedAt(260)
+    appStartMetrics.addActivityLifecycleTimeSpans(activityTimeSpan)
+
+    // when an activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // and it contains an app.start.cold span
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // then the app start metrics are not attached
+    tr = sut.process(tr, Hint())
+
+    assertFalse(
+      tr.spans.any {
+        "process.load" == it.op ||
+          "contentprovider.load" == it.op ||
+          "application.load" == it.op ||
+          "activity.load" == it.op
+      }
+    )
+  }
+
+  @Test
+  fun `does not add app start metrics to app start txn when it is not a cold start`() {
+    // given some WARM app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.WARM
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(456)
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+    // when an activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // then the app start metrics should not be attached
+    tr = sut.process(tr, Hint())
+
+    assertFalse(tr.spans.any { "application.load" == it.op })
+  }
+
+  @Test
+  fun `does not add app start metrics more than once`() {
+    // given some cold app start metrics
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(123)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(456)
+
+    appStartMetrics.applicationOnCreateTimeSpan.apply {
+      setStartedAt(10)
+      setStoppedAt(42)
+    }
+
+    // when the first activity transaction is created
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    assertTrue(appStartMetrics.shouldSendStartMeasurements(false))
+    // then the app start metrics should be attached
+    tr = sut.process(tr, Hint())
+    assertFalse(appStartMetrics.shouldSendStartMeasurements(false))
+
+    assertTrue(tr.spans.any { "application.load" == it.op })
+
+    // but not on the second activity transaction
+    var tr2 = IchnoisCoreTransaction(tracer)
+    tr2.spans.add(appStartSpan)
+    tr2 = sut.process(tr2, Hint())
+    assertFalse(tr2.spans.any { "application.load" == it.op })
+  }
+
+  @Test
+  fun `does not add process init span if it happened too early`() {
+    // given some cold app start metrics
+    // where class loaded happened way before app start
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(11001)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(12000)
+    appStartMetrics.classLoadedUptimeMs = 1000
+
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // when the processor attaches the app start spans
+    tr = sut.process(tr, Hint())
+
+    // process load should not be included
+    assertFalse(tr.spans.any { "process.load" == it.op })
+  }
+
+  @Test
+  fun `adds main thread name and id to app start spans`() {
+    // given some cold app start metrics
+    // where class loaded happened way before app start
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.COLD
+    appStartMetrics.appStartTimeSpan.setStartedAt(1)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(3000)
+
+    AppStartMetrics.getInstance().applicationOnCreateTimeSpan.apply {
+      setStartedAt(1000)
+      description = "com.example.App.onCreate"
+      setStoppedAt(2000)
+    }
+
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // when the processor attaches the app start spans
+    tr = sut.process(tr, Hint())
+
+    // thread name and id should be set
+    assertTrue {
+      tr.spans.any {
+        it.op == "process.load" &&
+          it.data!!["thread.name"] == "main" &&
+          it.data!!.containsKey("thread.id")
+      }
+    }
+
+    assertTrue {
+      tr.spans.any {
+        it.op == "application.load" &&
+          it.data!!["thread.name"] == "main" &&
+          it.data!!.containsKey("thread.id")
+      }
+    }
+  }
+
+  @Test
+  fun `does not set start_type field for txns without app start span`() {
+    // given some ui.load txn
+    setAppStart(fixture.options, coldStart = true)
+
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    // when it contains no app start span and is processed
+    tr = sut.process(tr, Hint())
+
+    // start_type should not be set
+    assertNull(tr.contexts.app?.startType)
+  }
+
+  @Test
+  fun `sets start_type field for app context`() {
+    // given some cold app start
+    setAppStart(fixture.options, coldStart = true)
+
+    val sut = fixture.getSut(enablePerformanceV2 = true)
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    var tr = IchnoisCoreTransaction(tracer)
+
+    val appStartSpan = createAppStartSpan(tr.contexts.trace!!.traceId)
+    tr.spans.add(appStartSpan)
+
+    // when the processor attaches the app start spans
+    tr = sut.process(tr, Hint())
+
+    // start_type should be set as well
+    assertEquals("cold", tr.contexts.app!!.startType)
+  }
+
+  @Test
+  fun `adds ttid and ttfd contributing span data`() {
+    val sut = fixture.getSut()
+
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    val tr = IchnoisCoreTransaction(tracer)
+
+    // given a ttid from 0.0 -> 1.0
+    //   and a ttfd from 0.0 -> 2.0
+    val ttid =
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        ActivityLifecycleIntegration.TTID_OP,
+        "App Start",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    val ttfd =
+      IchnoisCoreSpan(
+        0.0,
+        2.0,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        ActivityLifecycleIntegration.TTFD_OP,
+        "App Start",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+    tr.spans.add(ttid)
+    tr.spans.add(ttfd)
+
+    // and 3 spans
+    // one from 0.0 -> 0.5
+    val ttidContrib =
+      IchnoisCoreSpan(
+        0.0,
+        0.5,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    // and another from 1.5 -> 3.5
+    val ttfdContrib =
+      IchnoisCoreSpan(
+        1.5,
+        3.5,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    // and another from 2.1 -> 2.2
+    val outsideSpan =
+      IchnoisCoreSpan(
+        2.1,
+        2.2,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        mutableMapOf<String, Any>("tag" to "value"),
+      )
+
+    tr.spans.add(ttidContrib)
+    tr.spans.add(ttfdContrib)
+
+    // when the processor processes the txn
+    sut.process(tr, Hint())
+
+    // then the ttid/ttfd spans themselves should have no flags set
+    assertNull(ttid.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertNull(ttid.data?.get(SpanDataConvention.CONTRIBUTES_TTFD))
+
+    assertNull(ttfd.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertNull(ttfd.data?.get(SpanDataConvention.CONTRIBUTES_TTFD))
+
+    // then the first span should have ttid and ttfd contributing flags
+    assertTrue(ttidContrib.data?.get(SpanDataConvention.CONTRIBUTES_TTID) == true)
+    assertTrue(ttidContrib.data?.get(SpanDataConvention.CONTRIBUTES_TTFD) == true)
+
+    // and the second one should contribute to ttfd only
+    assertNull(ttfdContrib.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertTrue(ttfdContrib.data?.get(SpanDataConvention.CONTRIBUTES_TTFD) == true)
+
+    // and the third span should have no flags attached, as it's outside ttid/ttfd
+    assertNull(outsideSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertNull(outsideSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTFD))
+  }
+
+  @Test
+  fun `adds no ttid and ttfd contributing span data if txn contains no ttid or ttfd`() {
+    val sut = fixture.getSut()
+
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    val tr = IchnoisCoreTransaction(tracer)
+
+    val span =
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    tr.spans.add(span)
+
+    // when the processor processes the txn
+    sut.process(tr, Hint())
+
+    // the span should have no flags attached
+    assertNull(span.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertNull(span.data?.get(SpanDataConvention.CONTRIBUTES_TTFD))
+  }
+
+  @Test
+  fun `sets ttid and ttfd contributing flags according to span threads`() {
+    val sut = fixture.getSut()
+
+    val context = TransactionContext("Activity", UI_LOAD_OP)
+    val tracer = IchnoisCoreTracer(context, fixture.scopes)
+    val tr = IchnoisCoreTransaction(tracer)
+
+    // given a ttid from 0.0 -> 1.0
+    //   and a ttfd from 0.0 -> 1.0
+    val ttid =
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        ActivityLifecycleIntegration.TTID_OP,
+        "App Start",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    val ttfd =
+      IchnoisCoreSpan(
+        0.0,
+        1.0,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        ActivityLifecycleIntegration.TTFD_OP,
+        "App Start",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+    tr.spans.add(ttid)
+    tr.spans.add(ttfd)
+
+    // one span with no thread info
+    val noThreadSpan =
+      IchnoisCoreSpan(
+        0.0,
+        0.5,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        null,
+      )
+
+    // one span on the main thread
+    val mainThreadSpan =
+      IchnoisCoreSpan(
+        0.0,
+        0.5,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        mutableMapOf<String, Any>("thread.name" to "main"),
+      )
+
+    // and another one off the main thread
+    val backgroundThreadSpan =
+      IchnoisCoreSpan(
+        0.0,
+        0.5,
+        tr.contexts.trace!!.traceId,
+        SpanId(),
+        null,
+        "example.op",
+        "",
+        SpanStatus.OK,
+        null,
+        emptyMap(),
+        emptyMap(),
+        mutableMapOf<String, Any>("thread.name" to "background"),
+      )
+
+    tr.spans.add(noThreadSpan)
+    tr.spans.add(mainThreadSpan)
+    tr.spans.add(backgroundThreadSpan)
+
+    // when the processor processes the txn
+    sut.process(tr, Hint())
+
+    // then the span with no thread info + main thread span should contribute to ttid and ttfd
+    assertTrue(noThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTID) == true)
+    assertTrue(noThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTFD) == true)
+
+    assertTrue(mainThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTID) == true)
+    assertTrue(mainThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTFD) == true)
+
+    // and the background thread span only contributes to ttfd
+    assertNull(backgroundThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTID))
+    assertTrue(backgroundThreadSpan.data?.get(SpanDataConvention.CONTRIBUTES_TTFD) == true)
+  }
+
+  private fun setAppStart(options: IchnoisCoreAndroidOptions, coldStart: Boolean = true) {
+    AppStartMetrics.getInstance().apply {
+      appStartType =
+        when (coldStart) {
+          true -> AppStartType.COLD
+          false -> AppStartType.WARM
+        }
+      val timeSpan = if (options.isEnablePerformanceV2) appStartTimeSpan else sdkInitTimeSpan
+      timeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(2)
+      }
+    }
+  }
+
+  private fun setStandaloneColdAppStartMetrics(withApplicationOnCreate: Boolean = false) {
+    AppStartMetrics.getInstance().apply {
+      appStartType = AppStartType.COLD
+      isAppLaunchedInForeground = false
+      classLoadedUptimeMs = 50
+      appStartTimeSpan.apply {
+        setStartedAt(1)
+        setStoppedAt(100)
+      }
+      if (withApplicationOnCreate) {
+        applicationOnCreateTimeSpan.apply {
+          setStartedAt(10)
+          description = "com.example.App.onCreate"
+          setStoppedAt(42)
+        }
+      }
+    }
+  }
+
+  private fun createUiLoadTransactionWithAppStartChildSpan(
+    coldStart: Boolean = true
+  ): IchnoisCoreTransaction =
+    createUiLoadTransaction().also { txn ->
+      txn.spans.add(createAppStartSpan(txn.contexts.trace!!.traceId, coldStart))
+    }
+
+  private fun createUiLoadTransaction(): IchnoisCoreTransaction = createTransaction(UI_LOAD_OP)
+
+  private fun createStandaloneAppStartTransaction(
+    appStartScreen: String? = null
+  ): IchnoisCoreTransaction =
+    createTransaction(STANDALONE_APP_START_OP).also { txn ->
+      if (appStartScreen != null) {
+        txn.contexts.trace!!.setData(APP_START_SCREEN_DATA, appStartScreen)
+      }
+    }
+
+  private fun createTransaction(op: String): IchnoisCoreTransaction {
+    val txn = IchnoisCoreTransaction(fixture.tracer)
+    txn.contexts.setTrace(SpanContext(op, TracesSamplingDecision(false)))
+    return txn
+  }
+}

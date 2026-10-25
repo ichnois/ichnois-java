@@ -1,0 +1,133 @@
+package io.ichnois.spring7.tracing;
+
+import static io.ichnois.TypeCheckHint.SPRING_EXCHANGE_FILTER_REQUEST;
+import static io.ichnois.TypeCheckHint.SPRING_EXCHANGE_FILTER_RESPONSE;
+
+import com.jakewharton.nopen.annotation.Open;
+import io.ichnois.BaggageHeader;
+import io.ichnois.Breadcrumb;
+import io.ichnois.Hint;
+import io.ichnois.IScopes;
+import io.ichnois.ISpan;
+import io.ichnois.SpanDataConvention;
+import io.ichnois.SpanOptions;
+import io.ichnois.SpanStatus;
+import io.ichnois.util.Objects;
+import io.ichnois.util.SpanUtils;
+import io.ichnois.util.TracingUtils;
+import io.ichnois.util.UrlUtils;
+import java.util.Locale;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ClientResponse;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
+import org.springframework.web.reactive.function.client.ExchangeFunction;
+import reactor.core.publisher.Mono;
+
+@Open
+public class IchnoisCoreSpanClientWebRequestFilter implements ExchangeFilterFunction {
+  private static final String TRACE_ORIGIN = "auto.http.spring7.webclient";
+  private final @NotNull IScopes scopes;
+
+  public IchnoisCoreSpanClientWebRequestFilter(final @NotNull IScopes scopes) {
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
+  }
+
+  @Override
+  public @NotNull Mono<ClientResponse> filter(
+      final @NotNull ClientRequest request, final @NotNull ExchangeFunction next) {
+    final ISpan activeSpan = scopes.getSpan();
+    if (activeSpan == null) {
+      final @NotNull ClientRequest modifiedRequest = maybeAddTracingHeaders(request, null);
+      addBreadcrumb(modifiedRequest, null);
+      return next.exchange(modifiedRequest);
+    }
+    final @NotNull SpanOptions spanOptions = new SpanOptions();
+    spanOptions.setOrigin(TRACE_ORIGIN);
+    final ISpan span = activeSpan.startChild("http.client", null, spanOptions);
+    final @NotNull UrlUtils.UrlDetails urlDetails =
+        UrlUtils.parse(request.url().toString(), scopes.getOptions().getDataCollectionResolver());
+    final @NotNull String method = request.method().name();
+    span.setDescription(method + " " + urlDetails.getUrlOrFallback());
+    span.setData(SpanDataConvention.HTTP_METHOD_KEY, method.toUpperCase(Locale.ROOT));
+    if (scopes.getOptions().getDataCollectionResolver().isDataCollectionConfigured()) {
+      urlDetails.applyToSpan(span);
+    }
+
+    final @NotNull ClientRequest modifiedRequest = maybeAddTracingHeaders(request, span);
+
+    return next.exchange(modifiedRequest)
+        .flatMap(
+            response -> {
+              span.setData(SpanDataConvention.HTTP_STATUS_CODE_KEY, response.statusCode().value());
+              span.setStatus(SpanStatus.fromHttpStatusCode(response.statusCode().value()));
+              addBreadcrumb(request, response);
+              span.finish();
+              return Mono.just(response);
+            })
+        .onErrorMap(
+            throwable -> {
+              span.setThrowable(throwable);
+              span.setStatus(SpanStatus.INTERNAL_ERROR);
+              addBreadcrumb(request, null);
+              span.finish();
+              return throwable;
+            });
+  }
+
+  private @NotNull ClientRequest maybeAddTracingHeaders(
+      final @NotNull ClientRequest request, final @Nullable ISpan span) {
+    if (isIgnored()) {
+      return request;
+    }
+
+    final ClientRequest.Builder requestBuilder = ClientRequest.from(request);
+
+    final @Nullable TracingUtils.TracingHeaders tracingHeaders =
+        TracingUtils.traceIfAllowed(
+            scopes,
+            request.url().toString(),
+            request.headers().get(BaggageHeader.BAGGAGE_HEADER),
+            span);
+
+    if (tracingHeaders != null) {
+      requestBuilder.header(
+          tracingHeaders.getIchnoisCoreTraceHeader().getName(),
+          tracingHeaders.getIchnoisCoreTraceHeader().getValue());
+
+      final @Nullable BaggageHeader baggageHeader = tracingHeaders.getBaggageHeader();
+      if (baggageHeader != null) {
+        requestBuilder.headers(
+            httpHeaders -> {
+              httpHeaders.remove(BaggageHeader.BAGGAGE_HEADER);
+              httpHeaders.add(baggageHeader.getName(), baggageHeader.getValue());
+            });
+      }
+    }
+
+    return requestBuilder.build();
+  }
+
+  private boolean isIgnored() {
+    return SpanUtils.isIgnored(scopes.getOptions().getIgnoredSpanOrigins(), TRACE_ORIGIN);
+  }
+
+  private void addBreadcrumb(
+      final @NotNull ClientRequest request, final @Nullable ClientResponse response) {
+    final Breadcrumb breadcrumb =
+        Breadcrumb.http(
+            request.url().toString(),
+            request.method().name(),
+            response != null ? response.statusCode().value() : null,
+            scopes.getOptions().getDataCollectionResolver());
+
+    final Hint hint = new Hint();
+    hint.set(SPRING_EXCHANGE_FILTER_REQUEST, request);
+    if (response != null) {
+      hint.set(SPRING_EXCHANGE_FILTER_RESPONSE, response);
+    }
+
+    scopes.addBreadcrumb(breadcrumb, hint);
+  }
+}

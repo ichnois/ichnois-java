@@ -1,0 +1,37 @@
+package io.ichnois.rrweb;
+
+import io.ichnois.ILogger;
+import io.ichnois.JsonDeserializer;
+import io.ichnois.JsonSerializable;
+import io.ichnois.ObjectReader;
+import io.ichnois.ObjectWriter;
+import java.io.IOException;
+import org.jetbrains.annotations.NotNull;
+
+public enum RRWebEventType implements JsonSerializable {
+  DomContentLoaded,
+  Load,
+  FullSnapshot,
+  IncrementalSnapshot,
+  Meta,
+  Custom,
+  Plugin;
+
+  // temp fix for JDK 21: The rrweb protocol encodes these enums by ordinal.
+  @SuppressWarnings("EnumOrdinal")
+  @Override
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
+      throws IOException {
+    writer.value(ordinal());
+  }
+
+  public static final class Deserializer implements JsonDeserializer<RRWebEventType> {
+    // temp fix for JDK 21: The rrweb protocol encodes these enums by ordinal.
+    @SuppressWarnings("EnumOrdinal")
+    @Override
+    public @NotNull RRWebEventType deserialize(
+        final @NotNull ObjectReader reader, final @NotNull ILogger logger) throws Exception {
+      return RRWebEventType.values()[reader.nextInt()];
+    }
+  }
+}

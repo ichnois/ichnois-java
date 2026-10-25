@@ -1,0 +1,1138 @@
+package io.ichnois.android.core;
+
+import static io.ichnois.MeasurementUnit.Duration.MILLISECOND;
+import static io.ichnois.util.IntegrationUtils.addIntegrationToSdkVersion;
+
+import android.app.Activity;
+import android.app.Application;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import io.ichnois.Baggage;
+import io.ichnois.BaggageHeader;
+import io.ichnois.FullyDisplayedReporter;
+import io.ichnois.IScope;
+import io.ichnois.IScopes;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.ISpan;
+import io.ichnois.ITransaction;
+import io.ichnois.Instrumenter;
+import io.ichnois.Integration;
+import io.ichnois.NoOpTransaction;
+import io.ichnois.PropagationContext;
+import io.ichnois.IchnoisCoreDate;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreNanotimeDate;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.SpanOptions;
+import io.ichnois.SpanStatus;
+import io.ichnois.TracesSamplingDecision;
+import io.ichnois.TransactionContext;
+import io.ichnois.TransactionOptions;
+import io.ichnois.android.core.internal.util.ClassUtil;
+import io.ichnois.android.core.internal.util.FirstDrawDoneListener;
+import io.ichnois.android.core.performance.ActivityLifecycleSpanHelper;
+import io.ichnois.android.core.performance.AppStartMetrics;
+import io.ichnois.android.core.performance.TimeSpan;
+import io.ichnois.protocol.MeasurementValue;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.TransactionNameSource;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.Objects;
+import io.ichnois.util.TracingUtils;
+import java.io.Closeable;
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+import org.jetbrains.annotations.VisibleForTesting;
+
+public final class ActivityLifecycleIntegration
+    implements Integration, Closeable, Application.ActivityLifecycleCallbacks {
+
+  static final String UI_LOAD_OP = "ui.load";
+  static final String STANDALONE_APP_START_OP = "app.start";
+  private static final String STANDALONE_APP_START_NAME = "App Start";
+  static final String APP_START_WARM = "app.start.warm";
+  static final String APP_START_COLD = "app.start.cold";
+  static final String TTID_OP = "ui.load.initial_display";
+  static final String TTFD_OP = "ui.load.full_display";
+  static final String APP_START_EXTENDED_OP = "app.start.extended";
+  static final String APP_START_EXTENDED_DESC = "Extended App Start";
+  static final long TTFD_TIMEOUT_MILLIS = 25000;
+  // If a headless app start and the following activity's ui.load are more than this far apart, they
+  // are treated as unrelated and not connected into the same trace.
+  static final long APP_START_TO_UI_LOAD_CONTINUATION_MAX_GAP_NANOS = TimeUnit.MINUTES.toNanos(1);
+  private static final String TRACE_ORIGIN = "auto.ui.activity";
+  static final String APP_START_SCREEN_DATA = "app.vitals.start.screen";
+  static final String APP_START_TYPE_DATA = "app.vitals.start.type";
+  static final String APP_START_REASON_DATA = "app.vitals.start.reason";
+  static final String APP_START_TRACE_ORIGIN = "auto.app.start";
+
+  private final @NotNull Application application;
+  private final @NotNull BuildInfoProvider buildInfoProvider;
+  private @Nullable IScopes scopes;
+  private @Nullable IchnoisCoreAndroidOptions options;
+
+  private boolean performanceEnabled = false;
+
+  private boolean timeToFullDisplaySpanEnabled = false;
+
+  private boolean isAllActivityCallbacksAvailable;
+
+  private boolean firstActivityCreated = false;
+
+  private @Nullable FullyDisplayedReporter fullyDisplayedReporter = null;
+  private @Nullable ISpan appStartSpan;
+  private @Nullable ITransaction appStartTransaction;
+  private final @NotNull WeakHashMap<Activity, ISpan> ttidSpanMap = new WeakHashMap<>();
+  private final @NotNull WeakHashMap<Activity, ISpan> ttfdSpanMap = new WeakHashMap<>();
+  private final @NotNull WeakHashMap<Activity, ActivityLifecycleSpanHelper> activitySpanHelpers =
+      new WeakHashMap<>();
+  private @NotNull IchnoisCoreDate lastPausedTime = new IchnoisCoreNanotimeDate(0, 0);
+  private @Nullable Future<?> ttfdAutoCloseFuture = null;
+
+  // WeakHashMap isn't thread safe but ActivityLifecycleCallbacks is only called from the
+  // main-thread
+  private final @NotNull WeakHashMap<Activity, ITransaction> activitiesWithOngoingTransactions =
+      new WeakHashMap<>();
+
+  private final @NotNull ActivityFramesTracker activityFramesTracker;
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+  private boolean fullyDisplayedCalled = false;
+  private final @NotNull AutoClosableReentrantLock fullyDisplayedLock =
+      new AutoClosableReentrantLock();
+
+  public ActivityLifecycleIntegration(
+      final @NotNull Application application,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull ActivityFramesTracker activityFramesTracker) {
+    this.application = Objects.requireNonNull(application, "Application is required");
+    this.buildInfoProvider =
+        Objects.requireNonNull(buildInfoProvider, "BuildInfoProvider is required");
+    this.activityFramesTracker =
+        Objects.requireNonNull(activityFramesTracker, "ActivityFramesTracker is required");
+
+    if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.Q) {
+      isAllActivityCallbacksAvailable = true;
+    }
+  }
+
+  @Override
+  public void register(final @NotNull IScopes scopes, final @NotNull IchnoisCoreOptions options) {
+    this.options =
+        Objects.requireNonNull(
+            (options instanceof IchnoisCoreAndroidOptions) ? (IchnoisCoreAndroidOptions) options : null,
+            "IchnoisCoreAndroidOptions is required");
+
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
+
+    performanceEnabled = isPerformanceEnabled(this.options);
+    fullyDisplayedReporter = this.options.getFullyDisplayedReporter();
+    timeToFullDisplaySpanEnabled = this.options.isEnableTimeToFullDisplayTracing();
+
+    application.registerActivityLifecycleCallbacks(this);
+
+    if (performanceEnabled && this.options.isEnableStandaloneAppStartTracing()) {
+      final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+      metrics.setHeadlessAppStartListener(this::onHeadlessAppStart);
+      metrics.getAppStartExtension().setExtendAppStartListener(this::onExtendAppStartRequested);
+      addIntegrationToSdkVersion("StandaloneAppStart");
+    }
+
+    this.options.getLogger().log(IchnoisCoreLevel.DEBUG, "ActivityLifecycleIntegration installed.");
+    addIntegrationToSdkVersion("ActivityLifecycle");
+  }
+
+  private boolean isPerformanceEnabled(final @NotNull IchnoisCoreAndroidOptions options) {
+    return options.isTracingEnabled() && options.isEnableAutoActivityLifecycleTracing();
+  }
+
+  @Override
+  public void close() throws IOException {
+    application.unregisterActivityLifecycleCallbacks(this);
+    final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+    metrics.setHeadlessAppStartListener(null);
+    metrics.getAppStartExtension().setExtendAppStartListener(null);
+
+    if (options != null) {
+      options.getLogger().log(IchnoisCoreLevel.DEBUG, "ActivityLifecycleIntegration removed.");
+    }
+
+    activityFramesTracker.stop();
+  }
+
+  private @NotNull String getActivityName(final @NotNull Activity activity) {
+    return activity.getClass().getSimpleName();
+  }
+
+  private void stopPreviousTransactions() {
+    for (final Map.Entry<Activity, ITransaction> entry :
+        activitiesWithOngoingTransactions.entrySet()) {
+      final ITransaction transaction = entry.getValue();
+      final ISpan ttidSpan = ttidSpanMap.get(entry.getKey());
+      final ISpan ttfdSpan = ttfdSpanMap.get(entry.getKey());
+      finishTransaction(transaction, ttidSpan, ttfdSpan);
+    }
+  }
+
+  private void startTracing(final @NotNull Activity activity) {
+    WeakReference<Activity> weakActivity = new WeakReference<>(activity);
+    if (scopes != null && !isRunningTransactionOrTrace(activity)) {
+      if (!performanceEnabled) {
+        activitiesWithOngoingTransactions.put(activity, NoOpTransaction.getInstance());
+        if (options.isEnableAutoTraceIdGeneration()) {
+          TracingUtils.startNewTrace(scopes);
+        }
+      } else {
+        // as we allow a single transaction running on the bound Scope, we finish the previous ones
+        stopPreviousTransactions();
+
+        final String activityName = getActivityName(activity);
+
+        final @Nullable IchnoisCoreDate appStartTime;
+        final @Nullable Boolean coldStart;
+        final @NotNull TimeSpan appStartTimeSpan =
+            AppStartMetrics.getInstance().getAppStartTimeSpanWithFallback(options);
+
+        // we only track app start for processes that will show an Activity (full launch).
+        // Here we check the process importance which will tell us that.
+        final boolean foregroundImportance = ContextUtils.isForegroundImportance();
+        if (foregroundImportance && appStartTimeSpan.hasStarted()) {
+          appStartTime = appStartTimeSpan.getStartTimestamp();
+          coldStart =
+              AppStartMetrics.getInstance().getAppStartType() == AppStartMetrics.AppStartType.COLD;
+        } else {
+          appStartTime = null;
+          coldStart = null;
+        }
+
+        final TransactionOptions transactionOptions = new TransactionOptions();
+
+        // Set deadline timeout based on configured option
+        final long deadlineTimeoutMillis = options.getDeadlineTimeout();
+        // No deadline when zero or negative value is set
+        transactionOptions.setDeadlineTimeout(
+            deadlineTimeoutMillis <= 0 ? null : deadlineTimeoutMillis);
+
+        if (options.isEnableActivityLifecycleTracingAutoFinish()) {
+          transactionOptions.setIdleTimeout(options.getIdleTimeout());
+          transactionOptions.setTrimEnd(true);
+        }
+        transactionOptions.setWaitForChildren(true);
+        transactionOptions.setTransactionFinishedCallback(
+            (finishingTransaction) -> {
+              @Nullable Activity unwrappedActivity = weakActivity.get();
+              if (unwrappedActivity != null) {
+                activityFramesTracker.setMetrics(
+                    unwrappedActivity, finishingTransaction.getEventId());
+              } else {
+                if (options != null) {
+                  options
+                      .getLogger()
+                      .log(
+                          IchnoisCoreLevel.WARNING,
+                          "Unable to track activity frames as the Activity %s has been destroyed.",
+                          activityName);
+                }
+              }
+            });
+
+        // This will be the start timestamp of the transaction, as well as the ttid/ttfd spans
+        final @NotNull IchnoisCoreDate ttidStartTime;
+        final @Nullable TracesSamplingDecision appStartSamplingDecision;
+
+        if (!(firstActivityCreated || appStartTime == null || coldStart == null)) {
+          // The first activity ttid/ttfd spans should start at the app start time
+          ttidStartTime = appStartTime;
+          // The app start transaction inherits the sampling decision from the app start profiling,
+          // then clears it
+          appStartSamplingDecision = AppStartMetrics.getInstance().getAppStartSamplingDecision();
+          AppStartMetrics.getInstance().setAppStartSamplingDecision(null);
+        } else {
+          // The ttid/ttfd spans should start when the previous activity called its onPause method
+          ttidStartTime = lastPausedTime;
+          appStartSamplingDecision = null;
+        }
+        transactionOptions.setStartTimestamp(ttidStartTime);
+        transactionOptions.setAppStartTransaction(appStartSamplingDecision != null);
+        setSpanOrigin(transactionOptions);
+
+        // Guards the headless-start check below with !isExtensionActive so the eager extension's
+        // stored trace id isn't mistaken for a finished headless start.
+        final boolean isExtensionActive =
+            AppStartMetrics.getInstance().getAppStartExtension().isActive();
+
+        final @Nullable IchnoisCoreId storedAppStartTraceId =
+            AppStartMetrics.getInstance().getAppStartTraceId();
+        final boolean isFollowingHeadlessAppStart =
+            !isExtensionActive && (storedAppStartTraceId != null);
+
+        final boolean isAppStart =
+            !(firstActivityCreated || appStartTime == null || coldStart == null);
+        final boolean createStandaloneAppStart =
+            isAppStart
+                && options.isEnableStandaloneAppStartTracing()
+                && !isFollowingHeadlessAppStart
+                && !isExtensionActive;
+
+        if (createStandaloneAppStart) {
+          final TransactionOptions appStartTransactionOptions = new TransactionOptions();
+          appStartTransactionOptions.setBindToScope(false);
+          appStartTransactionOptions.setStartTimestamp(appStartTime);
+          appStartTransactionOptions.setAppStartTransaction(appStartSamplingDecision != null);
+          appStartTransactionOptions.setOrigin(APP_START_TRACE_ORIGIN);
+
+          appStartTransaction =
+              scopes.startTransaction(
+                  new TransactionContext(
+                      STANDALONE_APP_START_NAME,
+                      TransactionNameSource.COMPONENT,
+                      STANDALONE_APP_START_OP,
+                      appStartSamplingDecision),
+                  appStartTransactionOptions);
+          appStartTransaction.setData(APP_START_SCREEN_DATA, activityName);
+          final @Nullable String appStartReason = AppStartMetrics.getInstance().getAppStartReason();
+          if (appStartReason != null) {
+            appStartTransaction.setData(APP_START_REASON_DATA, appStartReason);
+          }
+        }
+
+        // Continue either the foreground app.start above or an earlier headless app.start.
+        final @Nullable String continueIchnoisCoreTrace;
+        final @Nullable String continueBaggage;
+        if (createStandaloneAppStart) {
+          continueIchnoisCoreTrace = appStartTransaction.toIchnoisCoreTrace().getValue();
+          final @Nullable BaggageHeader baggageHeader = appStartTransaction.toBaggageHeader(null);
+          continueBaggage = baggageHeader == null ? null : baggageHeader.getValue();
+        } else if (isExtensionActive
+            || (isFollowingHeadlessAppStart && isWithinAppStartContinuationWindow(ttidStartTime))) {
+          continueIchnoisCoreTrace = AppStartMetrics.getInstance().getAppStartIchnoisCoreTraceHeader();
+          continueBaggage = AppStartMetrics.getInstance().getAppStartBaggageHeader();
+        } else {
+          continueIchnoisCoreTrace = null;
+          continueBaggage = null;
+        }
+
+        if (isExtensionActive && isAppStart) {
+          // Only the launch activity sets the screen, so a later activity can't overwrite it. A
+          // screen also keeps the processor from classifying the eager app.start as headless.
+          AppStartMetrics.getInstance()
+              .getAppStartExtension()
+              .setData(APP_START_SCREEN_DATA, activityName);
+        }
+
+        final @Nullable TransactionContext continuedContext =
+            continueIchnoisCoreTrace == null
+                ? null
+                : continueUiLoadTrace(continueIchnoisCoreTrace, continueBaggage, activityName);
+
+        final ITransaction transaction;
+        if (continuedContext != null) {
+          transaction = scopes.startTransaction(continuedContext, transactionOptions);
+        } else {
+          transaction =
+              scopes.startTransaction(
+                  new TransactionContext(
+                      activityName,
+                      TransactionNameSource.COMPONENT,
+                      UI_LOAD_OP,
+                      appStartSamplingDecision),
+                  transactionOptions);
+        }
+
+        if (isFollowingHeadlessAppStart || isExtensionActive) {
+          // Consume the stored app-start trace so a later activity doesn't reuse it.
+          AppStartMetrics.getInstance().setAppStartTraceId(null);
+          AppStartMetrics.getInstance().setAppStartIchnoisCoreTraceHeader(null);
+          AppStartMetrics.getInstance().setAppStartBaggageHeader(null);
+        }
+
+        final SpanOptions spanOptions = new SpanOptions();
+        setSpanOrigin(spanOptions);
+
+        if (isAppStart) {
+          if (!createStandaloneAppStart && !options.isEnableStandaloneAppStartTracing()) {
+            appStartSpan =
+                transaction.startChild(
+                    getAppStartOp(coldStart),
+                    getAppStartDesc(coldStart),
+                    appStartTime,
+                    Instrumenter.ICHNOIS,
+                    spanOptions);
+
+            finishAppStartSpan();
+          }
+        }
+        final @NotNull ISpan ttidSpan =
+            transaction.startChild(
+                TTID_OP,
+                getTtidDesc(activityName),
+                ttidStartTime,
+                Instrumenter.ICHNOIS,
+                spanOptions);
+        ttidSpanMap.put(activity, ttidSpan);
+
+        if (timeToFullDisplaySpanEnabled && fullyDisplayedReporter != null && options != null) {
+          final @NotNull ISpan ttfdSpan =
+              transaction.startChild(
+                  TTFD_OP,
+                  getTtfdDesc(activityName),
+                  ttidStartTime,
+                  Instrumenter.ICHNOIS,
+                  spanOptions);
+          try {
+            ttfdSpanMap.put(activity, ttfdSpan);
+            ttfdAutoCloseFuture =
+                options
+                    .getExecutorService()
+                    .schedule(
+                        () -> finishExceededTtfdSpan(ttfdSpan, ttidSpan), TTFD_TIMEOUT_MILLIS);
+          } catch (RejectedExecutionException e) {
+            options
+                .getLogger()
+                .log(
+                    IchnoisCoreLevel.ERROR,
+                    "Failed to call the executor. Time to full display span will not be finished automatically. Did you call IchnoisCore.close()?",
+                    e);
+          }
+        }
+
+        // lets bind to the scope so other integrations can pick it up
+        scopes.configureScope(
+            scope -> {
+              applyScope(scope, transaction);
+            });
+
+        activitiesWithOngoingTransactions.put(activity, transaction);
+      }
+    }
+  }
+
+  private void setSpanOrigin(final @NotNull SpanOptions spanOptions) {
+    spanOptions.setOrigin(TRACE_ORIGIN);
+  }
+
+  /**
+   * Whether the ui.load starting at {@code uiLoadStartTime} is close enough in time to the headless
+   * app start to belong to the same trace. If they are more than {@link
+   * #APP_START_TO_UI_LOAD_CONTINUATION_MAX_GAP_NANOS} apart, they are treated as unrelated. When
+   * the headless end time is unknown, we keep the previous behaviour and continue the trace.
+   */
+  private boolean isWithinAppStartContinuationWindow(final @NotNull IchnoisCoreDate uiLoadStartTime) {
+    final @Nullable IchnoisCoreDate appStartEndTime = AppStartMetrics.getInstance().getAppStartEndTime();
+    if (appStartEndTime == null) {
+      return true;
+    }
+    return uiLoadStartTime.diff(appStartEndTime) <= APP_START_TO_UI_LOAD_CONTINUATION_MAX_GAP_NANOS;
+  }
+
+  /**
+   * Builds a {@link TransactionContext} for the ui.load transaction that shares the standalone
+   * app.start trace (same traceId and sampleRand) while staying a sibling (no parentSpanId), rather
+   * than a child. The continued baggage keeps sampling decisions on the same sampleRand. Returns
+   * null if the trace cannot be continued, so callers can fall back.
+   */
+  private @Nullable TransactionContext continueUiLoadTrace(
+      final @NotNull String ichnoisTrace,
+      final @Nullable String baggage,
+      final @NotNull String activityName) {
+    if (options == null || !options.isTracingEnabled()) {
+      return null;
+    }
+    final @NotNull PropagationContext propagationContext =
+        PropagationContext.fromHeaders(
+            options.getLogger(),
+            ichnoisTrace,
+            baggage == null ? null : Collections.singletonList(baggage),
+            options);
+    final @Nullable Boolean parentSampled = propagationContext.isSampled();
+    final @NotNull Baggage continuedBaggage = propagationContext.getBaggage();
+    final @Nullable TracesSamplingDecision parentSamplingDecision =
+        parentSampled == null
+            ? null
+            : new TracesSamplingDecision(
+                parentSampled,
+                continuedBaggage.getSampleRate(),
+                propagationContext.getSampleRand());
+    final @NotNull TransactionContext context =
+        new TransactionContext(
+            propagationContext.getTraceId(),
+            propagationContext.getSpanId(),
+            null,
+            parentSamplingDecision,
+            continuedBaggage);
+    context.setName(activityName);
+    context.setTransactionNameSource(TransactionNameSource.COMPONENT);
+    context.setOperation(UI_LOAD_OP);
+    return context;
+  }
+
+  @VisibleForTesting
+  void applyScope(final @NotNull IScope scope, final @NotNull ITransaction transaction) {
+    scope.withTransaction(
+        scopeTransaction -> {
+          // we'd not like to overwrite existent transactions bound to the Scope
+          // manually.
+          if (scopeTransaction == null) {
+            scope.setTransaction(transaction);
+          } else if (options != null) {
+            options
+                .getLogger()
+                .log(
+                    IchnoisCoreLevel.DEBUG,
+                    "Transaction '%s' won't be bound to the Scope since there's one already in there.",
+                    transaction.getName());
+          }
+        });
+  }
+
+  @VisibleForTesting
+  void clearScope(final @NotNull IScope scope, final @NotNull ITransaction transaction) {
+    scope.withTransaction(
+        scopeTransaction -> {
+          if (scopeTransaction == transaction) {
+            scope.clearTransaction();
+          }
+        });
+  }
+
+  private boolean isRunningTransactionOrTrace(final @NotNull Activity activity) {
+    return activitiesWithOngoingTransactions.containsKey(activity);
+  }
+
+  private void stopTracing(final @NotNull Activity activity, final boolean shouldFinishTracing) {
+    if (performanceEnabled && shouldFinishTracing) {
+      final ITransaction transaction = activitiesWithOngoingTransactions.get(activity);
+      finishTransaction(transaction, null, null);
+    }
+  }
+
+  private void finishTransaction(
+      final @Nullable ITransaction transaction,
+      final @Nullable ISpan ttidSpan,
+      final @Nullable ISpan ttfdSpan) {
+    if (transaction != null) {
+      // if io.ichnois.traces.activity.auto-finish.enable is disabled, transaction may be already
+      // finished manually when this method is called.
+      if (transaction.isFinished()) {
+        return;
+      }
+
+      // in case the ttidSpan isn't completed yet, we finish it as cancelled to avoid memory leak
+      finishSpan(ttidSpan, SpanStatus.DEADLINE_EXCEEDED);
+      finishExceededTtfdSpan(ttfdSpan, ttidSpan);
+      cancelTtfdAutoClose();
+
+      SpanStatus status = transaction.getStatus();
+      // status might be set by other integrations, let's not overwrite it
+      if (status == null) {
+        status = SpanStatus.OK;
+      }
+      transaction.finish(status);
+      if (scopes != null) {
+        // make sure to remove the transaction from scope, as it may contain running children,
+        // therefore `finish` method will not remove it from scope
+        scopes.configureScope(
+            scope -> {
+              clearScope(scope, transaction);
+            });
+      }
+    }
+  }
+
+  @Override
+  public void onActivityPreCreated(
+      final @NotNull Activity activity, final @Nullable Bundle savedInstanceState) {
+    final ActivityLifecycleSpanHelper helper =
+        new ActivityLifecycleSpanHelper(activity.getClass().getName());
+    activitySpanHelpers.put(activity, helper);
+    // The very first activity start timestamp cannot be set to the class instantiation time, as it
+    // may happen before an activity is started (service, broadcast receiver, etc). So we set it
+    // here.
+    if (firstActivityCreated) {
+      return;
+    }
+    lastPausedTime =
+        scopes != null
+            ? scopes.getOptions().getDateProvider().now()
+            : AndroidDateUtils.getCurrentIchnoisCoreDateTime();
+    helper.setOnCreateStartTimestamp(lastPausedTime);
+  }
+
+  @Override
+  public void onActivityCreated(
+      final @NotNull Activity activity, final @Nullable Bundle savedInstanceState) {
+    if (!isAllActivityCallbacksAvailable) {
+      onActivityPreCreated(activity, savedInstanceState);
+    }
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      if (scopes != null && options != null && options.isEnableScreenTracking()) {
+        final @Nullable String activityClassName = ClassUtil.getClassName(activity);
+        scopes.configureScope(scope -> scope.setScreen(activityClassName));
+      }
+      startTracing(activity);
+      final @Nullable ISpan ttidSpan = ttidSpanMap.get(activity);
+      final @Nullable ISpan ttfdSpan = ttfdSpanMap.get(activity);
+
+      firstActivityCreated = true;
+
+      if (performanceEnabled
+          && ttidSpan != null
+          && ttfdSpan != null
+          && fullyDisplayedReporter != null) {
+        fullyDisplayedReporter.registerFullyDrawnListener(
+            () -> onFullFrameDrawn(ttidSpan, ttfdSpan));
+      }
+    }
+  }
+
+  @Override
+  public void onActivityPostCreated(
+      final @NotNull Activity activity, final @Nullable Bundle savedInstanceState) {
+    final ActivityLifecycleSpanHelper helper = activitySpanHelpers.get(activity);
+    if (helper != null) {
+      helper.createAndStopOnCreateSpan(getAppStartParent(activity));
+    }
+  }
+
+  @Override
+  public void onActivityPreStarted(final @NotNull Activity activity) {
+    final ActivityLifecycleSpanHelper helper = activitySpanHelpers.get(activity);
+    if (helper != null) {
+      helper.setOnStartStartTimestamp(
+          options != null
+              ? options.getDateProvider().now()
+              : AndroidDateUtils.getCurrentIchnoisCoreDateTime());
+    }
+  }
+
+  @Override
+  public void onActivityStarted(final @NotNull Activity activity) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      if (!isAllActivityCallbacksAvailable) {
+        onActivityPostCreated(activity, null);
+        onActivityPreStarted(activity);
+      }
+      if (performanceEnabled) {
+        // The docs on the screen rendering performance tracing
+        // (https://firebase.google.com/docs/perf-mon/screen-traces?platform=android#definition),
+        // state that the tracing starts for every Activity class when the app calls
+        // .onActivityStarted.
+        // Adding an Activity in onActivityCreated leads to Window.FEATURE_NO_TITLE not
+        // working. Moving this to onActivityStarted fixes the problem.
+        activityFramesTracker.addActivity(activity);
+      }
+    }
+  }
+
+  @Override
+  public void onActivityPostStarted(final @NotNull Activity activity) {
+    final ActivityLifecycleSpanHelper helper = activitySpanHelpers.get(activity);
+    if (helper != null) {
+      helper.createAndStopOnStartSpan(getAppStartParent(activity));
+      // Needed to handle hybrid SDKs
+      helper.saveSpanToAppStartMetrics();
+    }
+    finishAppStartSpan();
+  }
+
+  @Override
+  public void onActivityResumed(final @NotNull Activity activity) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      if (!isAllActivityCallbacksAvailable) {
+        onActivityPostStarted(activity);
+      }
+      if (performanceEnabled) {
+
+        final @Nullable ISpan ttidSpan = ttidSpanMap.get(activity);
+        final @Nullable ISpan ttfdSpan = ttfdSpanMap.get(activity);
+        if (activity.getWindow() != null) {
+          FirstDrawDoneListener.registerForNextDraw(
+              activity, () -> onFirstFrameDrawn(ttfdSpan, ttidSpan), buildInfoProvider);
+        } else {
+          // Posting a task to the main thread's handler will make it executed after it finished
+          // its current job. That is, right after the activity draws the layout.
+          new Handler(Looper.getMainLooper()).post(() -> onFirstFrameDrawn(ttfdSpan, ttidSpan));
+        }
+      }
+    }
+  }
+
+  @Override
+  public void onActivityPostResumed(@NotNull Activity activity) {
+    // empty override, required to avoid a api-level breaking super.onActivityPostResumed() calls
+  }
+
+  @Override
+  public void onActivityPrePaused(@NotNull Activity activity) {
+    // only executed if API >= 29 otherwise it happens on onActivityPaused
+    // as the SDK may gets (re-)initialized mid activity lifecycle, ensure we set the flag here as
+    // well
+    // this ensures any newly launched activity will not use the app start timestamp as txn start
+    firstActivityCreated = true;
+    lastPausedTime =
+        scopes != null
+            ? scopes.getOptions().getDateProvider().now()
+            : AndroidDateUtils.getCurrentIchnoisCoreDateTime();
+  }
+
+  @Override
+  public void onActivityPaused(final @NotNull Activity activity) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      // only executed if API < 29 otherwise it happens on onActivityPrePaused
+      if (!isAllActivityCallbacksAvailable) {
+        onActivityPrePaused(activity);
+      }
+    }
+  }
+
+  @Override
+  public void onActivityStopped(final @NotNull Activity activity) {
+    // no-op (acquire lock if this no longer is no-op)
+  }
+
+  @Override
+  public void onActivitySaveInstanceState(
+      final @NotNull Activity activity, final @NotNull Bundle outState) {
+    // no-op (acquire lock if this no longer is no-op)
+  }
+
+  @Override
+  public void onActivityDestroyed(final @NotNull Activity activity) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      final ActivityLifecycleSpanHelper helper = activitySpanHelpers.remove(activity);
+      if (helper != null) {
+        helper.clear();
+      }
+      if (performanceEnabled) {
+
+        // in case the appStartSpan isn't completed yet, we finish it as cancelled to avoid
+        // memory leak
+        finishSpan(appStartSpan, SpanStatus.CANCELLED);
+        if (appStartTransaction != null && !appStartTransaction.isFinished()) {
+          appStartTransaction.finish(SpanStatus.CANCELLED);
+        }
+
+        // we finish the ttidSpan as cancelled in case it isn't completed yet
+        final ISpan ttidSpan = ttidSpanMap.get(activity);
+        final ISpan ttfdSpan = ttfdSpanMap.get(activity);
+        finishSpan(ttidSpan, SpanStatus.DEADLINE_EXCEEDED);
+
+        // we finish the ttfdSpan as deadline_exceeded in case it isn't completed yet
+        finishExceededTtfdSpan(ttfdSpan, ttidSpan);
+        cancelTtfdAutoClose();
+
+        // in case people opt-out enableActivityLifecycleTracingAutoFinish and forgot to finish it,
+        // we make sure to finish it when the activity gets destroyed.
+        stopTracing(activity, true);
+
+        // set it to null in case its been just finished as cancelled
+        appStartSpan = null;
+        appStartTransaction = null;
+        ttidSpanMap.remove(activity);
+        ttfdSpanMap.remove(activity);
+      }
+
+      // clear it up, so we don't start again for the same activity if the activity is in the
+      // activity stack still.
+      // if the activity is opened again and not in memory, transactions will be created normally.
+      activitiesWithOngoingTransactions.remove(activity);
+
+      if (activitiesWithOngoingTransactions.isEmpty() && !activity.isChangingConfigurations()) {
+        clear();
+      }
+    }
+  }
+
+  private void clear() {
+    firstActivityCreated = false;
+    lastPausedTime = new IchnoisCoreNanotimeDate(0, 0);
+    activitySpanHelpers.clear();
+  }
+
+  private void finishSpan(final @Nullable ISpan span) {
+    if (span != null && !span.isFinished()) {
+      span.finish();
+    }
+  }
+
+  private void finishSpan(final @Nullable ISpan span, final @NotNull IchnoisCoreDate endTimestamp) {
+    finishSpan(span, endTimestamp, null);
+  }
+
+  private void finishSpan(
+      final @Nullable ISpan span,
+      final @NotNull IchnoisCoreDate endTimestamp,
+      final @Nullable SpanStatus spanStatus) {
+    if (span != null && !span.isFinished()) {
+      final @NotNull SpanStatus status =
+          spanStatus != null
+              ? spanStatus
+              : span.getStatus() != null ? span.getStatus() : SpanStatus.OK;
+      span.finish(status, endTimestamp);
+    }
+  }
+
+  private void finishSpan(final @Nullable ISpan span, final @NotNull SpanStatus status) {
+    if (span != null && !span.isFinished()) {
+      span.finish(status);
+    }
+  }
+
+  private void cancelTtfdAutoClose() {
+    if (ttfdAutoCloseFuture != null) {
+      ttfdAutoCloseFuture.cancel(false);
+      ttfdAutoCloseFuture = null;
+    }
+  }
+
+  private void onFirstFrameDrawn(final @Nullable ISpan ttfdSpan, final @Nullable ISpan ttidSpan) {
+    // app start span
+    final @NotNull AppStartMetrics appStartMetrics = AppStartMetrics.getInstance();
+    final @NotNull TimeSpan appStartTimeSpan = appStartMetrics.getAppStartTimeSpan();
+    final @NotNull TimeSpan sdkInitTimeSpan = appStartMetrics.getSdkInitTimeSpan();
+    final @Nullable IchnoisCoreDate firstFrameEndDate =
+        options != null ? options.getDateProvider().now() : null;
+
+    // and we need to set the end time of the app start here, after the first frame is drawn.
+    if (appStartTimeSpan.hasStarted() && appStartTimeSpan.hasNotStopped()) {
+      stopTimeSpanAtDate(appStartTimeSpan, firstFrameEndDate);
+    }
+    if (sdkInitTimeSpan.hasStarted() && sdkInitTimeSpan.hasNotStopped()) {
+      stopTimeSpanAtDate(sdkInitTimeSpan, firstFrameEndDate);
+    }
+    finishAppStartSpan(firstFrameEndDate);
+
+    // IchnoisCore.reportFullyDisplayed can be run in any thread, so we have to ensure synchronization
+    // with first frame drawn
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = fullyDisplayedLock.acquire()) {
+      if (options != null && ttidSpan != null && firstFrameEndDate != null) {
+        final long durationNanos = firstFrameEndDate.diff(ttidSpan.getStartDate());
+        final long durationMillis = TimeUnit.NANOSECONDS.toMillis(durationNanos);
+        ttidSpan.setMeasurement(
+            MeasurementValue.KEY_TIME_TO_INITIAL_DISPLAY, durationMillis, MILLISECOND);
+        // If IchnoisCore.reportFullyDisplayed was called before the first frame is drawn, we finish
+        //  the ttfd now
+        if (ttfdSpan != null && fullyDisplayedCalled) {
+          fullyDisplayedCalled = false;
+          ttidSpan.setMeasurement(
+              MeasurementValue.KEY_TIME_TO_FULL_DISPLAY, durationMillis, MILLISECOND);
+          ttfdSpan.setMeasurement(
+              MeasurementValue.KEY_TIME_TO_FULL_DISPLAY, durationMillis, MILLISECOND);
+          finishSpan(ttfdSpan, firstFrameEndDate);
+        }
+
+        finishSpan(ttidSpan, firstFrameEndDate);
+      } else {
+        finishSpan(ttidSpan);
+        if (fullyDisplayedCalled) {
+          finishSpan(ttfdSpan);
+        }
+      }
+    }
+  }
+
+  private void stopTimeSpanAtDate(
+      final @NotNull TimeSpan timeSpan, final @Nullable IchnoisCoreDate endDate) {
+    final @Nullable IchnoisCoreDate startDate = timeSpan.getStartTimestamp();
+    if (endDate != null && startDate != null) {
+      final long durationMillis = TimeUnit.NANOSECONDS.toMillis(endDate.diff(startDate));
+      timeSpan.setStoppedAt(timeSpan.getStartUptimeMs() + durationMillis);
+    } else {
+      timeSpan.stop();
+    }
+  }
+
+  private void onFullFrameDrawn(final @NotNull ISpan ttidSpan, final @NotNull ISpan ttfdSpan) {
+    cancelTtfdAutoClose();
+    // IchnoisCore.reportFullyDisplayed can be run in any thread, so we have to ensure synchronization
+    // with first frame drawn
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = fullyDisplayedLock.acquire()) {
+      // If the TTID span didn't finish, it means the first frame was not drawn yet, which means
+      // IchnoisCore.reportFullyDisplayed was called too early. We set a flag, so that whenever the TTID
+      // will finish, we will finish the TTFD span as well.
+      if (!ttidSpan.isFinished()) {
+        fullyDisplayedCalled = true;
+        return;
+      }
+      if (options != null) {
+        final IchnoisCoreDate endDate = options.getDateProvider().now();
+        final long durationNanos = endDate.diff(ttfdSpan.getStartDate());
+        final long durationMillis = TimeUnit.NANOSECONDS.toMillis(durationNanos);
+        ttfdSpan.setMeasurement(
+            MeasurementValue.KEY_TIME_TO_FULL_DISPLAY, durationMillis, MILLISECOND);
+        finishSpan(ttfdSpan, endDate);
+      } else {
+        finishSpan(ttfdSpan);
+      }
+    }
+  }
+
+  private void finishExceededTtfdSpan(
+      final @Nullable ISpan ttfdSpan, final @Nullable ISpan ttidSpan) {
+    if (ttfdSpan == null || ttfdSpan.isFinished()) {
+      return;
+    }
+    ttfdSpan.setDescription(getExceededTtfdDesc(ttfdSpan));
+    // We set the end timestamp of the ttfd span to be equal to the ttid span.
+    final @Nullable IchnoisCoreDate ttidEndDate = ttidSpan != null ? ttidSpan.getFinishDate() : null;
+    final @NotNull IchnoisCoreDate ttfdEndDate =
+        ttidEndDate != null ? ttidEndDate : ttfdSpan.getStartDate();
+    finishSpan(ttfdSpan, ttfdEndDate, SpanStatus.DEADLINE_EXCEEDED);
+  }
+
+  @TestOnly
+  @NotNull
+  WeakHashMap<Activity, ITransaction> getActivitiesWithOngoingTransactions() {
+    return activitiesWithOngoingTransactions;
+  }
+
+  @TestOnly
+  @NotNull
+  WeakHashMap<Activity, ActivityLifecycleSpanHelper> getActivitySpanHelpers() {
+    return activitySpanHelpers;
+  }
+
+  @TestOnly
+  void setFirstActivityCreated(boolean firstActivityCreated) {
+    this.firstActivityCreated = firstActivityCreated;
+  }
+
+  @TestOnly
+  @NotNull
+  ActivityFramesTracker getActivityFramesTracker() {
+    return activityFramesTracker;
+  }
+
+  @TestOnly
+  @Nullable
+  ISpan getAppStartSpan() {
+    return appStartSpan;
+  }
+
+  @TestOnly
+  @NotNull
+  WeakHashMap<Activity, ISpan> getTtidSpanMap() {
+    return ttidSpanMap;
+  }
+
+  @TestOnly
+  @NotNull
+  WeakHashMap<Activity, ISpan> getTtfdSpanMap() {
+    return ttfdSpanMap;
+  }
+
+  private @NotNull String getTtidDesc(final @NotNull String activityName) {
+    return activityName + " initial display";
+  }
+
+  private @NotNull String getTtfdDesc(final @NotNull String activityName) {
+    return activityName + " full display";
+  }
+
+  private @NotNull String getExceededTtfdDesc(final @NotNull ISpan ttfdSpan) {
+    final @Nullable String ttfdCurrentDescription = ttfdSpan.getDescription();
+    if (ttfdCurrentDescription != null && ttfdCurrentDescription.endsWith(" - Deadline Exceeded"))
+      return ttfdCurrentDescription;
+    return ttfdSpan.getDescription() + " - Deadline Exceeded";
+  }
+
+  private @NotNull String getAppStartDesc(final boolean coldStart) {
+    if (coldStart) {
+      return "Cold Start";
+    } else {
+      return "Warm Start";
+    }
+  }
+
+  private @Nullable ISpan getAppStartParent(final @NotNull Activity activity) {
+    if (appStartTransaction != null) {
+      return appStartTransaction;
+    }
+    if (appStartSpan != null) {
+      return appStartSpan;
+    }
+    return activitiesWithOngoingTransactions.get(activity);
+  }
+
+  private @NotNull String getAppStartOp(final boolean coldStart) {
+    if (coldStart) {
+      return APP_START_COLD;
+    } else {
+      return APP_START_WARM;
+    }
+  }
+
+  private void finishAppStartSpan() {
+    finishAppStartSpan(null);
+  }
+
+  private void finishAppStartSpan(final @Nullable IchnoisCoreDate endDate) {
+    final @Nullable IchnoisCoreDate appStartEndTime =
+        endDate != null
+            ? endDate
+            : AppStartMetrics.getInstance()
+                .getAppStartTimeSpanWithFallback(options)
+                .getProjectedStopTimestamp();
+    if (performanceEnabled && appStartEndTime != null) {
+      finishSpan(appStartSpan, appStartEndTime);
+      if (appStartTransaction != null && !appStartTransaction.isFinished()) {
+        appStartTransaction.finish(SpanStatus.OK, appStartEndTime);
+      }
+      // Finish the eager extended transaction at the natural first-frame end. waitForChildren keeps
+      // it open until the extended span finishes; no-op if the app start was not extended.
+      AppStartMetrics.getInstance().getAppStartExtension().finishTransaction(appStartEndTime);
+    }
+  }
+
+  private void onHeadlessAppStart() {
+    if (scopes == null || options == null || !performanceEnabled) {
+      return;
+    }
+
+    final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+    // Profilers are stopped for headless starts; clear the decision so it doesn't
+    // leak to a later ui.load transaction if an activity eventually opens.
+    metrics.setAppStartSamplingDecision(null);
+
+    // For headless starts, appLaunchedInForeground is false, so we can't use
+    // getAppStartTimeSpanWithFallback (which gates on foreground).
+    final @NotNull TimeSpan appStartTimeSpan = metrics.getAppStartTimeSpanForHeadless();
+
+    if (!appStartTimeSpan.hasStarted() || !appStartTimeSpan.hasStopped()) {
+      return;
+    }
+
+    final @Nullable IchnoisCoreDate startTime = appStartTimeSpan.getStartTimestamp();
+    final @Nullable IchnoisCoreDate endTime = appStartTimeSpan.getProjectedStopTimestamp();
+    if (startTime == null || endTime == null) {
+      return;
+    }
+
+    // Persist the end time so a later ui.load can tell whether it is close enough to continue this
+    // trace; without it the continuation window is unbounded.
+    metrics.setAppStartEndTime(endTime);
+
+    final @NotNull AppStartExtension extension = metrics.getAppStartExtension();
+    if (extension.isActive()) {
+      extension.finishTransaction(endTime);
+      return;
+    }
+    if (!metrics.shouldSendStartMeasurements(true)) {
+      return;
+    }
+
+    final @NotNull ITransaction transaction =
+        createStandaloneAppStartTransaction(startTime, null, false);
+    transaction.finish(SpanStatus.OK, endTime);
+  }
+
+  /**
+   * Creates the standalone {@code app.start} transaction (not bound to the scope) and persists its
+   * trace headers so a later {@code ui.load} can share the same trace. Shared by the headless path
+   * and the eager extension path. When {@code holdOpenForExtension} is true, the transaction waits
+   * for its children and gets a deadline so it stays open until the extended span finishes.
+   */
+  private @NotNull ITransaction createStandaloneAppStartTransaction(
+      final @NotNull IchnoisCoreDate startTime,
+      final @Nullable TracesSamplingDecision samplingDecision,
+      final boolean holdOpenForExtension) {
+    final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+
+    final TransactionOptions txnOptions = new TransactionOptions();
+    txnOptions.setBindToScope(false);
+    txnOptions.setStartTimestamp(startTime);
+    txnOptions.setOrigin(APP_START_TRACE_ORIGIN);
+    txnOptions.setAppStartTransaction(samplingDecision != null);
+    if (holdOpenForExtension) {
+      txnOptions.setWaitForChildren(true);
+      final long deadlineTimeoutMillis = options.getDeadlineTimeout();
+      txnOptions.setDeadlineTimeout(deadlineTimeoutMillis <= 0 ? null : deadlineTimeoutMillis);
+      // Persist the end time (covering every finish path: user finish, first frame, deadline) so a
+      // later ui.load can tell whether it is close enough to continue this trace; without it the
+      // continuation window is unbounded.
+      txnOptions.setTransactionFinishedCallback(
+          finishedTransaction ->
+              AppStartMetrics.getInstance()
+                  .setAppStartEndTime(finishedTransaction.getFinishDate()));
+    }
+
+    final @NotNull TransactionContext txnContext =
+        new TransactionContext(
+            STANDALONE_APP_START_NAME,
+            TransactionNameSource.COMPONENT,
+            STANDALONE_APP_START_OP,
+            samplingDecision);
+
+    final @NotNull ITransaction transaction = scopes.startTransaction(txnContext, txnOptions);
+    final @Nullable String appStartReason = metrics.getAppStartReason();
+    if (appStartReason != null) {
+      transaction.setData(APP_START_REASON_DATA, appStartReason);
+    }
+    metrics.setAppStartTraceId(transaction.getSpanContext().getTraceId());
+    // Persist trace headers so a later ui.load can share traceId and sampleRand.
+    metrics.setAppStartIchnoisCoreTraceHeader(transaction.toIchnoisCoreTrace().getValue());
+    final @Nullable BaggageHeader baggageHeader = transaction.toBaggageHeader(null);
+    metrics.setAppStartBaggageHeader(baggageHeader == null ? null : baggageHeader.getValue());
+    return transaction;
+  }
+
+  /**
+   * Handles {@code IchnoisCore.extendAppStart()}: eagerly creates the standalone app.start transaction
+   * and the extended child span (we have scopes here), then hands both to the {@link
+   * AppStartExtension}, which owns them. The transaction is held open ({@code waitForChildren})
+   * until the user calls {@code IchnoisCore.finishExtendedAppStart()} or the deadline forces it.
+   * Standalone-only: this is only registered as a listener when standalone app start tracing is
+   * enabled.
+   */
+  private @Nullable AppStartExtension.ExtendedAppStart onExtendAppStartRequested() {
+    if (scopes == null
+        || options == null
+        || !performanceEnabled
+        || !options.isEnableStandaloneAppStartTracing()) {
+      return null;
+    }
+    final @NotNull AppStartMetrics metrics = AppStartMetrics.getInstance();
+
+    final @NotNull TimeSpan appStartTimeSpan =
+        metrics.getAppStartTimeSpan().hasStarted()
+            ? metrics.getAppStartTimeSpan()
+            : metrics.getSdkInitTimeSpan();
+    final @Nullable IchnoisCoreDate startTime = appStartTimeSpan.getStartTimestamp();
+    if (startTime == null) {
+      return null;
+    }
+
+    // The app start sampling decision was pre-rolled on the previous run so the app start
+    // profiler could start before IchnoisCore.init. It forces the trace sampling of the eager
+    // app.start transaction created below (no re-roll, staying consistent with whether the
+    // profiler actually started) and lets it bind the app start profiler. It's single-use:
+    // we clear it so the first ui.load can't also claim it.
+    final @Nullable TracesSamplingDecision samplingDecision = metrics.getAppStartSamplingDecision();
+    metrics.setAppStartSamplingDecision(null);
+
+    final @NotNull ITransaction transaction =
+        createStandaloneAppStartTransaction(startTime, samplingDecision, true);
+
+    final SpanOptions spanOptions = new SpanOptions();
+    setSpanOrigin(spanOptions);
+    final @NotNull ISpan extendedSpan =
+        transaction.startChild(
+            APP_START_EXTENDED_OP,
+            APP_START_EXTENDED_DESC,
+            AndroidDateUtils.getCurrentIchnoisCoreDateTime(),
+            Instrumenter.ICHNOIS,
+            spanOptions);
+
+    return new AppStartExtension.ExtendedAppStart(transaction, extendedSpan);
+  }
+}

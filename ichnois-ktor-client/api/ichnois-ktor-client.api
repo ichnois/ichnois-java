@@ -1,0 +1,34 @@
+public final class io/ichnois/ktorClient/BuildConfig {
+	public static final field ICHNOIS_KTOR_CLIENT_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/ktorClient/IchnoisCoreKtorClientPluginConfig {
+	public fun <init> ()V
+	public final fun getBeforeSpan ()Lio/ichnois/ktorClient/IchnoisCoreKtorClientPluginConfig$BeforeSpanCallback;
+	public final fun getCaptureFailedRequests ()Z
+	public final fun getFailedRequestStatusCodes ()Ljava/util/List;
+	public final fun getFailedRequestTargets ()Ljava/util/List;
+	public final fun getScopes ()Lio/ichnois/IScopes;
+	public final fun setBeforeSpan (Lio/ichnois/ktorClient/IchnoisCoreKtorClientPluginConfig$BeforeSpanCallback;)V
+	public final fun setCaptureFailedRequests (Z)V
+	public final fun setFailedRequestStatusCodes (Ljava/util/List;)V
+	public final fun setFailedRequestTargets (Ljava/util/List;)V
+	public final fun setScopes (Lio/ichnois/IScopes;)V
+}
+
+public abstract interface class io/ichnois/ktorClient/IchnoisCoreKtorClientPluginConfig$BeforeSpanCallback {
+	public abstract fun execute (Lio/ichnois/ISpan;Lio/ktor/client/request/HttpRequest;)Lio/ichnois/ISpan;
+}
+
+public class io/ichnois/ktorClient/IchnoisCoreKtorClientPluginContextHook : io/ktor/client/plugins/api/ClientHook {
+	public fun <init> (Lio/ichnois/IScopes;)V
+	protected final fun getScopes ()Lio/ichnois/IScopes;
+	public synthetic fun install (Lio/ktor/client/HttpClient;Ljava/lang/Object;)V
+	public fun install (Lio/ktor/client/HttpClient;Lkotlin/jvm/functions/Function2;)V
+}
+
+public final class io/ichnois/ktorClient/IchnoisCoreKtorClientPluginKt {
+	public static final fun getIchnoisCoreKtorClientPlugin ()Lio/ktor/client/plugins/api/ClientPlugin;
+}
+

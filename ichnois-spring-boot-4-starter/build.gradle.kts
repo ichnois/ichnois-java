@@ -1,0 +1,57 @@
+import net.ltgt.gradle.errorprone.errorprone
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+  `java-library`
+  id("io.ichnois.javadoc")
+  alias(libs.plugins.kotlin.jvm)
+  alias(libs.plugins.errorprone)
+  alias(libs.plugins.gradle.versions)
+  alias(libs.plugins.springboot4) apply false
+}
+
+// Published code targets Java 17. Test code is not published and follows the toolchain.
+tasks.named<JavaCompile>("compileJava") { options.release.set(17) }
+
+tasks.named<KotlinCompile>("compileKotlin") {
+  compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+  compilerOptions.languageVersion = org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9
+  compilerOptions.apiVersion = org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9
+}
+
+dependencies {
+  api(projects.ichnoisSpringBoot4)
+  api(libs.springboot4.starter)
+
+  annotationProcessor(platform(SpringBootPlugin.BOM_COORDINATES))
+  annotationProcessor(Config.AnnotationProcessors.springBootAutoConfigure)
+  annotationProcessor(Config.AnnotationProcessors.springBootConfiguration)
+
+  compileOnly(libs.jetbrains.annotations)
+  compileOnly(libs.nopen.annotations)
+
+  errorprone(libs.errorprone.core)
+  errorprone(libs.nopen.checker)
+  errorprone(libs.nullaway)
+}
+
+tasks.withType<JavaCompile>().configureEach {
+  options.errorprone {
+    check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
+    option("NullAway:AnnotatedPackages", "io.ichnois")
+  }
+}
+
+tasks.jar {
+  manifest {
+    attributes(
+      "IchnoisCore-Version-Name" to project.version,
+      "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_SPRING_BOOT_4_STARTER_SDK_NAME,
+      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-spring-boot-4-starter",
+      "Implementation-Vendor" to "IchnoisCore",
+      "Implementation-Title" to project.name,
+      "Implementation-Version" to project.version,
+    )
+  }
+}

@@ -1,0 +1,17 @@
+public final class io/ichnois/opentelemetry/IchnoisCoreAutoConfigurationCustomizerProvider : io/opentelemetry/sdk/autoconfigure/spi/AutoConfigurationCustomizerProvider {
+	public static field skipInit Z
+	public fun <init> ()V
+	public fun customize (Lio/opentelemetry/sdk/autoconfigure/spi/AutoConfigurationCustomizer;)V
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCoreBootstrapPackagesProvider : io/opentelemetry/javaagent/tooling/bootstrap/BootstrapPackagesConfigurer {
+	public fun <init> ()V
+	public fun configure (Lio/opentelemetry/javaagent/tooling/bootstrap/BootstrapPackagesBuilder;Lio/opentelemetry/sdk/autoconfigure/spi/ConfigProperties;)V
+}
+
+public final class io/ichnois/opentelemetry/IchnoisCorePropagatorProvider : io/opentelemetry/sdk/autoconfigure/spi/ConfigurablePropagatorProvider {
+	public fun <init> ()V
+	public fun getName ()Ljava/lang/String;
+	public fun getPropagator (Lio/opentelemetry/sdk/autoconfigure/spi/ConfigProperties;)Lio/opentelemetry/context/propagation/TextMapPropagator;
+}
+

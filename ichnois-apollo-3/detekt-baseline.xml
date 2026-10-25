@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ClassNaming:LaunchDetailsQuery_ResponseAdapter.kt$LaunchDetailsQuery_ResponseAdapter</ID>
+    <ID>ClassNaming:LaunchDetailsQuery_VariablesAdapter.kt$LaunchDetailsQuery_VariablesAdapter : Adapter</ID>
+    <ID>CyclomaticComplexMethod:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun captureEvent( request: HttpRequest, response: HttpResponse, operationName: String?, operationType: String?, )</ID>
+    <ID>LongMethod:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun captureEvent( request: HttpRequest, response: HttpResponse, operationName: String?, operationType: String?, )</ID>
+    <ID>LongParameterList:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$( span: ISpan?, request: HttpRequest, response: HttpResponse?, statusCode: Int?, operationName: String?, operationType: String?, operationId: String?, )</ID>
+    <ID>LongParameterList:IchnoisCoreApollo3InterceptorClientErrors.kt$IchnoisCoreApollo3InterceptorClientErrors.Fixture$( captureFailedRequests: Boolean = DEFAULT_CAPTURE_FAILED_REQUESTS, failedRequestTargets: List&lt;String> = listOf(DEFAULT_PROPAGATION_TARGETS), httpStatusCode: Int = 200, responseBody: String = responseBodyOk, sendDefaultPii: Boolean = false, includeCookies: Boolean = sendDefaultPii, socketPolicy: SocketPolicy = SocketPolicy.KEEP_OPEN, configureOptions: IchnoisCoreOptions.() -> Unit = {}, )</ID>
+    <ID>MaxLineLength:LaunchDetailsQuery.kt$LaunchDetailsQuery.Companion$"query LaunchDetails(${'$'}id: ID!) { launch(id: ${'$'}id) { id site mission { name missionPatch(size: LARGE) } rocket { name type } } }"</ID>
+    <ID>MaxLineLength:IchnoisCoreApollo3InterceptorTest.kt$IchnoisCoreApollo3InterceptorTest$"thirdPartyBaggage=someValue,secondThirdPartyBaggage=secondValue; property;propertyKey=propertyValue,anotherThirdPartyBaggage=anotherValue"</ID>
+    <ID>MaxLineLength:IchnoisCoreApollo3InterceptorTest.kt$IchnoisCoreApollo3InterceptorTest.Fixture$"secondThirdPartyBaggage=secondValue; property;propertyKey=propertyValue,anotherThirdPartyBaggage=anotherValue"</ID>
+    <ID>NestedBlockDepth:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun captureEvent( request: HttpRequest, response: HttpResponse, operationName: String?, operationType: String?, )</ID>
+    <ID>NestedBlockDepth:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun finish( span: ISpan?, request: HttpRequest, response: HttpResponse?, statusCode: Int?, operationName: String?, operationType: String?, operationId: String?, )</ID>
+    <ID>NestedBlockDepth:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun maybeAddTracingHeaders( scopes: IScopes, request: HttpRequest, span: ISpan?, ): HttpRequest</ID>
+    <ID>ReturnCount:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$private fun captureEvent( request: HttpRequest, response: HttpResponse, operationName: String?, operationType: String?, )</ID>
+    <ID>SwallowedException:IchnoisCoreApollo3InterceptorClientErrors.kt$IchnoisCoreApollo3InterceptorClientErrors$e: ApolloException</ID>
+    <ID>SwallowedException:IchnoisCoreApollo3InterceptorTest.kt$IchnoisCoreApollo3InterceptorTest$e: ApolloException</ID>
+    <ID>SwallowedException:IchnoisCoreApollo3InterceptorWithVariablesTest.kt$IchnoisCoreApollo3InterceptorWithVariablesTest$e: ApolloException</ID>
+    <ID>TooGenericExceptionCaught:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor$e: Throwable</ID>
+    <ID>TooGenericExceptionThrown:IchnoisCoreApollo3InterceptorTest.kt$IchnoisCoreApollo3InterceptorTest$throw RuntimeException()</ID>
+    <ID>TooManyFunctions:IchnoisCoreApollo3HttpInterceptor.kt$IchnoisCoreApollo3HttpInterceptor : HttpInterceptor</ID>
+    <ID>UseCheckOrError:LaunchDetailsQuery_VariablesAdapter.kt$LaunchDetailsQuery_VariablesAdapter$throw IllegalStateException("Input type used in output position")</ID>
+    <ID>UtilityClassWithPublicConstructor:GraphQLBoolean.kt$GraphQLBoolean</ID>
+    <ID>UtilityClassWithPublicConstructor:GraphQLID.kt$GraphQLID</ID>
+    <ID>UtilityClassWithPublicConstructor:GraphQLString.kt$GraphQLString</ID>
+    <ID>UtilityClassWithPublicConstructor:Launch.kt$Launch</ID>
+    <ID>UtilityClassWithPublicConstructor:Mission.kt$Mission</ID>
+    <ID>UtilityClassWithPublicConstructor:Query.kt$Query</ID>
+    <ID>UtilityClassWithPublicConstructor:Rocket.kt$Rocket</ID>
+  </CurrentIssues>
+</SmellBaseline>

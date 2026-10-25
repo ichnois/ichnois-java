@@ -1,0 +1,34 @@
+<configuration>
+
+  <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="ichnois" class="io.ichnois.logback.IchnoisCoreAppender">
+    <options>
+      <debug>true</debug>
+      <!-- NOTE: Replace the test DSN below with YOUR OWN DSN to see the events from this app in your IchnoisCore project/dashboard -->
+      <dsn>https://test-public-key@ichnois-h2jw.onrender.com/5428563</dsn>
+      <contextTag>userId</contextTag>
+      <contextTag>requestId</contextTag>
+      <logs>
+        <enabled>true</enabled>
+      </logs>
+    </options>
+    <!-- Demonstrates how to modify the minimum values -->
+    <!-- Default for Events is ERROR -->
+    <minimumEventLevel>WARN</minimumEventLevel>
+    <!-- Default for Breadcrumbs is INFO -->
+    <minimumBreadcrumbLevel>DEBUG</minimumBreadcrumbLevel>
+    <!-- Default for Breadcrumbs is INFO -->
+    <minimumLevel>INFO</minimumLevel>
+  </appender>
+
+  <!-- it's important to set logger level to equal or lower than minimumBreadcrumbLevel and minimumEventLevel -->
+  <root level="debug">
+    <appender-ref ref="console"/>
+    <appender-ref ref="ichnois"/>
+  </root>
+</configuration>

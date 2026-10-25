@@ -1,0 +1,400 @@
+package io.ichnois.opentelemetry
+
+import io.opentelemetry.api.common.AttributeKey
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.sdk.trace.data.SpanData
+import io.opentelemetry.semconv.HttpAttributes
+import io.opentelemetry.semconv.ServerAttributes
+import io.opentelemetry.semconv.UrlAttributes
+import io.ichnois.Scope
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.protocol.Request
+import java.util.UUID
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
+
+class OpenTelemetryAttributesExtractorTest {
+  private class Fixture {
+    val spanData = mock<SpanData>()
+    var attributes: Attributes = Attributes.empty()
+    val options = IchnoisCoreOptions.empty()
+    val scope = Scope(options)
+
+    init {
+      whenever(spanData.attributes).thenAnswer { attributes }
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @Test
+  fun `sets URL based on OTel attributes`() {
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        UrlAttributes.URL_SCHEME to "https",
+        UrlAttributes.URL_PATH to "/path/to/123",
+        UrlAttributes.URL_QUERY to "q=123456&b=X",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+        ServerAttributes.SERVER_PORT to 8081L,
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("https://io.ichnois:8081/path/to/123")
+    thenQueryIsSetTo("q=123456&b=X")
+  }
+
+  @Test
+  fun `when there is an existing request on scope it is filled with more details`() {
+    fixture.scope.request = Request().also { it.bodySize = 123L }
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        UrlAttributes.URL_SCHEME to "https",
+        UrlAttributes.URL_PATH to "/path/to/123",
+        UrlAttributes.URL_QUERY to "q=123456&b=X",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+        ServerAttributes.SERVER_PORT to 8081L,
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("https://io.ichnois:8081/path/to/123")
+    thenQueryIsSetTo("q=123456&b=X")
+    assertEquals(123L, fixture.scope.request!!.bodySize)
+  }
+
+  @Test
+  fun `when there is an existing request with url on scope it is kept`() {
+    fixture.scope.request =
+      Request().also {
+        it.url = "http://docs.ichnois.io:3000/platform"
+        it.queryString = "s=abc"
+      }
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        UrlAttributes.URL_SCHEME to "https",
+        UrlAttributes.URL_PATH to "/path/to/123",
+        UrlAttributes.URL_QUERY to "q=123456&b=X",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+        ServerAttributes.SERVER_PORT to 8081L,
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("http://docs.ichnois.io:3000/platform")
+    thenQueryIsSetTo("s=abc")
+  }
+
+  @Test
+  fun `when there is an existing request with url on scope it is kept with URL_FULL`() {
+    fixture.scope.request =
+      Request().also {
+        it.url = "http://docs.ichnois.io:3000/platform"
+        it.queryString = "s=abc"
+      }
+    givenAttributes(
+      mapOf(UrlAttributes.URL_FULL to "https://io.ichnois:8081/path/to/123?q=123456&b=X")
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("http://docs.ichnois.io:3000/platform")
+    thenQueryIsSetTo("s=abc")
+  }
+
+  @Test
+  fun `sets URL based on OTel attributes without port`() {
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        UrlAttributes.URL_SCHEME to "https",
+        UrlAttributes.URL_PATH to "/path/to/123",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("https://io.ichnois/path/to/123")
+  }
+
+  @Test
+  fun `sets URL based on OTel attributes without path`() {
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        UrlAttributes.URL_SCHEME to "https",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsSetTo("https://io.ichnois")
+  }
+
+  @Test
+  fun `does not set URL if server address is missing`() {
+    givenAttributes(
+      mapOf(HttpAttributes.HTTP_REQUEST_METHOD to "GET", UrlAttributes.URL_SCHEME to "https")
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsNotSet()
+  }
+
+  @Test
+  fun `does not set URL if scheme is missing`() {
+    givenAttributes(
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        ServerAttributes.SERVER_ADDRESS to "io.ichnois",
+      )
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenUrlIsNotSet()
+  }
+
+  @Test
+  fun `returns null if no URL in attributes`() {
+    givenAttributes(mapOf())
+
+    val url = whenExtractingUrl()
+
+    assertNull(url)
+  }
+
+  @Test
+  fun `returns full URL if present`() {
+    givenAttributes(mapOf(UrlAttributes.URL_FULL to "https://example.com/some/path"))
+
+    val url = whenExtractingUrl()
+
+    assertEquals("https://example.com/some/path", url)
+  }
+
+  @Test
+  fun `returns reconstructed URL if attributes present`() {
+    givenAttributes(
+      mapOf(
+        UrlAttributes.URL_SCHEME to "https",
+        ServerAttributes.SERVER_ADDRESS to "ichnois.io",
+        ServerAttributes.SERVER_PORT to 8082L,
+        UrlAttributes.URL_PATH to "/some/path",
+      )
+    )
+
+    val url = whenExtractingUrl()
+
+    assertEquals("https://example.com:8082/some/path", url)
+  }
+
+  @Test
+  fun `returns reconstructed URL if attributes present without port`() {
+    givenAttributes(
+      mapOf(
+        UrlAttributes.URL_SCHEME to "https",
+        ServerAttributes.SERVER_ADDRESS to "ichnois.io",
+        UrlAttributes.URL_PATH to "/some/path",
+      )
+    )
+
+    val url = whenExtractingUrl()
+
+    assertEquals("https://example.com/some/path", url)
+  }
+
+  @Test
+  fun `returns null URL if scheme missing`() {
+    givenAttributes(
+      mapOf(
+        ServerAttributes.SERVER_ADDRESS to "ichnois.io",
+        ServerAttributes.SERVER_PORT to 8082L,
+        UrlAttributes.URL_PATH to "/some/path",
+      )
+    )
+
+    val url = whenExtractingUrl()
+
+    assertNull(url)
+  }
+
+  @Test
+  fun `returns null URL if server address missing`() {
+    givenAttributes(
+      mapOf(
+        UrlAttributes.URL_SCHEME to "https",
+        ServerAttributes.SERVER_PORT to 8082L,
+        UrlAttributes.URL_PATH to "/some/path",
+      )
+    )
+
+    val url = whenExtractingUrl()
+
+    assertNull(url)
+  }
+
+  @Test
+  fun `returns reconstructed URL if attributes present without port and path`() {
+    givenAttributes(
+      mapOf(UrlAttributes.URL_SCHEME to "https", ServerAttributes.SERVER_ADDRESS to "ichnois.io")
+    )
+
+    val url = whenExtractingUrl()
+
+    assertEquals("https://example.com", url)
+  }
+
+  @Test
+  fun `returns reconstructed URL if attributes present without path`() {
+    givenAttributes(
+      mapOf(
+        UrlAttributes.URL_SCHEME to "https",
+        ServerAttributes.SERVER_ADDRESS to "ichnois.io",
+        ServerAttributes.SERVER_PORT to 8082L,
+      )
+    )
+
+    val url = whenExtractingUrl()
+
+    assertEquals("https://example.com:8082", url)
+  }
+
+  @Test
+  fun `sets server request headers based on OTel attributes and merges list of values`() {
+    val elements =
+      "ichnois-environment=production,ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-sampled=true,ichnois-trace_id=df71f5972f754b4c85af13ff5c07017d"
+    val listOf = listOf(elements, "another-baggage=abc,more=def")
+    val pairs = AttributeKey.stringArrayKey("http.request.header.baggage") to listOf
+    val map =
+      mapOf(
+        HttpAttributes.HTTP_REQUEST_METHOD to "GET",
+        pairs,
+        AttributeKey.stringArrayKey("http.request.header.ichnois-trace") to
+          listOf("f9118105af4a2d42b4124532cd176588-4542d085bb0b4de5"),
+        AttributeKey.stringArrayKey("http.response.header.some-header") to
+          listOf(
+            "some-value" +
+              "__" +
+              UUID.randomUUID().toString() +
+              "__" +
+              UUID.randomUUID().toString() +
+              "__" +
+              UUID.randomUUID().toString() +
+              "__" +
+              UUID.randomUUID().toString()
+          ),
+      )
+    givenAttributes(map)
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    thenHeaderIsPresentOnRequest(
+      "baggage",
+      "ichnois-environment=production,ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-sampled=true,ichnois-trace_id=df71f5972f754b4c85af13ff5c07017d,another-baggage=abc,more=def",
+    )
+    thenHeaderIsPresentOnRequest(
+      "ichnois-trace",
+      "f9118105af4a2d42b4124532cd176588-4542d085bb0b4de5",
+    )
+    thenHeaderIsNotPresentOnRequest("some-header")
+  }
+
+  @Test
+  fun `if there are no header attributes does not set headers on request`() {
+    givenAttributes(mapOf(HttpAttributes.HTTP_REQUEST_METHOD to "GET"))
+
+    whenExtractingAttributes()
+
+    thenRequestIsSet()
+    assertNull(fixture.scope.request!!.headers)
+  }
+
+  @Test
+  fun `if there is no request method attribute does not set request on scope`() {
+    givenAttributes(
+      mapOf(UrlAttributes.URL_SCHEME to "https", ServerAttributes.SERVER_ADDRESS to "io.ichnois")
+    )
+
+    whenExtractingAttributes()
+
+    thenRequestIsNotSet()
+  }
+
+  private fun givenAttributes(map: Map<AttributeKey<out Any>, Any>) {
+    fixture.attributes = buildAttributes(map)
+  }
+
+  private fun buildAttributes(map: Map<AttributeKey<out Any>, Any>): Attributes {
+    val builder = Attributes.builder()
+    map.forEach { (key, value) -> putAttribute(builder, key, value) }
+    return builder.build()
+  }
+
+  @Suppress("UNCHECKED_CAST")
+  private fun putAttribute(
+    builder: io.opentelemetry.api.common.AttributesBuilder,
+    key: AttributeKey<out Any>,
+    value: Any,
+  ) {
+    builder.put(key as AttributeKey<Any>, value)
+  }
+
+  private fun whenExtractingAttributes() {
+    OpenTelemetryAttributesExtractor().extract(fixture.spanData, fixture.scope, fixture.options)
+  }
+
+  private fun whenExtractingUrl(): String? =
+    OpenTelemetryAttributesExtractor().extractUrl(fixture.attributes, fixture.options)
+
+  private fun thenRequestIsSet() {
+    assertNotNull(fixture.scope.request)
+  }
+
+  private fun thenRequestIsNotSet() {
+    assertNull(fixture.scope.request)
+  }
+
+  private fun thenUrlIsSetTo(expected: String) {
+    assertEquals(expected, fixture.scope.request!!.url)
+  }
+
+  private fun thenUrlIsNotSet() {
+    assertNull(fixture.scope.request!!.url)
+  }
+
+  private fun thenQueryIsSetTo(expected: String) {
+    assertEquals(expected, fixture.scope.request!!.queryString)
+  }
+
+  private fun thenHeaderIsPresentOnRequest(headerName: String, expectedValue: String) {
+    assertEquals(expectedValue, fixture.scope.request!!.headers!!.get(headerName))
+  }
+
+  private fun thenHeaderIsNotPresentOnRequest(headerName: String) {
+    assertFalse(fixture.scope.request!!.headers!!.containsKey(headerName))
+  }
+}

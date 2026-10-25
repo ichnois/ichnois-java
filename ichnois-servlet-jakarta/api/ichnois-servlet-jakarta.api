@@ -1,0 +1,18 @@
+public final class io/ichnois/servlet/jakarta/BuildConfig {
+	public static final field ICHNOIS_SERVLET_JAKARTA_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public class io/ichnois/servlet/jakarta/IchnoisCoreServletContainerInitializer : jakarta/servlet/ServletContainerInitializer {
+	public fun <init> ()V
+	public fun onStartup (Ljava/util/Set;Ljakarta/servlet/ServletContext;)V
+}
+
+public class io/ichnois/servlet/jakarta/IchnoisCoreServletRequestListener : jakarta/servlet/ServletRequestListener {
+	public static final field ICHNOIS_SCOPE_LIFECYCLE_TOKEN_KEY Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun requestDestroyed (Ljakarta/servlet/ServletRequestEvent;)V
+	public fun requestInitialized (Ljakarta/servlet/ServletRequestEvent;)V
+}
+

@@ -1,0 +1,19 @@
+public final class io/ichnois/apollo/BuildConfig {
+	public static final field ICHNOIS_APOLLO_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/apollo/IchnoisCoreApolloInterceptor : com/apollographql/apollo/interceptor/ApolloInterceptor {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo/IchnoisCoreApolloInterceptor$BeforeSpanCallback;)V
+	public synthetic fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo/IchnoisCoreApolloInterceptor$BeforeSpanCallback;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/ichnois/apollo/IchnoisCoreApolloInterceptor$BeforeSpanCallback;)V
+	public fun dispose ()V
+	public fun interceptAsync (Lcom/apollographql/apollo/interceptor/ApolloInterceptor$InterceptorRequest;Lcom/apollographql/apollo/interceptor/ApolloInterceptorChain;Ljava/util/concurrent/Executor;Lcom/apollographql/apollo/interceptor/ApolloInterceptor$CallBack;)V
+}
+
+public abstract interface class io/ichnois/apollo/IchnoisCoreApolloInterceptor$BeforeSpanCallback {
+	public abstract fun execute (Lio/ichnois/ISpan;Lcom/apollographql/apollo/interceptor/ApolloInterceptor$InterceptorRequest;Lcom/apollographql/apollo/interceptor/ApolloInterceptor$InterceptorResponse;)Lio/ichnois/ISpan;
+}
+

@@ -1,0 +1,23 @@
+public final class io/ichnois/android/navigation/BuildConfig {
+	public static final field BUILD_TYPE Ljava/lang/String;
+	public static final field DEBUG Z
+	public static final field LIBRARY_PACKAGE_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+	public fun <init> ()V
+}
+
+public final class io/ichnois/android/navigation/IchnoisCoreNavigationListener : androidx/navigation/NavController$OnDestinationChangedListener {
+	public static final field Companion Lio/ichnois/android/navigation/IchnoisCoreNavigationListener$Companion;
+	public static final field NAVIGATION_OP Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun <init> (Lio/ichnois/IScopes;Z)V
+	public fun <init> (Lio/ichnois/IScopes;ZZ)V
+	public fun <init> (Lio/ichnois/IScopes;ZZLjava/lang/String;)V
+	public synthetic fun <init> (Lio/ichnois/IScopes;ZZLjava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun onDestinationChanged (Landroidx/navigation/NavController;Landroidx/navigation/NavDestination;Landroid/os/Bundle;)V
+}
+
+public final class io/ichnois/android/navigation/IchnoisCoreNavigationListener$Companion {
+}
+

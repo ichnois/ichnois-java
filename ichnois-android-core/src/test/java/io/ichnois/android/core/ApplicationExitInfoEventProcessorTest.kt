@@ -1,0 +1,1472 @@
+package io.ichnois.android.core
+
+import android.app.ActivityManager
+import android.app.ActivityManager.MemoryInfo
+import android.content.Context
+import android.os.Build
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.Breadcrumb
+import io.ichnois.Hint
+import io.ichnois.IScopes
+import io.ichnois.IpAddressUtils
+import io.ichnois.NoOpLogger
+import io.ichnois.ProfileChunk
+import io.ichnois.IchnoisCore
+import io.ichnois.IchnoisCoreBaseEvent
+import io.ichnois.IchnoisCoreEvent
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreLevel.DEBUG
+import io.ichnois.SpanContext
+import io.ichnois.android.core.anr.AnrProfileManager
+import io.ichnois.android.core.anr.AnrProfileRotationHelper
+import io.ichnois.android.core.anr.AnrStackTrace
+import io.ichnois.cache.PersistingOptionsObserver.DIST_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.ENVIRONMENT_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.OPTIONS_CACHE
+import io.ichnois.cache.PersistingOptionsObserver.PROGUARD_UUID_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.RELEASE_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.REPLAY_ERROR_SAMPLE_RATE_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.SDK_VERSION_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.TAGS_FILENAME as OPTIONS_TAGS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver
+import io.ichnois.cache.PersistingScopeObserver.BREADCRUMBS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.CONTEXTS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.EXTRAS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.FINGERPRINT_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.LEVEL_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.REPLAY_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.REQUEST_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.SCOPE_CACHE
+import io.ichnois.cache.PersistingScopeObserver.TAGS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.TRACE_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.TRANSACTION_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.USER_FILENAME
+import io.ichnois.cache.tape.QueueFile
+import io.ichnois.hints.AbnormalExit
+import io.ichnois.hints.Backfillable
+import io.ichnois.protocol.Browser
+import io.ichnois.protocol.Contexts
+import io.ichnois.protocol.DebugImage
+import io.ichnois.protocol.DebugMeta
+import io.ichnois.protocol.Device
+import io.ichnois.protocol.Mechanism
+import io.ichnois.protocol.Message
+import io.ichnois.protocol.OperatingSystem
+import io.ichnois.protocol.Request
+import io.ichnois.protocol.Response
+import io.ichnois.protocol.SdkVersion
+import io.ichnois.protocol.IchnoisCoreException
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.IchnoisCoreStackFrame
+import io.ichnois.protocol.IchnoisCoreStackTrace
+import io.ichnois.protocol.IchnoisCoreThread
+import io.ichnois.protocol.User
+import io.ichnois.util.HintUtils
+import java.io.ByteArrayOutputStream
+import java.io.File
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.mockito.Mockito.mockStatic
+import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+import org.robolectric.annotation.Config
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowActivityManager
+import org.robolectric.shadows.ShadowBuild
+
+@RunWith(AndroidJUnit4::class)
+class ApplicationExitInfoEventProcessorTest {
+  @get:Rule val tmpDir = TemporaryFolder()
+
+  class Fixture {
+    companion object {
+      const val REPLAY_ID = "64cf554cc8d74c6eafa3e08b7c984f6d"
+    }
+
+    val buildInfo = mock<BuildInfoProvider>()
+    lateinit var context: Context
+    val options = IchnoisCoreAndroidOptions().apply { setLogger(NoOpLogger.getInstance()) }
+
+    fun getSut(
+      dir: TemporaryFolder,
+      currentSdk: Int = Build.VERSION_CODES.LOLLIPOP,
+      populateScopeCache: Boolean = false,
+      populateOptionsCache: Boolean = false,
+      replayErrorSampleRate: Double? = null,
+      isSendDefaultPii: Boolean = true,
+    ): ApplicationExitInfoEventProcessor {
+      options.cacheDirPath = dir.newFolder().absolutePath
+      options.environment = "release"
+      options.isSendDefaultPii = isSendDefaultPii
+      options.addScopeObserver(PersistingScopeObserver(options))
+
+      whenever(buildInfo.sdkInfoVersion).thenReturn(currentSdk)
+      whenever(buildInfo.isEmulator).thenReturn(true)
+
+      if (populateScopeCache) {
+        persistScope(TRACE_FILENAME, SpanContext("ui.load"))
+        persistScope(
+          USER_FILENAME,
+          User().apply {
+            username = "bot"
+            id = "bot@me.com"
+          },
+        )
+        persistScope(TAGS_FILENAME, mapOf("one" to "two"))
+        persistScope(
+          BREADCRUMBS_FILENAME,
+          listOf(Breadcrumb.debug("test"), Breadcrumb.navigation("from", "to")),
+        )
+        persistScope(EXTRAS_FILENAME, mapOf("key" to 123))
+        persistScope(TRANSACTION_FILENAME, "TestActivity")
+        persistScope(FINGERPRINT_FILENAME, listOf("finger", "print"))
+        persistScope(LEVEL_FILENAME, IchnoisCoreLevel.INFO)
+        persistScope(
+          CONTEXTS_FILENAME,
+          Contexts().apply {
+            setTrace(SpanContext("test"))
+            setResponse(Response().apply { bodySize = 1024 })
+            setBrowser(Browser().apply { name = "Google Chrome" })
+          },
+        )
+        persistScope(
+          REQUEST_FILENAME,
+          Request().apply {
+            url = "google.com"
+            method = "GET"
+          },
+        )
+        persistScope(REPLAY_FILENAME, IchnoisCoreId(REPLAY_ID))
+      }
+
+      if (populateOptionsCache) {
+        persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.2.0+232")
+        persistOptions(PROGUARD_UUID_FILENAME, "uuid")
+        persistOptions(SDK_VERSION_FILENAME, SdkVersion("ichnois.java.android", "6.15.0"))
+        persistOptions(DIST_FILENAME, "232")
+        persistOptions(ENVIRONMENT_FILENAME, "debug")
+        persistOptions(OPTIONS_TAGS_FILENAME, mapOf("option" to "tag"))
+        replayErrorSampleRate?.let {
+          persistOptions(REPLAY_ERROR_SAMPLE_RATE_FILENAME, it.toString())
+        }
+      }
+
+      return ApplicationExitInfoEventProcessor(context, options, buildInfo)
+    }
+
+    fun <T : Any> persistScope(filename: String, entity: T) {
+      val dir = File(options.cacheDirPath, SCOPE_CACHE).also { it.mkdirs() }
+      val file = File(dir, filename)
+      if (filename == BREADCRUMBS_FILENAME) {
+        val queueFile = QueueFile.Builder(file).build()
+        (entity as List<Breadcrumb>).forEach { crumb ->
+          val baos = ByteArrayOutputStream()
+          options.serializer.serialize(crumb, baos.writer())
+          queueFile.add(baos.toByteArray())
+        }
+      } else {
+        options.serializer.serialize(entity, file.writer())
+      }
+    }
+
+    fun <T : Any> persistOptions(filename: String, entity: T) {
+      val dir = File(options.cacheDirPath, OPTIONS_CACHE).also { it.mkdirs() }
+      val file = File(dir, filename)
+      options.serializer.serialize(entity, file.writer())
+    }
+
+    fun mockOutDeviceInfo() {
+      ShadowBuild.setManufacturer("Google")
+      ShadowBuild.setBrand("Pixel")
+      ShadowBuild.setModel("Pixel 3XL")
+
+      val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+      val shadowActivityManager = Shadow.extract<ShadowActivityManager>(activityManager)
+      shadowActivityManager.setMemoryInfo(MemoryInfo().apply { totalMem = 2048 })
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @BeforeTest
+  fun `set up`() {
+    fixture.context = ApplicationProvider.getApplicationContext()
+  }
+
+  @Test
+  fun `when event is not backfillable, does not enrich`() {
+    val processed = processEvent(Hint())
+
+    assertNull(processed.platform)
+    assertNull(processed.exceptions)
+    assertTrue(processed.contexts.isEmpty)
+  }
+
+  @Test
+  fun `when backfillable event is not enrichable, sets different mechanism`() {
+    val hint = anrHint(shouldEnrich = false)
+
+    val processed = processEvent(hint)
+
+    assertEquals("HistoricalAppExitInfo", processed.exceptions!![0].mechanism!!.type)
+  }
+
+  @Test
+  fun `when backfillable event is not enrichable, sets platform`() {
+    val hint = anrHint(shouldEnrich = false)
+
+    val processed = processEvent(hint)
+
+    assertEquals(IchnoisCoreBaseEvent.DEFAULT_PLATFORM, processed.platform)
+  }
+
+  @Test
+  fun `when user info is disabled, sets device id`() {
+    fixture.options.dataCollection.setUserInfo(false)
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint())
+
+    val processed = processEvent(hint)
+
+    assertNotNull(processed.contexts.device!!.id)
+  }
+
+  @Test
+  fun `when user info is enabled, sets device id`() {
+    fixture.options.dataCollection.setUserInfo(true)
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint())
+
+    val processed = processEvent(hint, isSendDefaultPii = false)
+
+    assertNotNull(processed.contexts.device!!.id)
+  }
+
+  @Test
+  fun `when backfillable event is not enrichable, sets OS`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint(shouldEnrich = false))
+
+    ShadowBuild.setVersionRelease("7.8.123")
+    val processed = processEvent(hint)
+
+    assertEquals("7.8.123", processed.contexts.operatingSystem!!.version)
+    assertEquals("Android", processed.contexts.operatingSystem!!.name)
+  }
+
+  @Test
+  fun `when backfillable event already has OS, sets Android as main OS and existing as secondary`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint(shouldEnrich = false))
+
+    val linuxOs = OperatingSystem().apply { name = " Linux " }
+    val processed = processEvent(hint) { contexts.setOperatingSystem(linuxOs) }
+
+    assertSame(linuxOs, processed.contexts["os_linux"])
+    assertEquals("Android", processed.contexts.operatingSystem!!.name)
+  }
+
+  @Test
+  fun `when backfillable event already has OS without name, sets Android as main OS and existing with generated name`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint(shouldEnrich = false))
+
+    val osNoName = OperatingSystem().apply { version = "1.0" }
+    val processed = processEvent(hint) { contexts.setOperatingSystem(osNoName) }
+
+    assertSame(osNoName, processed.contexts["os_1"])
+    assertEquals("Android", processed.contexts.operatingSystem!!.name)
+  }
+
+  @Test
+  @Config(qualifiers = "w360dp-h640dp-xxhdpi")
+  fun `when backfillable event is not enrichable, sets device`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint(shouldEnrich = false))
+
+    fixture.mockOutDeviceInfo()
+
+    val processed = processEvent(hint)
+
+    val device = processed.contexts.device!!
+    assertEquals("Google", device.manufacturer)
+    assertEquals("Pixel", device.brand)
+    assertEquals("Pixel", device.family)
+    assertEquals("Pixel 3XL", device.model)
+    assertEquals(true, device.isSimulator)
+    assertEquals(2048, device.memorySize)
+    assertEquals(1080, device.screenWidthPixels)
+    assertEquals(1920, device.screenHeightPixels)
+    assertEquals(3.0f, device.screenDensity)
+    assertEquals(480, device.screenDpi)
+  }
+
+  @Test
+  fun `when backfillable event is enrichable, still sets static data`() {
+    val hint = anrHint()
+
+    val processed = processEvent(hint)
+
+    assertNotNull(processed.platform)
+    assertFalse(processed.contexts.isEmpty())
+  }
+
+  @Test
+  fun `when backfillable event is enrichable, backfills serialized scope data`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed = processEvent(hint, populateScopeCache = true)
+
+    // user
+    assertEquals("bot", processed.user!!.username)
+    assertEquals("bot@me.com", processed.user!!.id)
+    assertEquals("{{auto}}", processed.user!!.ipAddress)
+    // trace
+    assertEquals("ui.load", processed.contexts.trace!!.operation)
+    // tags
+    assertEquals("two", processed.tags!!["one"])
+    // breadcrumbs
+    assertEquals("test", processed.breadcrumbs!![0].message)
+    assertEquals("debug", processed.breadcrumbs!![0].type)
+    assertEquals("navigation", processed.breadcrumbs!![1].type)
+    assertEquals("to", processed.breadcrumbs!![1].data["to"])
+    assertEquals("from", processed.breadcrumbs!![1].data["from"])
+    // extras
+    assertEquals(123, processed.extras!!["key"])
+    // transaction
+    assertEquals("TestActivity", processed.transaction)
+    // fingerprint
+    assertEquals(listOf("finger", "print"), processed.fingerprints)
+    // level
+    assertEquals(IchnoisCoreLevel.INFO, processed.level)
+    // request
+    assertEquals("google.com", processed.request!!.url)
+    assertEquals("GET", processed.request!!.method)
+    // contexts
+    assertEquals(1024, processed.contexts.response!!.bodySize)
+    assertEquals("Google Chrome", processed.contexts.browser!!.name)
+  }
+
+  @Test
+  fun `when backfillable event already has breadcrumbs, does not duplicate them with persisted ones`() {
+    // simulates a tombstone-merged native crash event, which already carries its own
+    // breadcrumb history captured at crash time, overlapping with what was persisted to disk
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed =
+      processEvent(hint, populateScopeCache = true) {
+        breadcrumbs = listOf(Breadcrumb.debug("own-crash-time-breadcrumb"))
+      }
+
+    assertEquals(1, processed.breadcrumbs!!.size)
+    assertEquals("own-crash-time-breadcrumb", processed.breadcrumbs!![0].message)
+  }
+
+  @Test
+  fun `when backfillable event is enrichable, does not backfill user ip`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processed = processEvent(hint, isSendDefaultPii = false, populateScopeCache = true)
+    assertNull(processed.user!!.ipAddress)
+  }
+
+  @Test
+  fun `when user info is disabled, does not backfill automatic user data`() {
+    fixture.options.dataCollection.setUserInfo(false)
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processed = processEvent(hint, isSendDefaultPii = true, populateScopeCache = true)
+
+    assertEquals("bot", processed.user!!.username)
+    assertEquals("bot@me.com", processed.user!!.id)
+    assertNull(processed.user!!.ipAddress)
+  }
+
+  @Test
+  fun `when user info is enabled, backfills automatic user data`() {
+    fixture.options.dataCollection.setUserInfo(true)
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processed = processEvent(hint, isSendDefaultPii = false, populateScopeCache = true)
+
+    assertEquals("bot", processed.user!!.username)
+    assertEquals("bot@me.com", processed.user!!.id)
+    assertEquals("{{auto}}", processed.user!!.ipAddress)
+  }
+
+  @Test
+  fun `when backfillable event is enrichable, backfills serialized options data`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed = processEvent(hint, populateOptionsCache = true)
+
+    // release
+    assertEquals("io.ichnois.samples@1.2.0+232", processed.release)
+    // proguard uuid
+    assertEquals(DebugImage.PROGUARD, processed.debugMeta!!.images!![0].type)
+    assertEquals("uuid", processed.debugMeta!!.images!![0].uuid)
+    // sdk version
+    assertEquals("ichnois.java.android", processed.sdk!!.name)
+    assertEquals("6.15.0", processed.sdk!!.version)
+    // dist
+    assertEquals("232", processed.dist)
+    // environment
+    assertEquals("debug", processed.environment)
+    // app
+    // robolectric defaults
+    assertEquals("io.ichnois.android.core.test", processed.contexts.app!!.appIdentifier)
+    assertEquals("io.ichnois.android.core.test", processed.contexts.app!!.appName)
+    assertEquals("1.2.0", processed.contexts.app!!.appVersion)
+    assertEquals("232", processed.contexts.app!!.appBuild)
+    assertNull(processed.contexts.app!!.inForeground)
+    // tags
+    assertEquals("tag", processed.tags!!["option"])
+  }
+
+  @Test
+  fun `when ANR event is enrichable, sets foreground flag`() {
+    val hint = anrHint()
+
+    val processed = processEvent(hint, populateOptionsCache = true)
+
+    assertEquals(true, processed.contexts.app!!.inForeground)
+  }
+
+  @Test
+  fun `if release is in wrong format, does not crash and leaves app version and build empty`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val original = IchnoisCoreEvent()
+
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples")
+
+    val processed = processor.process(original, hint)
+
+    assertEquals("io.ichnois.samples", processed!!.release)
+    assertNull(processed.contexts.app!!.appVersion)
+    assertNull(processed.contexts.app!!.appBuild)
+  }
+
+  @Test
+  fun `if environment is not persisted and app was not updated, uses environment from options`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    setLastUpdateTime(1_000)
+
+    val processed = processEvent(hint)
+
+    assertEquals("release", processed.environment)
+  }
+
+  @Test
+  fun `if release is not persisted and app was not updated, uses release from options`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@1.2.0+232", processed.release)
+  }
+
+  @Test
+  fun `if release is not persisted and app was updated, leaves release empty`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 1_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(2_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+  }
+
+  @Test
+  fun `if exit timestamp is unknown, leaves release empty`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint())
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+  }
+
+  @Test
+  fun `if last update time is invalid, leaves release empty`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 1_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(-1)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+  }
+
+  @Test
+  fun `if dist is not persisted and app was not updated, uses version code from options release`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("232", processed.dist)
+  }
+
+  @Test
+  fun `if app version is not persisted and app was not updated, uses options release`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("1.2.0", processed.contexts.app!!.appVersion)
+    assertEquals("232", processed.contexts.app!!.appBuild)
+  }
+
+  @Test
+  fun `historical event uses current options when app was not updated`() {
+    val hint =
+      HintUtils.createWithTypeCheckHint(AbnormalExitHint(shouldEnrich = false, timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    fixture.options.environment = "production"
+    fixture.options.dist = "custom-dist"
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@1.2.0+232", processed.release)
+    assertEquals("production", processed.environment)
+    assertEquals("custom-dist", processed.dist)
+    val app = processed.contexts.app!!
+    assertEquals("1.2.0", app.appVersion)
+    assertEquals("232", app.appBuild)
+    assertNull(app.appName)
+    assertNull(app.appIdentifier)
+  }
+
+  @Test
+  fun `if options cache is from an older app update, uses current options`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 3_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@2.0.0+300"
+    fixture.options.environment = "current-user"
+    fixture.options.dist = "current-dist"
+    fixture.options.proguardUuid = "current-uuid"
+    fixture.options.sdkVersion = SdkVersion("current-sdk", "2.0.0")
+    fixture.options.setTag("account", "current-tag")
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.0.0+100")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "previous-user")
+    fixture.persistOptions(DIST_FILENAME, "previous-dist")
+    fixture.persistOptions(PROGUARD_UUID_FILENAME, "previous-uuid")
+    fixture.persistOptions(SDK_VERSION_FILENAME, SdkVersion("previous-sdk", "1.0.0"))
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "previous-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(2_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@2.0.0+300", processed.release)
+    assertEquals("current-user", processed.environment)
+    assertEquals("current-dist", processed.dist)
+    assertEquals("current-uuid", processed.debugMeta!!.images!![0].uuid)
+    assertEquals("current-sdk", processed.sdk!!.name)
+    assertEquals("current-tag", processed.tags!!["account"])
+  }
+
+  @Test
+  fun `if options cache is from current app update, uses persisted options`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.0.0+100"
+    fixture.options.environment = "current-user"
+    fixture.options.dist = "current-dist"
+    fixture.options.setTag("account", "current-tag")
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.0.0+100")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "crashed-user")
+    fixture.persistOptions(DIST_FILENAME, "crashed-dist")
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "crashed-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@1.0.0+100", processed.release)
+    assertEquals("crashed-user", processed.environment)
+    assertEquals("crashed-dist", processed.dist)
+    assertEquals("crashed-tag", processed.tags!!["account"])
+  }
+
+  @Test
+  fun `if options cache was written after the exit, ignores persisted options`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@2.0.0+200")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "newer-user")
+    fixture.persistOptions(DIST_FILENAME, "newer-dist")
+    fixture.persistOptions(PROGUARD_UUID_FILENAME, "newer-uuid")
+    fixture.persistOptions(SDK_VERSION_FILENAME, SdkVersion("newer-sdk", "2.0.0"))
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "newer-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 2_500L).setRelease(null)
+    setLastUpdateTime(3_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+    assertNull(processed.environment)
+    assertNull(processed.dist)
+    assertTrue(processed.debugMeta!!.images!!.isEmpty())
+    assertNull(processed.sdk)
+    assertNull(processed.tags?.get("account"))
+  }
+
+  @Test
+  fun `historical event leaves release empty when app was updated`() {
+    val hint =
+      HintUtils.createWithTypeCheckHint(AbnormalExitHint(shouldEnrich = false, timestamp = 1_000))
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.2.0+232"
+    setLastUpdateTime(2_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+    assertNull(processed.contexts.app)
+  }
+
+  @Test
+  fun `memory limiter event uses current options when cache generation is stale`() {
+    val hint = memoryLimiterHint(timestamp = 3_000)
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@2.0.0+300"
+    fixture.options.environment = "current-user"
+    fixture.options.dist = "current-dist"
+    fixture.options.proguardUuid = "current-uuid"
+    fixture.options.sdkVersion = SdkVersion("current-sdk", "2.0.0")
+    fixture.options.setTag("account", "current-tag")
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.0.0+100")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "previous-user")
+    fixture.persistOptions(DIST_FILENAME, "previous-dist")
+    fixture.persistOptions(PROGUARD_UUID_FILENAME, "previous-uuid")
+    fixture.persistOptions(SDK_VERSION_FILENAME, SdkVersion("previous-sdk", "1.0.0"))
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "previous-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(2_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@2.0.0+300", processed.release)
+    assertEquals("current-user", processed.environment)
+    assertEquals("current-dist", processed.dist)
+    assertEquals("current-uuid", processed.debugMeta!!.images!![0].uuid)
+    assertEquals("current-sdk", processed.sdk!!.name)
+    assertEquals("current-tag", processed.tags!!["account"])
+  }
+
+  @Test
+  fun `memory limiter event uses persisted options when cache generation matches crashed app`() {
+    val hint = memoryLimiterHint(timestamp = 2_000)
+    val processor = fixture.getSut(tmpDir)
+    fixture.options.release = "io.ichnois.samples@1.0.0+100"
+    fixture.options.environment = "current-user"
+    fixture.options.dist = "current-dist"
+    fixture.options.setTag("account", "current-tag")
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.0.0+100")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "crashed-user")
+    fixture.persistOptions(DIST_FILENAME, "crashed-dist")
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "crashed-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals("io.ichnois.samples@1.0.0+100", processed.release)
+    assertEquals("crashed-user", processed.environment)
+    assertEquals("crashed-dist", processed.dist)
+    assertEquals("crashed-tag", processed.tags!!["account"])
+  }
+
+  @Test
+  fun `memory limiter event ignores persisted options when cache generation is newer than exit`() {
+    val hint = memoryLimiterHint(timestamp = 2_000)
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@2.0.0+200")
+    fixture.persistOptions(ENVIRONMENT_FILENAME, "newer-user")
+    fixture.persistOptions(DIST_FILENAME, "newer-dist")
+    fixture.persistOptions(PROGUARD_UUID_FILENAME, "newer-uuid")
+    fixture.persistOptions(SDK_VERSION_FILENAME, SdkVersion("newer-sdk", "2.0.0"))
+    fixture.persistOptions(OPTIONS_TAGS_FILENAME, mapOf("account" to "newer-tag"))
+    PersistingOptionsCacheGenerationObserver(fixture.options, 2_500L).setRelease(null)
+    setLastUpdateTime(3_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.release)
+    assertNull(processed.environment)
+    assertNull(processed.dist)
+    assertTrue(processed.debugMeta!!.images!!.isEmpty())
+    assertNull(processed.sdk)
+    assertNull(processed.tags?.get("account"))
+  }
+
+  @Test
+  fun `if dist is not persisted, backfills it from release`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val original = IchnoisCoreEvent()
+
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(RELEASE_FILENAME, "io.ichnois.samples@1.2.0+232")
+
+    val processed = processor.process(original, hint)
+
+    assertEquals("232", processed!!.dist)
+  }
+
+  @Test
+  fun `merges user`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed = processEvent(hint, populateScopeCache = true)
+
+    assertEquals("bot@me.com", processed.user!!.id)
+    assertEquals("bot", processed.user!!.username)
+    assertEquals(IpAddressUtils.DEFAULT_IP_ADDRESS, processed.user!!.ipAddress)
+  }
+
+  @Test
+  fun `uses installation id for user, if it has no id`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val original = IchnoisCoreEvent()
+
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(USER_FILENAME, User())
+
+    val processed = processor.process(original, hint)
+
+    assertEquals(Installation.deviceId, processed!!.user!!.id)
+  }
+
+  @Test
+  fun `when user info is disabled, sets installation id for missing user id`() {
+    fixture.options.dataCollection.setUserInfo(false)
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val original = IchnoisCoreEvent()
+    val processor = fixture.getSut(tmpDir)
+    fixture.persistOptions(USER_FILENAME, User())
+
+    val processed = processor.process(original, hint)
+
+    assertEquals(Installation.deviceId, processed!!.user!!.id)
+  }
+
+  @Test
+  fun `when event has some fields set, does not override them`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed =
+      processEvent(hint, populateScopeCache = true, populateOptionsCache = true) {
+        contexts.setDevice(
+          Device().apply {
+            brand = "Pixel"
+            model = "3XL"
+            memorySize = 4096
+          }
+        )
+        platform = "NotAndroid"
+
+        transaction = "MainActivity"
+        level = DEBUG
+        breadcrumbs = listOf(Breadcrumb.debug("test"))
+
+        environment = "debug"
+        release = "io.ichnois.samples@1.1.0+220"
+        debugMeta =
+          DebugMeta().apply {
+            images =
+              listOf(
+                DebugImage().apply {
+                  type = DebugImage.PROGUARD
+                  uuid = "uuid1"
+                }
+              )
+          }
+        user =
+          User().apply {
+            id = "42"
+            ipAddress = "2.4.8.16"
+          }
+      }
+
+    assertEquals("NotAndroid", processed.platform)
+    assertEquals("Pixel", processed.contexts.device!!.brand)
+    assertEquals("3XL", processed.contexts.device!!.model)
+    assertEquals(4096, processed.contexts.device!!.memorySize)
+
+    assertEquals("MainActivity", processed.transaction)
+    assertEquals(DEBUG, processed.level)
+    // breadcrumbs already set on the event are preserved as-is, not merged with the persisted
+    // ones, since the event already carries its own authoritative breadcrumb history
+    assertEquals(1, processed.breadcrumbs!!.size)
+    assertEquals("debug", processed.breadcrumbs!![0].type)
+    assertEquals("test", processed.breadcrumbs!![0].message)
+
+    assertEquals("debug", processed.environment)
+    assertEquals("io.ichnois.samples@1.1.0+220", processed.release)
+    assertEquals("220", processed.contexts.app!!.appBuild)
+    assertEquals("1.1.0", processed.contexts.app!!.appVersion)
+    assertEquals(2, processed.debugMeta!!.images!!.size)
+    assertEquals("uuid1", processed.debugMeta!!.images!![0].uuid)
+    assertEquals("uuid", processed.debugMeta!!.images!![1].uuid)
+
+    assertEquals("42", processed.user!!.id)
+    assertEquals("2.4.8.16", processed.user!!.ipAddress)
+  }
+
+  @Test
+  fun `when proguard uuid is not persisted, does not add to debug meta`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+    val processed = processEvent(hint, populateOptionsCache = false)
+
+    // proguard uuid
+    assertTrue(processed.debugMeta!!.images!!.isEmpty())
+  }
+
+  @Test
+  fun `populates exception from main thread`() {
+    val hint = anrHint()
+    val stacktrace =
+      IchnoisCoreStackTrace().apply {
+        frames =
+          listOf(
+            IchnoisCoreStackFrame().apply {
+              lineno = 777
+              module = "io.ichnois.samples.MainActivity"
+              function = "run"
+            }
+          )
+      }
+
+    val processed =
+      processEvent(hint) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              id = 13
+              this.stacktrace = stacktrace
+            }
+          )
+      }
+
+    val exception = processed.exceptions!!.first()
+    assertEquals(13, exception.threadId)
+    assertEquals("AppExitInfo", exception.mechanism!!.type)
+    assertEquals("ANR", exception.value)
+    assertEquals("ApplicationNotResponding", exception.type)
+    assertEquals("io.ichnois.android.core", exception.module)
+    assertEquals(true, exception.stacktrace!!.snapshot)
+    val frame = exception.stacktrace!!.frames!!.first()
+    assertEquals(777, frame.lineno)
+    assertEquals("run", frame.function)
+    assertEquals("io.ichnois.samples.MainActivity", frame.module)
+  }
+
+  @Test
+  fun `populates exception without stacktrace when there is no main thread in threads`() {
+    val hint = anrHint()
+
+    val processed = processEvent(hint) { threads = listOf(IchnoisCoreThread()) }
+
+    val exception = processed.exceptions!!.first()
+    assertEquals("AppExitInfo", exception.mechanism!!.type)
+    assertEquals("ANR", exception.value)
+    assertEquals("ApplicationNotResponding", exception.type)
+    assertEquals("io.ichnois.android.core", exception.module)
+    assertNull(exception.stacktrace)
+  }
+
+  @Test
+  fun `adds Background to the message when mechanism is anr_background`() {
+    val hint = anrHint(mechanism = "anr_background")
+
+    val processed =
+      processEvent(hint) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace = IchnoisCoreStackTrace()
+            }
+          )
+      }
+
+    val exception = processed.exceptions!!.first()
+    assertEquals("Background ANR", exception.value)
+  }
+
+  @Test
+  fun `does not add Background to the message when mechanism is anr_foreground`() {
+    val hint = anrHint(mechanism = "anr_foreground")
+
+    val processed =
+      processEvent(hint) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace = IchnoisCoreStackTrace()
+            }
+          )
+      }
+
+    val exception = processed.exceptions!!.first()
+    assertEquals("ANR", exception.value)
+  }
+
+  @Test
+  fun `sets default fingerprint to distinguish between background and foreground ANRs`() {
+    val backgroundHint = anrHint(mechanism = "anr_background")
+    val processedBackground =
+      processEvent(backgroundHint, populateScopeCache = false) {
+        exceptions =
+          listOf(
+            IchnoisCoreException().apply {
+              this.stacktrace =
+                IchnoisCoreStackTrace(
+                  listOf(
+                    IchnoisCoreStackFrame().apply {
+                      module = "io.ichnois.samples.MainActivity"
+                      function = "run"
+                    }
+                  )
+                )
+            }
+          )
+      }
+    assertEquals(listOf("{{ default }}", "background-anr"), processedBackground.fingerprints)
+
+    val foregroundHint = anrHint(mechanism = "anr_foreground")
+    val processedForeground =
+      processEvent(foregroundHint, populateScopeCache = false) {
+        exceptions =
+          listOf(
+            IchnoisCoreException().apply {
+              this.stacktrace =
+                IchnoisCoreStackTrace(
+                  listOf(
+                    IchnoisCoreStackFrame().apply {
+                      module = "io.ichnois.samples.MainActivity"
+                      function = "run"
+                    }
+                  )
+                )
+            }
+          )
+      }
+    assertEquals(listOf("{{ default }}", "foreground-anr"), processedForeground.fingerprints)
+  }
+
+  @Test
+  fun `tombstone hint does not override platform or exceptions`() {
+    val hint =
+      HintUtils.createWithTypeCheckHint(
+        TombstoneIntegration.TombstoneHint(
+          fixture.options.flushTimeoutMillis,
+          NoOpLogger.getInstance(),
+          0,
+          true,
+        )
+      )
+
+    val processed =
+      processEvent(hint, populateScopeCache = false, populateOptionsCache = false) {
+        platform = "native"
+        exceptions = listOf(IchnoisCoreException().apply { type = "NativeCrash" })
+      }
+
+    assertEquals("native", processed.platform)
+    assertEquals("NativeCrash", processed.exceptions!!.first().type)
+    assertNull(processed.fingerprints)
+  }
+
+  @Test
+  fun `memory limiter hint does not apply ANR-specific enrichment`() {
+    val expectedMessage =
+      MemoryLimiterIntegration.MEMORY_LIMITER_MESSAGE_PREFIX +
+        " (importance_foreground: " +
+        ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND +
+        ")"
+    val hint =
+      HintUtils.createWithTypeCheckHint(
+        MemoryLimiterIntegration.MemoryLimiterHint(
+          fixture.options.flushTimeoutMillis,
+          NoOpLogger.getInstance(),
+          1_000,
+          true,
+        )
+      )
+
+    val processed =
+      processEvent(hint, populateScopeCache = false, populateOptionsCache = false) {
+        level = IchnoisCoreLevel.FATAL
+        platform = IchnoisCoreBaseEvent.DEFAULT_PLATFORM
+        message = Message().apply { formatted = expectedMessage }
+        fingerprints =
+          listOf(
+            MemoryLimiterIntegration.MEMORY_LIMITER_FINGERPRINT,
+            MemoryLimiterIntegration.PROCESS_IMPORTANCE_FINGERPRINT_PREFIX +
+              ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND,
+          )
+        exceptions =
+          listOf(
+            IchnoisCoreException().apply {
+              type = "MemoryLimitExceeded"
+              value = expectedMessage
+              mechanism = Mechanism().apply { type = "AppExitInfo" }
+            }
+          )
+      }
+
+    assertEquals(IchnoisCoreBaseEvent.DEFAULT_PLATFORM, processed.platform)
+    assertEquals(expectedMessage, processed.message!!.formatted)
+    assertEquals("MemoryLimitExceeded", processed.exceptions!!.first().type)
+    assertEquals("AppExitInfo", processed.exceptions!!.first().mechanism!!.type)
+    assertEquals(
+      listOf(
+        MemoryLimiterIntegration.MEMORY_LIMITER_FINGERPRINT,
+        MemoryLimiterIntegration.PROCESS_IMPORTANCE_FINGERPRINT_PREFIX +
+          ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND,
+      ),
+      processed.fingerprints,
+    )
+    assertNull(processed.contexts.app?.inForeground)
+    assertNull(processed.contexts.profile)
+  }
+
+  @Test
+  fun `sets system-frames-only fingerprint when ANR fingerprinting enabled and no app frames`() {
+    fixture.options.isEnableAnrFingerprinting = true
+    val hint = anrHint(mechanism = "anr_foreground")
+
+    val processed =
+      processEvent(hint, populateScopeCache = false) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace =
+                IchnoisCoreStackTrace().apply {
+                  frames =
+                    listOf(
+                      IchnoisCoreStackFrame().apply {
+                        module = "java.lang"
+                        filename = "Thread.java"
+                        function = "run"
+                      }
+                    )
+                }
+            }
+          )
+      }
+
+    assertEquals(listOf("system-frames-only-anr", "foreground-anr"), processed.fingerprints)
+  }
+
+  @Test
+  fun `does not set system-frames-only fingerprint when ANR fingerprinting is disabled and no app frames are present`() {
+    fixture.options.isEnableAnrFingerprinting = false
+    val hint = anrHint(mechanism = "anr_foreground")
+
+    val processed =
+      processEvent(hint, populateScopeCache = false) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace =
+                IchnoisCoreStackTrace().apply {
+                  frames =
+                    listOf(
+                      IchnoisCoreStackFrame().apply {
+                        module = "java.lang"
+                        filename = "Thread.java"
+                        function = "run"
+                      }
+                    )
+                }
+            }
+          )
+      }
+
+    assertEquals(listOf("{{ default }}", "foreground-anr"), processed.fingerprints)
+  }
+
+  @Test
+  fun `sets default fingerprint when ANR fingerprinting enabled and app frames are present`() {
+    fixture.options.isEnableAnrFingerprinting = true
+    val hint = anrHint(mechanism = "anr_foreground")
+
+    val processed =
+      processEvent(hint, populateScopeCache = false) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace =
+                IchnoisCoreStackTrace().apply {
+                  frames =
+                    listOf(
+                      IchnoisCoreStackFrame().apply {
+                        module = "com.example.MyApp"
+                        function = "onCreate"
+                      }
+                    )
+                }
+            }
+          )
+      }
+
+    assertEquals(listOf("{{ default }}", "foreground-anr"), processed.fingerprints)
+  }
+
+  @Test
+  fun `does not set profile context when ANR profiling is disabled`() {
+    fixture.options.anrProfilingSampleRate = null
+    val hint = anrHint(mechanism = "anr_foreground")
+    val processed =
+      processEvent(hint, populateScopeCache = false) {
+        threads =
+          listOf(
+            IchnoisCoreThread().apply {
+              name = "main"
+              stacktrace =
+                IchnoisCoreStackTrace().apply {
+                  frames =
+                    listOf(
+                      IchnoisCoreStackFrame().apply {
+                        module = "com.example.MyApp"
+                        function = "onCreate"
+                      }
+                    )
+                }
+            }
+          )
+      }
+    assertNull(processed.contexts.profile)
+  }
+
+  @Test
+  fun `applies ANR profile if available`() {
+    fixture.options.anrProfilingSampleRate = 1.0
+    val processor =
+      fixture.getSut(
+        tmpDir,
+        populateScopeCache = false,
+        populateOptionsCache = false,
+        isSendDefaultPii = false,
+      )
+
+    val hintTimestamp = System.currentTimeMillis()
+    val hint = anrHint(mechanism = "anr_foreground", timestamp = hintTimestamp)
+
+    AnrProfileManager(
+        fixture.options,
+        AnrProfileRotationHelper.getFileForRecording(File(fixture.options.cacheDirPath!!)),
+      )
+      .apply {
+        add(
+          AnrStackTrace(
+            hintTimestamp,
+            arrayOf(
+              StackTraceElement(
+                "android.view.Choreographer",
+                "doFrame",
+                "Choreographer.java",
+                1234,
+              ),
+              StackTraceElement("android.os.Handler", "dispatchMessage", "Handler.java", 5678),
+            ),
+          )
+        )
+        close()
+      }
+    AnrProfileRotationHelper.rotate()
+
+    val scopes = mock<IScopes>()
+    whenever(scopes.captureProfileChunk(any())).thenReturn(IchnoisCoreId())
+
+    mockStatic(IchnoisCore::class.java).use { mockedIchnoisCore ->
+      mockedIchnoisCore.`when`<Any> { IchnoisCore.getCurrentScopes() }.thenReturn(scopes)
+
+      val processed = processor.process(IchnoisCoreEvent(), hint)
+      val chunkCaptor = argumentCaptor<ProfileChunk>()
+      verify(scopes).captureProfileChunk(chunkCaptor.capture())
+      val ichnoisProfile = chunkCaptor.firstValue.ichnoisProfile
+
+      assertNotNull(processed?.contexts?.profile)
+      assertNotNull(processed.contexts.profile?.profilerId)
+      assertNotNull(ichnoisProfile)
+      // Two samples are present b/c the converter adds a synthetic one to keep Relay happy.
+      assertEquals(2, ichnoisProfile.samples.size)
+    }
+  }
+
+  @Test
+  fun `uses persisted proguard uuid for ANR profile chunk after app update`() {
+    fixture.options.anrProfilingSampleRate = 1.0
+    fixture.options.proguardUuid = "current-uuid"
+    val processor =
+      fixture.getSut(
+        tmpDir,
+        populateScopeCache = false,
+        populateOptionsCache = false,
+        isSendDefaultPii = false,
+      )
+    fixture.persistOptions(PROGUARD_UUID_FILENAME, "previous-uuid")
+    setLastUpdateTime(2_000)
+
+    val hint = anrHint(mechanism = "anr_foreground", timestamp = 1_000)
+
+    AnrProfileManager(
+        fixture.options,
+        AnrProfileRotationHelper.getFileForRecording(File(fixture.options.cacheDirPath!!)),
+      )
+      .apply {
+        add(
+          AnrStackTrace(
+            1_000,
+            arrayOf(
+              StackTraceElement("com.example.MyApp", "blocked", "MyApp.java", 42),
+              StackTraceElement("android.os.Handler", "dispatchMessage", "Handler.java", 5678),
+            ),
+          )
+        )
+        close()
+      }
+    AnrProfileRotationHelper.rotate()
+
+    val scopes = mock<IScopes>()
+    whenever(scopes.captureProfileChunk(any())).thenReturn(IchnoisCoreId())
+
+    mockStatic(IchnoisCore::class.java).use { mockedIchnoisCore ->
+      mockedIchnoisCore.`when`<Any> { IchnoisCore.getCurrentScopes() }.thenReturn(scopes)
+
+      processor.process(IchnoisCoreEvent(), hint)
+
+      val chunkCaptor = argumentCaptor<ProfileChunk>()
+      verify(scopes).captureProfileChunk(chunkCaptor.capture())
+      val images = chunkCaptor.firstValue.debugMeta!!.images!!
+      assertEquals(1, images.size)
+      assertEquals(DebugImage.PROGUARD, images[0].type)
+      assertEquals("previous-uuid", images[0].uuid)
+    }
+  }
+
+  @Test
+  fun `does not crash when ANR profiling is enabled but cache dir is null`() {
+    fixture.options.anrProfilingSampleRate = 1.0
+    fixture.options.cacheDirPath = null
+    val hint = anrHint(mechanism = "anr_foreground")
+    val original = IchnoisCoreEvent()
+
+    val processor = fixture.getSut(tmpDir)
+    val processed = processor.process(original, hint)
+
+    assertNotNull(processed)
+    assertNull(processed.contexts.profile)
+  }
+
+  @Test
+  fun `sets replayId when replay folder exists`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processor = fixture.getSut(tmpDir, populateScopeCache = true)
+    val replayFolder =
+      File(fixture.options.cacheDirPath, "replay_${Fixture.REPLAY_ID}").also { it.mkdirs() }
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals(Fixture.REPLAY_ID, processed.contexts[Contexts.REPLAY_ID].toString())
+  }
+
+  @Test
+  fun `does not set replayId when replay folder does not exist and no sample rate persisted`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processor = fixture.getSut(tmpDir, populateScopeCache = true)
+    val replayId1 = IchnoisCoreId()
+    val replayId2 = IchnoisCoreId()
+
+    val replayFolder1 = File(fixture.options.cacheDirPath, "replay_$replayId1").also { it.mkdirs() }
+    val replayFolder2 = File(fixture.options.cacheDirPath, "replay_$replayId2").also { it.mkdirs() }
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.contexts[Contexts.REPLAY_ID])
+  }
+
+  @Test
+  fun `does not set replayId when replay folder does not exist and not sampled`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processor =
+      fixture.getSut(
+        tmpDir,
+        populateScopeCache = true,
+        populateOptionsCache = true,
+        replayErrorSampleRate = 0.0,
+      )
+    val replayId1 = IchnoisCoreId()
+    val replayId2 = IchnoisCoreId()
+
+    val replayFolder1 = File(fixture.options.cacheDirPath, "replay_$replayId1").also { it.mkdirs() }
+    val replayFolder2 = File(fixture.options.cacheDirPath, "replay_$replayId2").also { it.mkdirs() }
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.contexts[Contexts.REPLAY_ID])
+  }
+
+  @Test
+  fun `if options cache is current, uses persisted replay error sample rate`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 2_000))
+    val processor = fixture.getSut(tmpDir, populateScopeCache = true)
+    fixture.options.sessionReplay.onErrorSampleRate = 1.0
+    fixture.persistOptions(REPLAY_ERROR_SAMPLE_RATE_FILENAME, "0.0")
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(1_000)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertNull(processed.contexts[Contexts.REPLAY_ID])
+  }
+
+  @Test
+  fun `if options cache is stale, uses current replay error sample rate`() {
+    val hint = HintUtils.createWithTypeCheckHint(AbnormalExitHint(timestamp = 3_000))
+    val processor = fixture.getSut(tmpDir, populateScopeCache = true)
+    fixture.options.sessionReplay.onErrorSampleRate = 1.0
+    fixture.persistOptions(REPLAY_ERROR_SAMPLE_RATE_FILENAME, "0.0")
+    PersistingOptionsCacheGenerationObserver(fixture.options, 1_000L).setRelease(null)
+    setLastUpdateTime(2_000)
+    val replayId = IchnoisCoreId()
+    File(fixture.options.cacheDirPath, "replay_$replayId").also {
+      it.mkdirs()
+      it.setLastModified(1_000)
+    }
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals(replayId.toString(), processed.contexts[Contexts.REPLAY_ID].toString())
+  }
+
+  @Test
+  fun `set replayId of the last modified folder`() {
+    val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+    val processor =
+      fixture.getSut(
+        tmpDir,
+        populateScopeCache = true,
+        populateOptionsCache = true,
+        replayErrorSampleRate = 1.0,
+      )
+    val replayId1 = IchnoisCoreId()
+    val replayId2 = IchnoisCoreId()
+
+    val replayFolder1 = File(fixture.options.cacheDirPath, "replay_$replayId1").also { it.mkdirs() }
+    val replayFolder2 = File(fixture.options.cacheDirPath, "replay_$replayId2").also { it.mkdirs() }
+    replayFolder1.setLastModified(1000)
+    replayFolder2.setLastModified(500)
+
+    val processed = processor.process(IchnoisCoreEvent(), hint)!!
+
+    assertEquals(replayId1.toString(), processed.contexts[Contexts.REPLAY_ID].toString())
+    assertEquals(
+      replayId1.toString(),
+      fixture.options
+        .findPersistingScopeObserver()
+        ?.read(fixture.options, REPLAY_FILENAME, String::class.java),
+    )
+  }
+
+  private fun processEvent(
+    hint: Hint,
+    populateScopeCache: Boolean = false,
+    populateOptionsCache: Boolean = false,
+    isSendDefaultPii: Boolean = true,
+    configureEvent: IchnoisCoreEvent.() -> Unit = {},
+  ): IchnoisCoreEvent {
+    val original = IchnoisCoreEvent().apply(configureEvent)
+
+    val processor =
+      fixture.getSut(
+        tmpDir,
+        populateScopeCache = populateScopeCache,
+        populateOptionsCache = populateOptionsCache,
+        isSendDefaultPii = isSendDefaultPii,
+      )
+    return processor.process(original, hint)!!
+  }
+
+  private fun setLastUpdateTime(lastUpdateTime: Long) {
+    ContextUtils.getPackageInfo(fixture.context, fixture.buildInfo)!!.lastUpdateTime =
+      lastUpdateTime
+  }
+
+  private fun anrHint(
+    mechanism: String = "anr_foreground",
+    shouldEnrich: Boolean = true,
+    timestamp: Long = 0,
+  ): Hint {
+    return HintUtils.createWithTypeCheckHint(
+      AnrV2Integration.AnrV2Hint(
+        fixture.options.flushTimeoutMillis,
+        NoOpLogger.getInstance(),
+        timestamp,
+        shouldEnrich,
+        mechanism == "anr_background",
+      )
+    )
+  }
+
+  private fun memoryLimiterHint(
+    shouldEnrich: Boolean = true,
+    timestamp: Long,
+  ): Hint {
+    return HintUtils.createWithTypeCheckHint(
+      MemoryLimiterIntegration.MemoryLimiterHint(
+        fixture.options.flushTimeoutMillis,
+        NoOpLogger.getInstance(),
+        timestamp,
+        shouldEnrich,
+      )
+    )
+  }
+
+  internal class AbnormalExitHint(
+    val mechanism: String? = null,
+    private val shouldEnrich: Boolean = true,
+    private val timestamp: Long? = null,
+  ) : AbnormalExit, Backfillable {
+    override fun mechanism(): String? = mechanism
+
+    override fun ignoreCurrentThread(): Boolean = false
+
+    override fun timestamp(): Long? = timestamp
+
+    override fun shouldEnrich(): Boolean = shouldEnrich
+  }
+
+  internal class BackfillableHint(private val shouldEnrich: Boolean = true) : Backfillable {
+    override fun shouldEnrich(): Boolean = shouldEnrich
+  }
+}

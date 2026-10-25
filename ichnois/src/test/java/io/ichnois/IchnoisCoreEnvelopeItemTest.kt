@@ -1,0 +1,850 @@
+package io.ichnois
+
+import io.ichnois.exception.IchnoisCoreEnvelopeException
+import io.ichnois.protocol.ReplayRecordingSerializationTest
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.IchnoisCoreReplayEventSerializationTest
+import io.ichnois.protocol.User
+import io.ichnois.protocol.ViewHierarchy
+import io.ichnois.test.injectForField
+import io.ichnois.vendor.Base64
+import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.IOException
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.io.StringWriter
+import java.nio.charset.Charset
+import java.nio.file.Files
+import java.util.concurrent.Callable
+import kotlin.test.AfterTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.junit.Assert.assertArrayEquals
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import org.mockito.kotlin.any
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+import org.msgpack.core.MessagePack
+
+class IchnoisCoreEnvelopeItemTest {
+  @get:Rule val tmpDir = TemporaryFolder()
+
+  private class Fixture {
+    val options = IchnoisCoreOptions()
+    val serializer = JsonSerializer(options)
+    val errorSerializer: JsonSerializer = mock {
+      on(it.serialize(any<JsonSerializable>(), any())).then { throw Exception("Mocked exception.") }
+    }
+    val pathname = "hello.txt"
+    val filename = pathname
+    val bytes = "hello".toByteArray()
+    val maxAttachmentSize: Long = (5 * 1024 * 1024).toLong()
+
+    val bytesAllowed = ByteArray(maxAttachmentSize.toInt()) { 0 }
+    val bytesTooBig = ByteArray((maxAttachmentSize + 1).toInt()) { 0 }
+  }
+
+  private val fixture = Fixture()
+
+  @AfterTest
+  fun afterTest() {
+    val file = File(fixture.pathname)
+    file.delete()
+  }
+
+  @Test
+  fun `fromSession creates an envelope with a session item`() {
+    val envelope = IchnoisCoreEnvelope.from(mock(), createSession(), null)
+    envelope.items.forEach {
+      assertEquals("application/json", it.header.contentType)
+      assertEquals(IchnoisCoreItemType.Session, it.header.type)
+      assertNull(it.header.fileName)
+      assertNotNull(it.data)
+    }
+  }
+
+  @Test
+  fun `fromAttachment with bytes`() {
+    val attachment = Attachment(fixture.bytesAllowed, fixture.filename)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertAttachment(attachment, fixture.bytesAllowed, item)
+  }
+
+  @Test
+  fun `fromAttachment with Serializable`() {
+    val viewHierarchy = ViewHierarchy("android", emptyList())
+    val viewHierarchySerialized = serialize(viewHierarchy)
+
+    val attachment = Attachment(viewHierarchy, fixture.filename, "text/plain", null, false)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertAttachment(attachment, viewHierarchySerialized, item)
+  }
+
+  @Test
+  fun `fromAttachment with byteProvider`() {
+    val attachment =
+      Attachment(
+        object : Callable<ByteArray> {
+          override fun call(): ByteArray? = byteArrayOf(0x1)
+        },
+        fixture.filename,
+        "text/plain",
+        "image/png",
+        false,
+      )
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertAttachment(attachment, byteArrayOf(0x1), item)
+  }
+
+  @Test
+  fun `fromAttachment with attachmentType`() {
+    val attachment = Attachment(fixture.pathname, fixture.filename, "", true, "event.minidump")
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertEquals("event.minidump", item.header.attachmentType)
+  }
+
+  @Test
+  fun `fromAttachment with file`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(fixture.bytesAllowed)
+    val attachment = Attachment(file.path)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertAttachment(attachment, fixture.bytesAllowed, item)
+  }
+
+  @Test
+  fun `fromAttachment with 2MB file`() {
+    val file = File(fixture.pathname)
+    val twoMB = ByteArray(1024 * 1024 * 2) { 1 }
+    file.writeBytes(twoMB)
+    val attachment = Attachment(file.absolutePath)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertAttachment(attachment, twoMB, item)
+  }
+
+  @Test
+  fun `fromAttachment with non existent file`() {
+    val attachment = Attachment("I don't exist", "file.txt")
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertFailsWith<IOException>(
+      "Reading the attachment ${attachment.pathname} failed, because the file located at " +
+        "the path is not a file."
+    ) {
+      item.data
+    }
+  }
+
+  @Test
+  fun `fromAttachment with file permission denied`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(fixture.bytes)
+
+    // On CI it can happen that we don't have the permission to the file permission to read only
+    val changedFileReadPermission = file.setReadable(false)
+    if (changedFileReadPermission) {
+      val attachment = Attachment(file.path, "file.txt")
+
+      val item =
+        IchnoisCoreEnvelopeItem.fromAttachment(
+          fixture.serializer,
+          fixture.options.logger,
+          attachment,
+          fixture.maxAttachmentSize,
+        )
+
+      assertFailsWith<IOException>(
+        "Reading the attachment ${attachment.pathname} failed, " + "because can't read the file."
+      ) {
+        item.data
+      }
+    } else {
+      println("Was not able to change file access permission. Skipping test.")
+    }
+  }
+
+  @Test
+  fun `fromAttachment with file SecurityManager denies read access`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(fixture.bytes)
+
+    val attachment = Attachment(file.path, fixture.filename)
+
+    val securityManager = DenyReadFileSecurityManager(fixture.pathname)
+    System.setSecurityManager(securityManager)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertFailsWith<SecurityException>("Reading the attachment ${attachment.pathname} failed.") {
+      item.data
+    }
+
+    System.setSecurityManager(null)
+  }
+
+  @Test
+  fun `fromAttachment with both bytes and pathname null`() {
+    val attachment = Attachment("")
+    // Annotations prevent creating attachments with both bytes and path null.
+    // If someone ignores the annotations in Java and passes null for path
+    // or bytes, we still want our code to work properly. Instead of creating
+    // an extra test class in Java and ignoring the warnings we just use
+    // reflection instead.
+    attachment.injectForField("pathname", null)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertFailsWith<IchnoisCoreEnvelopeException>(
+      "Couldn't attach the attachment ${attachment.filename}.\n" +
+        "Please check that either bytes or a path is set."
+    ) {
+      item.data
+    }
+  }
+
+  @Test
+  fun `fromAttachment with image`() {
+    val image = this::class.java.classLoader.getResource("Tongariro.jpg")!!
+    val attachment = Attachment(image.path)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.serializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+    assertAttachment(attachment, image.readBytes(), item)
+  }
+
+  @Test
+  fun `fromAttachment with bytes too big`() {
+    val attachment = Attachment(fixture.bytesTooBig, fixture.filename)
+    val exception =
+      assertFailsWith<IchnoisCoreEnvelopeException> {
+        IchnoisCoreEnvelopeItem.fromAttachment(
+            fixture.serializer,
+            fixture.options.logger,
+            attachment,
+            fixture.maxAttachmentSize,
+          )
+          .data
+      }
+
+    assertEquals(
+      "Dropping attachment with filename '${fixture.filename}', because the " +
+        "size of the passed bytes with ${fixture.bytesTooBig.size} bytes is bigger " +
+        "than the maximum allowed attachment size of " +
+        "${fixture.maxAttachmentSize} bytes.",
+      exception.message,
+    )
+  }
+
+  @Test
+  fun `fromAttachment with serializable too big`() {
+    val serializable = JsonSerializable { writer, _ ->
+      writer.beginObject()
+      writer.name("payload").value(String(fixture.bytesTooBig))
+      writer.endObject()
+    }
+    val serializedBytes = serialize(serializable)
+
+    val attachment = Attachment(serializable, fixture.filename, "text/plain", null, false)
+    val exception =
+      assertFailsWith<IchnoisCoreEnvelopeException> {
+        IchnoisCoreEnvelopeItem.fromAttachment(
+            fixture.serializer,
+            fixture.options.logger,
+            attachment,
+            fixture.maxAttachmentSize,
+          )
+          .data
+      }
+
+    assertEquals(
+      "Dropping attachment with filename '${fixture.filename}', because the " +
+        "size of the passed bytes with ${serializedBytes.size} bytes is bigger " +
+        "than the maximum allowed attachment size of " +
+        "${fixture.maxAttachmentSize} bytes.",
+      exception.message,
+    )
+  }
+
+  @Test
+  fun `fromAttachment with file too big`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(fixture.bytesTooBig)
+    val attachment = Attachment(file.path)
+
+    val exception =
+      assertFailsWith<IOException> {
+        IchnoisCoreEnvelopeItem.fromAttachment(
+            fixture.serializer,
+            fixture.options.logger,
+            attachment,
+            fixture.maxAttachmentSize,
+          )
+          .data
+      }
+
+    assertEquals(
+      "Reading file failed, because size located at " +
+        "'${fixture.pathname}' with ${file.length()} bytes is bigger than the maximum " +
+        "allowed size of ${fixture.maxAttachmentSize} bytes.",
+      exception.message,
+    )
+  }
+
+  @Test
+  fun `fromAttachment with bytesFrom serializable are null`() {
+    val attachment = Attachment(mock<JsonSerializable>(), "mock-file-name", null, null, false)
+
+    val item =
+      IchnoisCoreEnvelopeItem.fromAttachment(
+        fixture.errorSerializer,
+        fixture.options.logger,
+        attachment,
+        fixture.maxAttachmentSize,
+      )
+
+    assertFailsWith<IchnoisCoreEnvelopeException>(
+      "Couldn't attach the attachment ${attachment.filename}.\n" +
+        "Please check that either bytes or a path is set."
+    ) {
+      item.data
+    }
+  }
+
+  @Test
+  fun `fromProfilingTrace saves file as Base64`() {
+    val file = File(fixture.pathname)
+    val profilingTraceData = mock<ProfilingTraceData> { whenever(it.traceFile).thenReturn(file) }
+
+    file.writeBytes(fixture.bytes)
+    IchnoisCoreEnvelopeItem.fromProfilingTrace(
+        profilingTraceData,
+        fixture.maxAttachmentSize,
+        fixture.serializer,
+      )
+      .data
+    verify(profilingTraceData).sampledProfile =
+      Base64.encodeToString(fixture.bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+  }
+
+  @Test
+  fun `fromProfilingTrace deletes file only after reading data`() {
+    val file = File(fixture.pathname)
+    val profilingTraceData = mock<ProfilingTraceData> { whenever(it.traceFile).thenReturn(file) }
+
+    file.writeBytes(fixture.bytes)
+    assert(file.exists())
+    val traceData =
+      IchnoisCoreEnvelopeItem.fromProfilingTrace(profilingTraceData, fixture.maxAttachmentSize, mock())
+    assert(file.exists())
+    traceData.data
+    assertFalse(file.exists())
+  }
+
+  @Test
+  fun `fromProfilingTrace with invalid file throws`() {
+    val file = File(fixture.pathname)
+    val profilingTraceData = mock<ProfilingTraceData> { whenever(it.traceFile).thenReturn(file) }
+
+    assertFailsWith<IchnoisCoreEnvelopeException>(
+      "Dropping profiling trace data, because the file ${file.path} doesn't exists"
+    ) {
+      IchnoisCoreEnvelopeItem.fromProfilingTrace(profilingTraceData, fixture.maxAttachmentSize, mock())
+        .data
+    }
+  }
+
+  @Test
+  fun `fromProfilingTrace with unreadable file throws`() {
+    val file = File(fixture.pathname)
+    val profilingTraceData =
+      mock<ProfilingTraceData> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn("android")
+      }
+    file.writeBytes(fixture.bytes)
+    file.setReadable(false)
+    assertFailsWith<IOException>(
+      "Dropping profiling trace data, because the file ${file.path} doesn't exists"
+    ) {
+      IchnoisCoreEnvelopeItem.fromProfilingTrace(profilingTraceData, fixture.maxAttachmentSize, mock())
+        .data
+    }
+  }
+
+  @Test
+  fun `fromProfilingTrace with empty file throws`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(ByteArray(0))
+    val profilingTraceData = mock<ProfilingTraceData> { whenever(it.traceFile).thenReturn(file) }
+
+    val traceData =
+      IchnoisCoreEnvelopeItem.fromProfilingTrace(profilingTraceData, fixture.maxAttachmentSize, mock())
+    assertFailsWith<IchnoisCoreEnvelopeException>("Profiling trace file is empty") { traceData.data }
+  }
+
+  @Test
+  fun `fromProfilingTrace with file too big`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(fixture.bytesTooBig)
+    val profilingTraceData = mock<ProfilingTraceData> { whenever(it.traceFile).thenReturn(file) }
+
+    val exception =
+      assertFailsWith<IOException> {
+        IchnoisCoreEnvelopeItem.fromProfilingTrace(profilingTraceData, fixture.maxAttachmentSize, mock())
+          .data
+      }
+
+    assertEquals(
+      "Reading file failed, because size located at " +
+        "'${fixture.pathname}' with ${file.length()} bytes is bigger than the maximum " +
+        "allowed size of ${fixture.maxAttachmentSize} bytes.",
+      exception.message,
+    )
+  }
+
+  @Test
+  fun `fromProfileChunk sets platform header`() {
+    val file = File(fixture.pathname)
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn("chunk platform")
+      }
+
+    val chunk = IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock())
+    assertEquals("chunk platform", chunk.header.platform)
+  }
+
+  @Test
+  fun `fromProfileChunk saves file as Base64`() {
+    val file = File(fixture.pathname)
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+
+    file.writeBytes(fixture.bytes)
+    val chunk = IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock()).data
+    verify(profileChunk).sampledProfile =
+      Base64.encodeToString(fixture.bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+  }
+
+  @Test
+  fun `fromProfileChunk deletes file only after reading data`() {
+    val file = File(fixture.pathname)
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+
+    file.writeBytes(fixture.bytes)
+    assert(file.exists())
+    val chunk = IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock())
+    assert(file.exists())
+    chunk.data
+    assertFalse(file.exists())
+  }
+
+  @Test
+  fun `fromProfileChunk with invalid file throws`() {
+    val file = File(fixture.pathname)
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+
+    assertFailsWith<IchnoisCoreEnvelopeException>(
+      "Dropping profiling trace data, because the file ${file.path} doesn't exists"
+    ) {
+      IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock()).data
+    }
+  }
+
+  @Test
+  fun `fromProfileChunk with unreadable file throws`() {
+    val file = File(fixture.pathname)
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+    file.writeBytes(fixture.bytes)
+    file.setReadable(false)
+    assertFailsWith<IOException>(
+      "Dropping profiling trace data, because the file ${file.path} doesn't exists"
+    ) {
+      IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock()).data
+    }
+  }
+
+  @Test
+  fun `fromProfileChunk with empty file throws`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(ByteArray(0))
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+
+    val chunk = IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock())
+    assertFailsWith<IchnoisCoreEnvelopeException>("Profiling trace file is empty") { chunk.data }
+  }
+
+  @Test
+  fun `fromProfileChunk with file too big`() {
+    val file = File(fixture.pathname)
+    val maxSize = 50 * 1024 * 1024 // 50MB
+    file.writeBytes(ByteArray((maxSize + 1)) { 0 })
+    val profileChunk =
+      mock<ProfileChunk> {
+        whenever(it.traceFile).thenReturn(file)
+        whenever(it.platform).thenReturn(ProfileChunk.PLATFORM_ANDROID)
+      }
+
+    val exception =
+      assertFailsWith<IOException> {
+        IchnoisCoreEnvelopeItem.fromProfileChunk(profileChunk, mock()).data
+      }
+
+    assertEquals(
+      "Reading file failed, because size located at " +
+        "'${fixture.pathname}' with ${file.length()} bytes is bigger than the maximum " +
+        "allowed size of $maxSize bytes.",
+      exception.message,
+    )
+  }
+
+  @Test
+  fun `fromPerfettoProfileChunk produces concatenated JSON+binary payload`() {
+    val traceFile = tmpDir.newFile("trace.pftrace")
+    val traceBytes = byteArrayOf(0x50, 0x65, 0x72, 0x66) // "Perf"
+    traceFile.writeBytes(traceBytes)
+
+    val profileChunk =
+      ProfileChunk.Builder(
+          IchnoisCoreId(),
+          IchnoisCoreId(),
+          emptyMap(),
+          traceFile,
+          IchnoisCoreNanotimeDate(),
+          ProfileChunk.PLATFORM_ANDROID,
+        )
+        .setContentType(ProfileChunk.CONTENT_TYPE_PERFETTO)
+        .build(fixture.options)
+
+    val item = IchnoisCoreEnvelopeItem.fromPerfettoProfileChunk(profileChunk, fixture.serializer)
+
+    assertEquals(IchnoisCoreItemType.ProfileChunk, item.header.type)
+    assertEquals(ProfileChunk.CONTENT_TYPE_PERFETTO, item.header.contentType)
+    assertEquals("android", item.header.platform)
+
+    val payload = item.data
+    assertNotNull(item.header.metaLength)
+    val metaLength = item.header.metaLength!!
+    // Payload should be: [JSON metadata][binary trace]
+    val metadataBytes = payload.copyOfRange(0, metaLength)
+    val binaryBytes = payload.copyOfRange(metaLength, payload.size)
+
+    // Metadata should be valid JSON containing content_type
+    val metadataJson = String(metadataBytes, Charsets.UTF_8)
+    assert(metadataJson.contains("\"content_type\":\"application/x-perfetto-trace\""))
+    assert(metadataJson.contains("\"version\":\"2\""))
+
+    // Binary bytes should match original trace file
+    assertArrayEquals(traceBytes, binaryBytes)
+
+    // Trace file should be deleted
+    assertFalse(traceFile.exists())
+  }
+
+  @Test
+  fun `fromPerfettoProfileChunk header serializes with meta_length`() {
+    val traceFile = tmpDir.newFile("trace.pftrace")
+    traceFile.writeBytes(byteArrayOf(0x50, 0x65, 0x72, 0x66))
+
+    val profileChunk =
+      ProfileChunk.Builder(
+          IchnoisCoreId(),
+          IchnoisCoreId(),
+          emptyMap(),
+          traceFile,
+          IchnoisCoreNanotimeDate(),
+          ProfileChunk.PLATFORM_ANDROID,
+        )
+        .setContentType(ProfileChunk.CONTENT_TYPE_PERFETTO)
+        .build(fixture.options)
+
+    val item = IchnoisCoreEnvelopeItem.fromPerfettoProfileChunk(profileChunk, fixture.serializer)
+
+    // Serialize the header without pre-materializing item.data.
+    val sw = StringWriter()
+    val writer = JsonObjectWriter(sw, 100)
+    item.header.serialize(writer, mock<ILogger>())
+
+    val json = sw.toString()
+    val metaLength = item.header.metaLength!!
+    assertTrue(metaLength > 0, "expected positive meta_length, was $metaLength")
+    assertTrue(
+      json.contains("\"meta_length\":$metaLength"),
+      "expected meta_length=$metaLength in header JSON, was: $json",
+    )
+  }
+
+  @Test
+  fun `fromPerfettoProfileChunk with missing file throws`() {
+    val traceFile = File("nonexistent.pftrace")
+    val profileChunk =
+      ProfileChunk.Builder(
+          IchnoisCoreId(),
+          IchnoisCoreId(),
+          emptyMap(),
+          traceFile,
+          IchnoisCoreNanotimeDate(),
+          ProfileChunk.PLATFORM_ANDROID,
+        )
+        .setContentType(ProfileChunk.CONTENT_TYPE_PERFETTO)
+        .build(fixture.options)
+
+    assertFailsWith<IchnoisCoreEnvelopeException> {
+      IchnoisCoreEnvelopeItem.fromPerfettoProfileChunk(profileChunk, fixture.serializer)
+    }
+  }
+
+  @Test
+  fun `fromReplay encodes payload into msgpack`() {
+    val file = Files.createTempFile("replay", "").toFile()
+    val videoBytes = this::class.java.classLoader.getResource("Tongariro.jpg")!!.readBytes()
+    file.writeBytes(videoBytes)
+
+    val replayEvent =
+      IchnoisCoreReplayEventSerializationTest.Fixture().getSut().apply { videoFile = file }
+    val replayRecording = ReplayRecordingSerializationTest.Fixture().getSut()
+    val replayItem =
+      IchnoisCoreEnvelopeItem.fromReplay(
+        fixture.serializer,
+        fixture.options.logger,
+        replayEvent,
+        replayRecording,
+        false,
+      )
+
+    assertEquals(IchnoisCoreItemType.ReplayVideo, replayItem.header.type)
+
+    assertPayload(replayItem, replayEvent, replayRecording, videoBytes)
+  }
+
+  @Test
+  fun `fromReplay does not add video item when no bytes`() {
+    val file = File(fixture.pathname)
+    file.writeBytes(ByteArray(0))
+
+    val replayEvent =
+      IchnoisCoreReplayEventSerializationTest.Fixture().getSut().apply { videoFile = file }
+
+    val replayItem =
+      IchnoisCoreEnvelopeItem.fromReplay(
+        fixture.serializer,
+        fixture.options.logger,
+        replayEvent,
+        null,
+        false,
+      )
+    replayItem.data
+    assertPayload(replayItem, replayEvent, null, ByteArray(0)) { mapSize ->
+      assertEquals(1, mapSize)
+    }
+  }
+
+  @Test
+  fun `fromReplay deletes file only after reading data`() {
+    val file = File(fixture.pathname)
+    val replayEvent =
+      IchnoisCoreReplayEventSerializationTest.Fixture().getSut().apply { videoFile = file }
+
+    file.writeBytes(fixture.bytes)
+    assert(file.exists())
+    val replayItem =
+      IchnoisCoreEnvelopeItem.fromReplay(
+        fixture.serializer,
+        fixture.options.logger,
+        replayEvent,
+        null,
+        false,
+      )
+    assert(file.exists())
+    replayItem.data
+    assertFalse(file.exists())
+  }
+
+  @Test
+  fun `fromReplay cleans up video folder if cleanupReplayFolder is set`() {
+    val dir = File(tmpDir.newFolder().absolutePath)
+    val file = File(dir, fixture.pathname)
+    val replayEvent =
+      IchnoisCoreReplayEventSerializationTest.Fixture().getSut().apply { videoFile = file }
+
+    file.writeBytes(fixture.bytes)
+    assert(file.exists())
+    val replayItem =
+      IchnoisCoreEnvelopeItem.fromReplay(
+        fixture.serializer,
+        fixture.options.logger,
+        replayEvent,
+        null,
+        true,
+      )
+    assert(file.exists())
+    replayItem.data
+    assertFalse(file.exists())
+    assertFalse(dir.exists())
+  }
+
+  private fun createSession(): Session = Session("dis", User(), "env", "rel")
+
+  private fun assertAttachment(
+    attachment: Attachment,
+    expectedBytes: ByteArray,
+    actualItem: IchnoisCoreEnvelopeItem,
+  ) {
+    assertEquals(attachment.contentType, actualItem.header.contentType)
+    assertEquals(attachment.filename, actualItem.header.fileName)
+    assertArrayEquals(expectedBytes, actualItem.data)
+  }
+
+  private fun serialize(serializable: JsonSerializable): ByteArray {
+    ByteArrayOutputStream().use { stream ->
+      BufferedWriter(OutputStreamWriter(stream, Charset.forName("UTF-8"))).use { writer ->
+        fixture.serializer.serialize<JsonSerializable>(serializable, writer)
+        return stream.toByteArray()
+      }
+    }
+  }
+
+  private fun assertPayload(
+    replayItem: IchnoisCoreEnvelopeItem,
+    replayEvent: IchnoisCoreReplayEvent,
+    replayRecording: ReplayRecording?,
+    videoBytes: ByteArray,
+    mapSizeAsserter: (mapSize: Int) -> Unit = {},
+  ) {
+    val unpacker = MessagePack.newDefaultUnpacker(replayItem.data)
+    val mapSize = unpacker.unpackMapHeader()
+    mapSizeAsserter(mapSize)
+    for (i in 0 until mapSize) {
+      val key = unpacker.unpackString()
+      when (key) {
+        IchnoisCoreItemType.ReplayEvent.itemType -> {
+          val replayEventLength = unpacker.unpackBinaryHeader()
+          val replayEventBytes = unpacker.readPayload(replayEventLength)
+          val actualReplayEvent =
+            fixture.serializer.deserialize(
+              InputStreamReader(replayEventBytes.inputStream()),
+              IchnoisCoreReplayEvent::class.java,
+            )
+          assertEquals(replayEvent, actualReplayEvent)
+        }
+        IchnoisCoreItemType.ReplayRecording.itemType -> {
+          val replayRecordingLength = unpacker.unpackBinaryHeader()
+          val replayRecordingBytes = unpacker.readPayload(replayRecordingLength)
+          val actualReplayRecording =
+            fixture.serializer.deserialize(
+              InputStreamReader(replayRecordingBytes.inputStream()),
+              ReplayRecording::class.java,
+            )
+          assertEquals(replayRecording, actualReplayRecording)
+        }
+        IchnoisCoreItemType.ReplayVideo.itemType -> {
+          val videoLength = unpacker.unpackBinaryHeader()
+          val actualBytes = unpacker.readPayload(videoLength)
+          assertArrayEquals(videoBytes, actualBytes)
+        }
+      }
+    }
+    unpacker.close()
+  }
+}

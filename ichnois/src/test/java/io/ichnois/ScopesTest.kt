@@ -1,0 +1,4573 @@
+package io.ichnois
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.backpressure.IBackpressureMonitor
+import io.ichnois.cache.EnvelopeCache
+import io.ichnois.clientreport.ClientReportTestHelper.Companion.assertClientReport
+import io.ichnois.clientreport.DiscardReason
+import io.ichnois.clientreport.DiscardedEvent
+import io.ichnois.hints.SessionEndHint
+import io.ichnois.hints.SessionStartHint
+import io.ichnois.logger.IchnoisCoreLogParameters
+import io.ichnois.metrics.MetricsUnit
+import io.ichnois.metrics.IchnoisCoreMetricsParameters
+import io.ichnois.protocol.Feedback
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.IchnoisCoreTransaction
+import io.ichnois.protocol.User
+import io.ichnois.test.DeferredExecutorService
+import io.ichnois.test.callMethod
+import io.ichnois.test.createIchnoisCoreClientMock
+import io.ichnois.test.createTestScopes
+import io.ichnois.test.initForTest
+import io.ichnois.util.HintUtils
+import io.ichnois.util.StringUtils
+import java.io.File
+import java.nio.file.Files
+import java.util.Queue
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
+import junit.framework.TestCase.assertSame
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.fail
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argWhere
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.check
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.doThrow
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.reset
+import org.mockito.kotlin.spy
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoMoreInteractions
+import org.mockito.kotlin.whenever
+
+class ScopesTest {
+
+  private lateinit var file: File
+  private lateinit var profilingTraceFile: File
+  private val mockProfiler = spy(NoOpContinuousProfiler.getInstance())
+
+  @BeforeTest
+  fun `set up`() {
+    file = Files.createTempDirectory("ichnois-disk-cache-test").toAbsolutePath().toFile()
+    profilingTraceFile = Files.createTempFile("trace", ".trace").toFile()
+    profilingTraceFile.writeText("sampledProfile")
+    IchnoisCoreCrashLastRunState.getInstance().reset()
+  }
+
+  @AfterTest
+  fun shutdown() {
+    file.deleteRecursively()
+    profilingTraceFile.delete()
+    IchnoisCore.close()
+    IchnoisCoreCrashLastRunState.getInstance().reset()
+  }
+
+  private fun createScopes(options: IchnoisCoreOptions): Scopes {
+    return createTestScopes(options).also { it.bindClient(IchnoisCoreClient(options)) }
+  }
+
+  @Test
+  fun `when no dsn available, ctor throws illegal arg`() {
+    val ex =
+      assertFailsWith<IllegalArgumentException> {
+        val options = IchnoisCoreOptions()
+        val scopeToUse = Scope(options)
+        val isolationScopeToUse = Scope(options)
+        val globalScopeToUse = Scope(options)
+        Scopes(scopeToUse, isolationScopeToUse, globalScopeToUse, "test")
+      }
+    assertEquals(
+      "Scopes requires a DSN to be instantiated. Considering using the NoOpScopes if no DSN is available.",
+      ex.message,
+    )
+  }
+
+  @Test
+  fun `when isolation scope is forked, integrations are not registered`() {
+    val integrationMock = mock<Integration>()
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    options.addIntegration(integrationMock)
+    val scopes = createScopes(options)
+    reset(integrationMock)
+    scopes.forkedScopes("test")
+    verifyNoMoreInteractions(integrationMock)
+  }
+
+  @Test
+  fun `when current scope is forked, integrations are not registered`() {
+    val integrationMock = mock<Integration>()
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    options.addIntegration(integrationMock)
+    val scopes = createScopes(options)
+    reset(integrationMock)
+    scopes.forkedCurrentScope("test")
+    verifyNoMoreInteractions(integrationMock)
+  }
+
+  @Test
+  fun `when isolation scope is forked, scope changes are isolated`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val scopes = createScopes(options)
+    var firstScope: IScope? = null
+    scopes.configureScope {
+      firstScope = it
+      it.setTag("scopes", "a")
+    }
+    var cloneScope: IScope? = null
+    val clone = scopes.forkedScopes("test")
+    clone.configureScope {
+      cloneScope = it
+      it.setTag("scopes", "b")
+    }
+    assertEquals("a", firstScope!!.tags["scopes"])
+    assertEquals("b", cloneScope!!.tags["scopes"])
+  }
+
+  @Test
+  fun `when current scope is forked, scope changes are not isolated`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val scopes = createScopes(options)
+    var firstScope: IScope? = null
+    scopes.configureScope {
+      firstScope = it
+      it.setTag("scopes", "a")
+    }
+    var cloneScope: IScope? = null
+    val clone = scopes.forkedCurrentScope("test")
+    clone.configureScope {
+      cloneScope = it
+      it.setTag("scopes", "b")
+    }
+    assertEquals("b", firstScope!!.tags["scopes"])
+    assertEquals("b", cloneScope!!.tags["scopes"])
+  }
+
+  @Test
+  fun `when scopes is initialized, breadcrumbs are capped as per options`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.maxBreadcrumbs = 5
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    (1..10).forEach { _ -> sut.addBreadcrumb(Breadcrumb(), null) }
+    var actual = 0
+    sut.configureScope { actual = it.breadcrumbs.size }
+    assertEquals(options.maxBreadcrumbs, actual)
+  }
+
+  @Test
+  fun `when beforeBreadcrumb returns null, crumb is dropped`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.beforeBreadcrumb = IchnoisCoreOptions.BeforeBreadcrumbCallback { _: Breadcrumb, _: Any? ->
+      null
+    }
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    sut.addBreadcrumb(Breadcrumb(), null)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    assertEquals(0, breadcrumbs!!.size)
+  }
+
+  @Test
+  fun `when beforeBreadcrumb modifies crumb, crumb is stored modified`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    val expected = "expected"
+    options.beforeBreadcrumb =
+      IchnoisCoreOptions.BeforeBreadcrumbCallback { breadcrumb: Breadcrumb, _: Any? ->
+        breadcrumb.message = expected
+        breadcrumb
+      }
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val crumb = Breadcrumb()
+    crumb.message = "original"
+    sut.addBreadcrumb(crumb)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    assertEquals(expected, breadcrumbs!!.first().message)
+  }
+
+  @Test
+  fun `when beforeBreadcrumb is null, crumb is stored`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.beforeBreadcrumb = null
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val expected = Breadcrumb()
+    sut.addBreadcrumb(expected)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    assertEquals(expected, breadcrumbs!!.single())
+  }
+
+  @Test
+  fun `when beforeBreadcrumb throws an exception, breadcrumb is dropped`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.beforeBreadcrumb = IchnoisCoreOptions.BeforeBreadcrumbCallback { _: Breadcrumb, _: Any? ->
+      throw Exception("test")
+    }
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+
+    val breadcrumb = Breadcrumb()
+    sut.addBreadcrumb(breadcrumb)
+
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    assertThat(breadcrumbs).isEmpty()
+    assertThat(breadcrumb.data).doesNotContainKey("ichnois:message")
+  }
+
+  @Test
+  fun `when initialized, lastEventId is empty`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  @Test
+  fun `when addBreadcrumb is called on disabled client, no-op`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope(ScopeType.COMBINED) { breadcrumbs = it.breadcrumbs }
+    sut.close()
+    sut.addBreadcrumb(Breadcrumb())
+    assertTrue(breadcrumbs!!.isEmpty())
+  }
+
+  @Test
+  fun `when addBreadcrumb is called with message and category, breadcrumb object has values`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    sut.addBreadcrumb("message", "category")
+    assertEquals("message", breadcrumbs!!.single().message)
+    assertEquals("category", breadcrumbs!!.single().category)
+  }
+
+  @Test
+  fun `when addBreadcrumb is called with message, breadcrumb object has value`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    var breadcrumbs: Queue<Breadcrumb>? = null
+    sut.configureScope { breadcrumbs = it.breadcrumbs }
+    sut.addBreadcrumb("message", "category")
+    assertEquals("message", breadcrumbs!!.single().message)
+    assertEquals("category", breadcrumbs!!.single().category)
+  }
+
+  @Test
+  fun `when flush is called on disabled client, no-op`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.flush(1000)
+    verify(mockClient, never()).flush(1000)
+  }
+
+  @Test
+  fun `when flush is called, client flush gets called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.flush(1000)
+    verify(mockClient).flush(1000)
+  }
+
+  // region captureEvent tests
+  @Test
+  fun `when captureEvent is called and event is null, lastEventId is empty`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    sut.callMethod("captureEvent", IchnoisCoreEvent::class.java, null)
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  @Test
+  fun `when captureEvent is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureEvent(IchnoisCoreEvent())
+    verify(mockClient, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `when captureEvent is called on disabled client, the hint is marked as capture failed`() {
+    val (sut, _) = getEnabledScopes()
+    sut.close()
+
+    val hint = Hint()
+    sut.captureEvent(IchnoisCoreEvent(), hint)
+
+    assertTrue(HintUtils.isCaptureFailed(hint))
+  }
+
+  @Test
+  fun `when captureEvent is called with a valid argument, captureEvent on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val event = IchnoisCoreEvent()
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called on disabled scopes, lastEventId does not get overwritten`() {
+    val (sut, mockClient) = getEnabledScopes()
+    whenever(mockClient.captureEvent(any(), any(), anyOrNull()))
+      .thenReturn(IchnoisCoreId(UUID.randomUUID()))
+    val event = IchnoisCoreEvent()
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    val lastEventId = sut.lastEventId
+    sut.close()
+    sut.captureEvent(event, hints)
+    assertEquals(lastEventId, sut.lastEventId)
+  }
+
+  @Test
+  fun `when captureEvent is called and session tracking is disabled, it should not capture a session`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val event = IchnoisCoreEvent()
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  @Test
+  fun `when captureEvent is called but no session started, it should not capture a session`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val event = IchnoisCoreEvent()
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  @Test
+  fun `when captureEvent is called and event has exception which has been previously attached with span context, sets span context to the event`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val exception = RuntimeException()
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(exception, span, "tx-name")
+
+    val event = IchnoisCoreEvent(exception)
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    assertEquals(span.spanContext, event.contexts.trace)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called and event has exception which root cause has been previously attached with span context, sets span context to the event`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val rootCause = RuntimeException()
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(rootCause, span, "tx-name")
+
+    val event = IchnoisCoreEvent(RuntimeException(rootCause))
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    assertEquals(span.spanContext, event.contexts.trace)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called and event has exception which non-root cause has been previously attached with span context, sets span context to the event`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val rootCause = RuntimeException()
+    val exceptionAssignedToSpan = RuntimeException(rootCause)
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(exceptionAssignedToSpan, span, "tx-name")
+
+    val event = IchnoisCoreEvent(RuntimeException(exceptionAssignedToSpan))
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    assertEquals(span.spanContext, event.contexts.trace)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called and event has exception which has been previously attached with span context and trace context already set, does not set new span context to the event`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val exception = RuntimeException()
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(exception, span, "tx-name")
+
+    val event = IchnoisCoreEvent(exception)
+    val originalSpanContext = SpanContext("op")
+    event.contexts.setTrace(originalSpanContext)
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    assertEquals(originalSpanContext, event.contexts.trace)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called and event has exception which has not been previously attached with span context, does not set new span context to the event`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val event = IchnoisCoreEvent(RuntimeException())
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureEvent(event, hints)
+    assertNull(event.contexts.trace)
+    verify(mockClient).captureEvent(eq(event), any(), eq(hints))
+  }
+
+  @Test
+  fun `when captureEvent is called with a ScopeCallback then the modified scope is sent to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureEvent(IchnoisCoreEvent(), null) { it.setTag("test", "testValue") }
+
+    verify(mockClient)
+      .captureEvent(any(), check { assertEquals("testValue", it.tags["test"]) }, anyOrNull())
+  }
+
+  @Test
+  fun `when captureEvent is called with a ScopeCallback then subsequent calls to captureEvent send the unmodified Scope to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val argumentCaptor = argumentCaptor<IScope>()
+
+    sut.captureEvent(IchnoisCoreEvent(), null) { it.setTag("test", "testValue") }
+
+    sut.captureEvent(IchnoisCoreEvent())
+
+    verify(mockClient, times(2)).captureEvent(any(), argumentCaptor.capture(), anyOrNull())
+
+    assertEquals("testValue", argumentCaptor.allValues[0].tags["test"])
+    assertNull(argumentCaptor.allValues[1].tags["test"])
+  }
+
+  @Test
+  fun `when captureEvent is called with a ScopeCallback that crashes then the event should still be captured`() {
+    val (sut, mockClient, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    sut.captureEvent(IchnoisCoreEvent(), null) { throw exception }
+
+    verify(mockClient).captureEvent(any(), anyOrNull(), anyOrNull())
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  // region captureMessage tests
+  @Test
+  fun `when captureMessage is called and event is null, lastEventId is empty`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    sut.callMethod("captureMessage", String::class.java, null)
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  @Test
+  fun `when captureMessage is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureMessage("test")
+    verify(mockClient, never()).captureMessage(any(), any())
+  }
+
+  @Test
+  fun `when captureMessage is called with a valid message, captureMessage on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureMessage("test")
+    verify(mockClient).captureMessage(any(), any(), any())
+  }
+
+  @Test
+  fun `when captureMessage is called, level is INFO by default`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.captureMessage("test")
+    verify(mockClient).captureMessage(eq("test"), eq(IchnoisCoreLevel.INFO), any())
+  }
+
+  @Test
+  fun `when captureMessage is called with a ScopeCallback then the modified scope is sent to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureMessage("test") { it.setTag("test", "testValue") }
+
+    verify(mockClient)
+      .captureMessage(any(), any(), check { assertEquals("testValue", it.tags["test"]) })
+  }
+
+  @Test
+  fun `when captureMessage is called with a ScopeCallback then subsequent calls to captureMessage send the unmodified Scope to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val argumentCaptor = argumentCaptor<IScope>()
+
+    sut.captureMessage("testMessage") { it.setTag("test", "testValue") }
+
+    sut.captureMessage("test", IchnoisCoreLevel.INFO)
+
+    verify(mockClient, times(2)).captureMessage(any(), any(), argumentCaptor.capture())
+
+    assertEquals("testValue", argumentCaptor.allValues[0].tags["test"])
+    assertNull(argumentCaptor.allValues[1].tags["test"])
+  }
+
+  @Test
+  fun `when captureMessage is called with a ScopeCallback that crashes then the message should still be captured`() {
+    val (sut, mockClient, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    sut.captureMessage("Hello World") { throw exception }
+
+    verify(mockClient).captureMessage(any(), anyOrNull(), anyOrNull())
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  // region captureFeedback tests
+  @Test
+  fun `when captureFeedback is called and message is empty, client is never called`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.captureFeedback(Feedback(""))
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+    verify(mockClient, never()).captureFeedback(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureFeedback is called, lastEventId is not updated`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.captureFeedback(Feedback("message"))
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+    verify(mockClient).captureFeedback(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureFeedback is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureFeedback(mock())
+    verify(mockClient, never()).captureFeedback(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureFeedback is called with a valid message, captureFeedback on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureFeedback(Feedback("test"))
+    verify(mockClient).captureFeedback(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureFeedback is called with a ScopeCallback then the modified scope is sent to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureFeedback(Feedback("test"), null) { it.setTag("test", "testValue") }
+
+    verify(mockClient)
+      .captureFeedback(any(), eq(null), check { assertEquals("testValue", it.tags["test"]) })
+  }
+
+  @Test
+  fun `when captureFeedback is called with a ScopeCallback then subsequent calls to captureFeedback send the unmodified Scope to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val argumentCaptor = argumentCaptor<IScope>()
+
+    sut.captureFeedback(Feedback("testMessage"), null) { it.setTag("test", "testValue") }
+
+    sut.captureFeedback(Feedback("test"))
+
+    verify(mockClient, times(2)).captureFeedback(any(), anyOrNull(), argumentCaptor.capture())
+
+    assertEquals("testValue", argumentCaptor.allValues[0].tags["test"])
+    assertNull(argumentCaptor.allValues[1].tags["test"])
+  }
+
+  @Test
+  fun `when captureFeedback is called with a ScopeCallback that crashes then the feedback should still be captured`() {
+    val (sut, mockClient, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    sut.captureFeedback(Feedback("Hello World"), null) { throw exception }
+
+    verify(mockClient).captureFeedback(any(), anyOrNull(), anyOrNull())
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  @Test
+  fun `when captureFeedback is called with a Hint, it is passed to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val hint = Hint()
+
+    sut.captureFeedback(Feedback("Hello World"), hint)
+
+    verify(mockClient).captureFeedback(any(), eq(hint), anyOrNull())
+  }
+
+  // endregion
+
+  // region captureException tests
+  @Test
+  fun `when captureException is called and exception is null, lastEventId is empty`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    sut.callMethod("captureException", Throwable::class.java, null)
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  @Test
+  fun `when captureException is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureException(Throwable())
+    verify(mockClient, never()).captureEvent(any(), any(), any())
+  }
+
+  @Test
+  fun `when captureException is called with a valid argument and hint, captureEvent on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureException(Throwable(), hints)
+    verify(mockClient).captureEvent(any(), any(), any())
+  }
+
+  @Test
+  fun `when captureException is called with a valid argument but no hint, captureEvent on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureException(Throwable())
+    verify(mockClient).captureEvent(any(), any(), any())
+  }
+
+  @Test
+  fun `when captureException is called with an exception which has been previously attached with span context, span context should be set on the event before capturing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val throwable = Throwable()
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(throwable, span, "tx-name")
+
+    sut.captureException(throwable)
+    verify(mockClient)
+      .captureEvent(
+        check {
+          assertEquals(span.spanContext, it.contexts.trace)
+          assertEquals("tx-name", it.transaction)
+        },
+        any(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `when captureException is called with an exception which has not been previously attached with span context, span context should not be set on the event before capturing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val span = mock<Span>()
+    whenever(span.spanContext).thenReturn(SpanContext("op"))
+    sut.setSpanContext(Throwable(), span, "tx-name")
+
+    sut.captureException(Throwable())
+    verify(mockClient).captureEvent(check { assertNull(it.contexts.trace) }, any(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureException is called with a ScopeCallback then the modified scope is sent to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.captureException(Throwable(), null) { it.setTag("test", "testValue") }
+
+    verify(mockClient)
+      .captureEvent(any(), check { assertEquals("testValue", it.tags["test"]) }, anyOrNull())
+  }
+
+  @Test
+  fun `when captureException is called with a ScopeCallback then subsequent calls to captureException send the unmodified Scope to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val argumentCaptor = argumentCaptor<IScope>()
+
+    sut.captureException(Throwable(), null) { it.setTag("test", "testValue") }
+
+    sut.captureException(Throwable())
+
+    verify(mockClient, times(2)).captureEvent(any(), argumentCaptor.capture(), anyOrNull())
+
+    assertEquals("testValue", argumentCaptor.allValues[0].tags["test"])
+    assertNull(argumentCaptor.allValues[1].tags["test"])
+  }
+
+  @Test
+  fun `when captureException is called with a ScopeCallback that crashes then the exception should still be captured`() {
+    val (sut, mockClient, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    sut.captureException(Throwable()) { throw exception }
+
+    verify(mockClient).captureEvent(any(), anyOrNull(), anyOrNull())
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  // region captureUserFeedback tests
+
+  @Test
+  fun `when captureUserFeedback is called it is forwarded to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.captureUserFeedback(userFeedback)
+
+    verify(mockClient)
+      .captureUserFeedback(
+        check {
+          assertEquals(userFeedback.eventId, it.eventId)
+          assertEquals(userFeedback.email, it.email)
+          assertEquals(userFeedback.name, it.name)
+          assertEquals(userFeedback.comments, it.comments)
+        }
+      )
+  }
+
+  @Test
+  fun `when captureUserFeedback is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureUserFeedback(userFeedback)
+    verify(mockClient, never()).captureUserFeedback(any())
+  }
+
+  @Test
+  fun `when captureUserFeedback is called and client throws, don't crash`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    whenever(mockClient.captureUserFeedback(any())).doThrow(IllegalArgumentException(""))
+
+    sut.captureUserFeedback(userFeedback)
+  }
+
+  private val userFeedback: UserFeedback
+    get() {
+      val eventId = IchnoisCoreId("c2fb8fee2e2b49758bcb67cda0f713c7")
+      return UserFeedback(eventId).apply {
+        name = "John"
+        email = "john@me.com"
+        comments = "comment"
+      }
+    }
+
+  // endregion
+
+  // region captureCheckIn tests
+
+  @Test
+  fun `when captureCheckIn is called it is forwarded to the client`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.captureCheckIn(checkIn)
+
+    verify(mockClient)
+      .captureCheckIn(
+        check {
+          assertEquals(checkIn.checkInId, it.checkInId)
+          assertEquals(checkIn.monitorSlug, it.monitorSlug)
+          assertEquals(checkIn.status, it.status)
+        },
+        any(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `when captureCheckIn is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureCheckIn(checkIn)
+    verify(mockClient, never()).captureCheckIn(any(), any(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureCheckIn is called and client throws, don't crash`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    whenever(mockClient.captureCheckIn(any(), any(), anyOrNull()))
+      .doThrow(IllegalArgumentException(""))
+
+    sut.captureCheckIn(checkIn)
+  }
+
+  private val checkIn: CheckIn = CheckIn("some_slug", CheckInStatus.OK)
+
+  // endregion
+
+  // region close tests
+  @Test
+  fun `when close is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.close()
+    verify(mockClient).close(eq(false)) // 1 to close, but next one wont be recorded
+  }
+
+  @Test
+  fun `when close is called and client is alive, close on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.close()
+    verify(mockClient).close(eq(false))
+  }
+
+  @Test
+  fun `when close is called with isRestarting false and client is alive, close on the client should be called with isRestarting false`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.close(false)
+    verify(mockClient).close(eq(false))
+  }
+
+  @Test
+  fun `when close is called with isRestarting true and client is alive, close on the client should be called with isRestarting true`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.close(true)
+    verify(mockClient).close(eq(true))
+  }
+
+  // endregion
+
+  // region withScope tests
+  @Test
+  fun `when withScope is called on disabled client, execute on NoOpScope`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+    sut.close()
+
+    sut.withScope(scopeCallback)
+    verify(scopeCallback).run(NoOpScope.getInstance())
+  }
+
+  @Test
+  fun `when withScope is called with alive client, run should be called`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+
+    sut.withScope(scopeCallback)
+    verify(scopeCallback).run(any())
+  }
+
+  @Test
+  fun `when withScope throws an exception then it should be caught`() {
+    val (scopes, _, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    val scopeCallback = ScopeCallback { throw exception }
+
+    scopes.withScope(scopeCallback)
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  // region withIsolationScope tests
+  @Test
+  fun `when withIsolationScope is called on disabled client, execute on NoOpScope`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+    sut.close()
+
+    sut.withIsolationScope(scopeCallback)
+    verify(scopeCallback).run(NoOpScope.getInstance())
+  }
+
+  @Test
+  fun `when withIsolationScope is called with alive client, run should be called`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+
+    sut.withIsolationScope(scopeCallback)
+    verify(scopeCallback).run(any())
+  }
+
+  @Test
+  fun `when withIsolationScope throws an exception then it should be caught`() {
+    val (scopes, _, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    val scopeCallback = ScopeCallback { throw exception }
+
+    scopes.withIsolationScope(scopeCallback)
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  // region configureScope tests
+  @Test
+  fun `when configureScope is called on disabled client, do nothing`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+    sut.close()
+
+    sut.configureScope(scopeCallback)
+    verify(scopeCallback, never()).run(any())
+  }
+
+  @Test
+  fun `when configureScope is called with alive client, run should be called`() {
+    val (sut) = getEnabledScopes()
+
+    val scopeCallback = mock<ScopeCallback>()
+
+    sut.configureScope(scopeCallback)
+    verify(scopeCallback).run(any())
+  }
+
+  @Test
+  fun `when configureScope throws an exception then it should be caught`() {
+    val (scopes, _, logger) = getEnabledScopes()
+
+    val exception = Exception("scope callback exception")
+    val scopeCallback = ScopeCallback { throw exception }
+
+    scopes.configureScope(scopeCallback)
+
+    verify(logger).log(eq(IchnoisCoreLevel.ERROR), any(), eq(exception))
+  }
+
+  // endregion
+
+  @Test
+  fun `when integration is registered, scopes is enabled`() {
+    val mock = mock<Integration>()
+
+    var options: IchnoisCoreOptions? = null
+    // init main scopes and make it enabled
+    initForTest {
+      it.addIntegration(mock)
+      it.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+      it.cacheDirPath = file.absolutePath
+      it.setSerializer(mock())
+      options = it
+    }
+
+    doAnswer {
+        val scopes = it.arguments[0] as IScopes
+        assertTrue(scopes.isEnabled)
+      }
+      .whenever(mock)
+      .register(any(), eq(options!!))
+
+    verify(mock).register(any(), eq(options!!))
+  }
+
+  // region setLevel tests
+  @Test
+  fun `when setLevel is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setLevel(IchnoisCoreLevel.INFO)
+    assertNull(scope?.level)
+  }
+
+  @Test
+  fun `when setLevel is called, level is set`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.setLevel(IchnoisCoreLevel.INFO)
+    assertEquals(IchnoisCoreLevel.INFO, scope?.level)
+  }
+
+  // endregion
+
+  // region setTransaction tests
+  @Test
+  fun `when setTransaction is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setTransaction("test")
+    assertNull(scope?.transactionName)
+  }
+
+  @Test
+  fun `when setTransaction is called, and transaction is not set, transaction name is changed`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.setTransaction("test")
+    assertEquals("test", scope?.transactionName)
+  }
+
+  @Test
+  fun `when setTransaction is called, and transaction is set, transaction name is changed`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    val tx = scopes.startTransaction("test", "op")
+    scopes.configureScope { it.setTransaction(tx) }
+
+    assertEquals("test", scope?.transactionName)
+  }
+
+  @Test
+  fun `when startTransaction is called with different instrumenter, no-op is returned`() {
+    val scopes = generateScopes()
+
+    val transactionContext =
+      TransactionContext("test", "op").also { it.instrumenter = Instrumenter.OTEL }
+    val transactionOptions = TransactionOptions()
+    val tx = scopes.startTransaction(transactionContext, transactionOptions)
+
+    assertTrue(tx is NoOpTransaction)
+  }
+
+  @Test
+  fun `when startTransaction is called with different instrumenter, no-op is returned 2`() {
+    val scopes = generateScopes() { it.instrumenter = Instrumenter.OTEL }
+
+    val tx = scopes.startTransaction("test", "op")
+
+    assertTrue(tx is NoOpTransaction)
+  }
+
+  @Test
+  fun `when startTransaction is called with configured instrumenter, it works`() {
+    val scopes = generateScopes() { it.instrumenter = Instrumenter.OTEL }
+
+    val transactionContext =
+      TransactionContext("test", "op").also { it.instrumenter = Instrumenter.OTEL }
+    val transactionOptions = TransactionOptions()
+    val tx = scopes.startTransaction(transactionContext, transactionOptions)
+
+    assertFalse(tx is NoOpTransaction)
+  }
+
+  // endregion
+
+  // region setUser tests
+  @Test
+  fun `when setUser is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setUser(User())
+    assertNull(scope?.user)
+  }
+
+  @Test
+  fun `when setUser is called, user is set`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    val user = User()
+    scopes.setUser(user)
+    assertEquals(user, scope?.user)
+  }
+
+  // endregion
+
+  // region setFingerprint tests
+  @Test
+  fun `when setFingerprint is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    val fingerprint = listOf("abc")
+    scopes.setFingerprint(fingerprint)
+    assertEquals(0, scope?.fingerprint?.count())
+  }
+
+  @Test
+  fun `when setFingerprint is called with null parameter, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.callMethod("setFingerprint", List::class.java, null)
+    assertEquals(0, scope?.fingerprint?.count())
+  }
+
+  @Test
+  fun `when setFingerprint is called, fingerprint is set`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    val fingerprint = listOf("abc")
+    scopes.setFingerprint(fingerprint)
+    assertEquals(1, scope?.fingerprint?.count())
+  }
+
+  // endregion
+
+  // region clearBreadcrumbs tests
+  @Test
+  fun `when clearBreadcrumbs is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.addBreadcrumb(Breadcrumb())
+    assertEquals(1, scope?.breadcrumbs?.count())
+
+    scopes.close()
+
+    assertEquals(0, scope?.breadcrumbs?.count())
+  }
+
+  @Test
+  fun `when clearBreadcrumbs is called, clear breadcrumbs`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.addBreadcrumb(Breadcrumb())
+    assertEquals(1, scope?.breadcrumbs?.count())
+    scopes.clearBreadcrumbs()
+    assertEquals(0, scope?.breadcrumbs?.count())
+  }
+
+  // endregion
+
+  // region setTag tests
+  @Test
+  fun `when setTag is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setTag("test", "test")
+    assertEquals(0, scope?.tags?.count())
+  }
+
+  @Test
+  fun `when setTag is called with null parameters, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.callMethod(
+      "setTag",
+      parameterTypes = arrayOf(String::class.java, String::class.java),
+      null,
+      null,
+    )
+    assertEquals(0, scope?.tags?.count())
+  }
+
+  @Test
+  fun `when setTag is called, tag is set`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.setTag("test", "test")
+    assertEquals(1, scope?.tags?.count())
+  }
+
+  // endregion
+
+  // region setExtra tests
+  @Test
+  fun `when setExtra is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setExtra("test", "test")
+    assertEquals(0, scope?.extras?.count())
+  }
+
+  @Test
+  fun `when setExtra is called with null parameters, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.callMethod(
+      "setExtra",
+      parameterTypes = arrayOf(String::class.java, String::class.java),
+      null,
+      null,
+    )
+    assertEquals(0, scope?.extras?.count())
+  }
+
+  @Test
+  fun `when setExtra is called, extra is set`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+
+    scopes.setExtra("test", "test")
+    assertEquals(1, scope?.extras?.count())
+  }
+
+  // endregion
+
+  // region setAttribute tests
+  @Test
+  fun `when setAttribute is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setAttribute("test", "test")
+    assertEquals(0, scope?.attributes?.count())
+  }
+
+  @Test
+  fun `when setAttribute with IchnoisCoreAttribute is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setAttribute(IchnoisCoreAttribute.stringAttribute("test", "test"))
+    assertEquals(0, scope?.attributes?.count())
+  }
+
+  @Test
+  fun `when setAttributes is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    var scope: IScope? = null
+    scopes.configureScope { scope = it }
+    scopes.close()
+
+    scopes.setAttributes(IchnoisCoreAttributes.of(IchnoisCoreAttribute.stringAttribute("test", "test")))
+    assertEquals(0, scope?.attributes?.count())
+  }
+
+  @Test
+  fun `when removeAttribute is called on disabled client, do nothing`() {
+    val scopes = generateScopes()
+    scopes.close()
+
+    scopes.removeAttribute("test")
+  }
+
+  // endregion
+
+  // region captureEnvelope tests
+  @Test
+  fun `when captureEnvelope is called and envelope is null, throws IllegalArgumentException`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    try {
+      sut.callMethod("captureEnvelope", IchnoisCoreEnvelope::class.java, null)
+      fail()
+    } catch (e: Exception) {
+      assertTrue(e.cause is java.lang.IllegalArgumentException)
+    }
+  }
+
+  @Test
+  fun `when captureEnvelope is called on disabled client, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock(enabled = false)
+    sut.bindClient(mockClient)
+    sut.close()
+
+    sut.captureEnvelope(IchnoisCoreEnvelope(IchnoisCoreId(UUID.randomUUID()), null, setOf()))
+    verify(mockClient, never()).captureEnvelope(any(), any())
+  }
+
+  @Test
+  fun `when captureEnvelope is called with a valid envelope, captureEnvelope on the client should be called`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val envelope = IchnoisCoreEnvelope(IchnoisCoreId(UUID.randomUUID()), null, setOf())
+    sut.captureEnvelope(envelope)
+    verify(mockClient).captureEnvelope(any(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureEnvelope is called, lastEventId is not set`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        setSerializer(mock())
+      }
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    whenever(mockClient.captureEnvelope(any(), anyOrNull())).thenReturn(IchnoisCoreId())
+    val envelope = IchnoisCoreEnvelope(IchnoisCoreId(UUID.randomUUID()), null, setOf())
+    sut.captureEnvelope(envelope)
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  // endregion
+
+  // region startSession tests
+  @Test
+  fun `when startSession is called on disabled client, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    sut.close()
+
+    sut.configureScope(ScopeType.ISOLATION) { scope -> scope.client.isEnabled }
+
+    sut.startSession()
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  @Test
+  fun `when startSession is called, starts a session`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    sut.startSession()
+    verify(mockClient)
+      .captureSession(any(), argWhere { HintUtils.hasType(it, SessionStartHint::class.java) })
+  }
+
+  @Test
+  fun `when startSession is called and there's a session, stops it and starts a new one`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    sut.startSession()
+    sut.startSession()
+    verify(mockClient)
+      .captureSession(any(), argWhere { HintUtils.hasType(it, SessionEndHint::class.java) })
+    verify(mockClient, times(2))
+      .captureSession(any(), argWhere { HintUtils.hasType(it, SessionStartHint::class.java) })
+  }
+
+  // endregion
+
+  // region endSession tests
+  @Test
+  fun `when endSession is called on disabled client, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock(enabled = false)
+    sut.bindClient(mockClient)
+    sut.close()
+
+    sut.endSession()
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  @Test
+  fun `when endSession is called and session tracking is disabled, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    sut.endSession()
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  @Test
+  fun `when endSession is called, end a session`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    sut.startSession()
+    sut.endSession()
+    verify(mockClient)
+      .captureSession(any(), argWhere { HintUtils.hasType(it, SessionStartHint::class.java) })
+    verify(mockClient)
+      .captureSession(any(), argWhere { HintUtils.hasType(it, SessionEndHint::class.java) })
+  }
+
+  @Test
+  fun `when endSession is called and there's no session, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.release = "0.0.1"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    sut.endSession()
+    verify(mockClient, never()).captureSession(any(), any())
+  }
+
+  // endregion
+
+  // region captureTransaction tests
+  @Test
+  fun `when captureTransaction is called on disabled client, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    sut.close()
+
+    val ichnoisTracer = IchnoisCoreTracer(TransactionContext("name", "op"), sut)
+    ichnoisTracer.finish()
+    sut.captureTransaction(IchnoisCoreTransaction(ichnoisTracer), null as TraceContext?)
+    verify(mockClient, never()).captureTransaction(any(), any(), any())
+    verify(mockClient, never()).captureTransaction(any(), any(), any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when captureTransaction and transaction is sampled, captureTransaction on the client should be called`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(true)), sut)
+    ichnoisTracer.finish()
+    val traceContext = ichnoisTracer.traceContext()
+    verify(mockClient)
+      .captureTransaction(any(), equalTraceContext(traceContext), any(), eq(null), eq(null))
+  }
+
+  @Test
+  fun `when captureTransaction is called, lastEventId is not set`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        setSerializer(mock())
+      }
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    whenever(
+        mockClient.captureTransaction(
+          anyOrNull(),
+          anyOrNull(),
+          anyOrNull(),
+          anyOrNull(),
+          anyOrNull(),
+        )
+      )
+      .thenReturn(IchnoisCoreId())
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(true)), sut)
+    ichnoisTracer.finish()
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  @Test
+  fun `when captureTransaction and transaction is not finished, captureTransaction on the client should not be called`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(true)), sut)
+    sut.captureTransaction(IchnoisCoreTransaction(ichnoisTracer), null as TraceContext?)
+    verify(mockClient, never()).captureTransaction(any(), any(), any(), eq(null), anyOrNull())
+  }
+
+  @Test
+  fun `when captureTransaction and transaction is not sampled, captureTransaction on the client should not be called`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(false)), sut)
+    ichnoisTracer.finish()
+    val traceContext = ichnoisTracer.traceContext()
+    verify(mockClient, never())
+      .captureTransaction(any(), equalTraceContext(traceContext), any(), eq(null), anyOrNull())
+  }
+
+  @Test
+  fun `transactions lost due to sampling are recorded as lost`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(false)), sut)
+    // Unsampled spans are not added to the transaction, so they are not recorded
+    ichnoisTracer.startChild("dropped span", "span 1").finish()
+    ichnoisTracer.finish()
+
+    assertClientReport(
+      options.clientReportRecorder,
+      listOf(
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Transaction.category, 1),
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Span.category, 1),
+      ),
+    )
+  }
+
+  @Test
+  fun `tracesSampler failures report callback errors and retain normal sampling loss accounting`() {
+    for (parentSampled in listOf(null, false, true)) {
+      for (downsampleFactor in listOf(0, 1)) {
+        val onDiscard = mock<IchnoisCoreOptions.OnDiscardCallback>()
+        val profiler = mock<ITransactionProfiler>()
+        val options =
+          IchnoisCoreOptions().apply {
+            dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+            tracesSampleRate = 1.0
+            profilesSampleRate = 1.0
+            tracesSampler = IchnoisCoreOptions.TracesSamplerCallback {
+              throw IllegalStateException("sampler")
+            }
+            this.onDiscard = onDiscard
+            setTransactionProfiler(profiler)
+            backpressureMonitor =
+              mock<IBackpressureMonitor>().also {
+                whenever(it.downsampleFactor).thenReturn(downsampleFactor)
+              }
+          }
+        val scopes = createScopes(options)
+        val client = createIchnoisCoreClientMock()
+        scopes.bindClient(client)
+        val context =
+          TransactionContext("name", "op").apply {
+            setParentSampled(parentSampled, true)
+          }
+
+        val transaction = scopes.startTransaction(context)
+        assertThat(transaction.isSampled).isFalse()
+        assertThat(transaction.isProfileSampled).isFalse()
+        transaction.startChild("child").finish()
+        verify(onDiscard).execute(DiscardReason.CALLBACK_ERROR, DataCategory.Transaction, 1)
+        verify(onDiscard).execute(DiscardReason.CALLBACK_ERROR, DataCategory.Span, 1)
+        verifyNoMoreInteractions(onDiscard)
+        transaction.finish()
+        transaction.finish()
+
+        verify(client, never())
+          .captureTransaction(any(), anyOrNull(), any(), anyOrNull(), anyOrNull())
+        verify(profiler, never()).start()
+        val samplingReason =
+          if (downsampleFactor > 0) DiscardReason.BACKPRESSURE else DiscardReason.SAMPLE_RATE
+        verify(onDiscard).execute(samplingReason, DataCategory.Transaction, 1)
+        verify(onDiscard).execute(samplingReason, DataCategory.Span, 1)
+        verifyNoMoreInteractions(onDiscard)
+        assertClientReport(
+          options.clientReportRecorder,
+          listOf(
+            DiscardedEvent(
+              DiscardReason.CALLBACK_ERROR.reason,
+              DataCategory.Transaction.category,
+              1,
+            ),
+            DiscardedEvent(DiscardReason.CALLBACK_ERROR.reason, DataCategory.Span.category, 1),
+            DiscardedEvent(samplingReason.reason, DataCategory.Transaction.category, 1),
+            DiscardedEvent(samplingReason.reason, DataCategory.Span.category, 1),
+          ),
+        )
+      }
+    }
+  }
+
+  @Test
+  fun `tracesSampler failure does not affect subsequent successful sampling`() {
+    var fail = true
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        tracesSampler = IchnoisCoreOptions.TracesSamplerCallback {
+          if (fail) throw IllegalStateException("sampler") else 1.0
+        }
+      }
+    val scopes = createScopes(options)
+    val client = createIchnoisCoreClientMock()
+    scopes.bindClient(client)
+    scopes.startTransaction("failed", "op").finish()
+    fail = false
+    val transaction = scopes.startTransaction("successful", "op")
+    transaction.finish()
+
+    assertThat(transaction.isSampled).isTrue()
+    verify(client).captureTransaction(any(), anyOrNull(), any(), anyOrNull(), anyOrNull())
+    assertClientReport(
+      options.clientReportRecorder,
+      listOf(
+        DiscardedEvent(DiscardReason.CALLBACK_ERROR.reason, DataCategory.Transaction.category, 1),
+        DiscardedEvent(DiscardReason.CALLBACK_ERROR.reason, DataCategory.Span.category, 1),
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Transaction.category, 1),
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Span.category, 1),
+      ),
+    )
+  }
+
+  @Test
+  fun `null tracesSampler results still use normal sampling loss accounting`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        tracesSampleRate = 0.0
+        tracesSampler = IchnoisCoreOptions.TracesSamplerCallback { null }
+      }
+    val scopes = createScopes(options)
+    scopes.startTransaction("name", "op").finish()
+
+    assertClientReport(
+      options.clientReportRecorder,
+      listOf(
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Transaction.category, 1),
+        DiscardedEvent(DiscardReason.SAMPLE_RATE.reason, DataCategory.Span.category, 1),
+      ),
+    )
+  }
+
+  @Test
+  fun `transactions lost due to sampling caused by backpressure are recorded as lost`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    val mockBackpressureMonitor = mock<IBackpressureMonitor>()
+    options.backpressureMonitor = mockBackpressureMonitor
+    whenever(mockBackpressureMonitor.downsampleFactor).thenReturn(1)
+
+    val ichnoisTracer =
+      IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(false)), sut)
+    // Unsampled spans are not added to the transaction, so they are not recorded
+    ichnoisTracer.startChild("dropped span", "span 1").finish()
+    ichnoisTracer.finish()
+
+    assertClientReport(
+      options.clientReportRecorder,
+      listOf(
+        DiscardedEvent(DiscardReason.BACKPRESSURE.reason, DataCategory.Transaction.category, 1),
+        DiscardedEvent(DiscardReason.BACKPRESSURE.reason, DataCategory.Span.category, 1),
+      ),
+    )
+  }
+
+  // endregion
+
+  // region captureProfileChunk tests
+  @Test
+  fun `when captureProfileChunk is called on disabled client, do nothing`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = mock<IIchnoisCoreClient>()
+    sut.bindClient(mockClient)
+    sut.close()
+
+    sut.captureProfileChunk(mock())
+    verify(mockClient, never()).captureProfileChunk(any(), any())
+    verify(mockClient, never()).captureProfileChunk(any(), any())
+  }
+
+  @Test
+  fun `when captureProfileChunk, captureProfileChunk on the client should be called`() {
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+
+    val profileChunk = mock<ProfileChunk>()
+    sut.captureProfileChunk(profileChunk)
+    verify(mockClient).captureProfileChunk(eq(profileChunk), any())
+  }
+
+  @Test
+  fun `when profileChunk is called, lastEventId is not set`() {
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        setSerializer(mock())
+      }
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    sut.captureProfileChunk(mock())
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.lastEventId)
+  }
+
+  // endregion
+
+  // region profiling tests
+
+  @Test
+  fun `when startTransaction and profiling is enabled, transaction is profiled only if sampled`() {
+    val mockTransactionProfiler = mock<ITransactionProfiler>()
+    val mockClient = createIchnoisCoreClientMock()
+    whenever(mockTransactionProfiler.onTransactionFinish(any(), anyOrNull(), anyOrNull()))
+      .thenAnswer { mockClient.captureEnvelope(mock()) }
+    val scopes = generateScopes { it.setTransactionProfiler(mockTransactionProfiler) }
+    scopes.bindClient(mockClient)
+    // Transaction is not sampled, so it should not be profiled
+    val contexts = TransactionContext("name", "op", TracesSamplingDecision(false, null, true, null))
+    val transaction = scopes.startTransaction(contexts)
+    transaction.finish()
+    verify(mockClient, never()).captureEnvelope(any())
+
+    // Transaction is sampled, so it should be profiled
+    val sampledContexts =
+      TransactionContext("name", "op", TracesSamplingDecision(true, null, true, null))
+    val sampledTransaction = scopes.startTransaction(sampledContexts)
+    sampledTransaction.finish()
+    verify(mockClient).captureEnvelope(any())
+  }
+
+  @Test
+  fun `when startTransaction and is sampled but profiling is disabled, transaction is not profiled`() {
+    val mockTransactionProfiler = mock<ITransactionProfiler>()
+    val mockClient = createIchnoisCoreClientMock()
+    whenever(mockTransactionProfiler.onTransactionFinish(any(), anyOrNull(), anyOrNull()))
+      .thenAnswer { mockClient.captureEnvelope(mock()) }
+    val scopes = generateScopes {
+      it.profilesSampleRate = 0.0
+      it.setTransactionProfiler(mockTransactionProfiler)
+    }
+    scopes.bindClient(mockClient)
+    val contexts = TransactionContext("name", "op")
+    val transaction = scopes.startTransaction(contexts)
+    transaction.finish()
+    verify(mockClient, never()).captureEnvelope(any())
+  }
+
+  @Test
+  fun `when profiler is running and isAppStartTransaction is false, startTransaction does not interact with profiler`() {
+    val mockTransactionProfiler = mock<ITransactionProfiler>()
+    whenever(mockTransactionProfiler.isRunning).thenReturn(true)
+    val scopes = generateScopes {
+      it.profilesSampleRate = 1.0
+      it.setTransactionProfiler(mockTransactionProfiler)
+    }
+    val context = TransactionContext("name", "op")
+    scopes.startTransaction(context, TransactionOptions().apply { isAppStartTransaction = false })
+    verify(mockTransactionProfiler, never()).start()
+    verify(mockTransactionProfiler, never()).bindTransaction(any())
+  }
+
+  @Test
+  fun `when profiler is running and isAppStartTransaction is true, startTransaction binds current profile`() {
+    val mockTransactionProfiler = mock<ITransactionProfiler>()
+    whenever(mockTransactionProfiler.isRunning).thenReturn(true)
+    val scopes = generateScopes {
+      it.profilesSampleRate = 1.0
+      it.setTransactionProfiler(mockTransactionProfiler)
+    }
+    val context = TransactionContext("name", "op")
+    val transaction =
+      scopes.startTransaction(context, TransactionOptions().apply { isAppStartTransaction = true })
+    verify(mockTransactionProfiler, never()).start()
+    verify(mockTransactionProfiler).bindTransaction(eq(transaction))
+  }
+
+  @Test
+  fun `when profiler is not running, startTransaction starts and binds current profile`() {
+    val mockTransactionProfiler = mock<ITransactionProfiler>()
+    whenever(mockTransactionProfiler.isRunning).thenReturn(false)
+    val scopes = generateScopes {
+      it.profilesSampleRate = 1.0
+      it.setTransactionProfiler(mockTransactionProfiler)
+    }
+    val context = TransactionContext("name", "op")
+    val transaction =
+      scopes.startTransaction(context, TransactionOptions().apply { isAppStartTransaction = false })
+    verify(mockTransactionProfiler).start()
+    verify(mockTransactionProfiler).bindTransaction(eq(transaction))
+  }
+
+  // endregion
+
+  // region startTransaction tests
+  @Test
+  fun `when startTransaction, creates transaction`() {
+    val scopes = generateScopes()
+    val contexts = TransactionContext("name", "op")
+
+    val transaction = scopes.startTransaction(contexts)
+    assertTrue(transaction is IchnoisCoreTracer)
+    assertEquals(contexts, transaction.root.spanContext)
+  }
+
+  @Test
+  fun `when startTransaction with bindToScope set to false, transaction is not attached to the scope`() {
+    val scopes = generateScopes()
+
+    scopes.startTransaction("name", "op", TransactionOptions())
+
+    scopes.configureScope { assertNull(it.span) }
+  }
+
+  @Test
+  fun `when startTransaction without bindToScope set, transaction is not attached to the scope`() {
+    val scopes = generateScopes()
+
+    scopes.startTransaction("name", "op")
+
+    scopes.configureScope { assertNull(it.span) }
+  }
+
+  @Test
+  fun `when startTransaction with bindToScope set to true, transaction is attached to the scope`() {
+    val scopes = generateScopes()
+
+    val transaction =
+      scopes.startTransaction("name", "op", TransactionOptions().also { it.isBindToScope = true })
+
+    scopes.configureScope { assertEquals(transaction, it.span) }
+  }
+
+  @Test
+  fun `when startTransaction and no tracing sampling is configured, event is not sampled`() {
+    val scopes = generateScopes { it.tracesSampleRate = 0.0 }
+
+    val transaction = scopes.startTransaction("name", "op")
+    assertFalse(transaction.isSampled!!)
+  }
+
+  @Test
+  fun `when startTransaction and no profile sampling is configured, profile is not sampled`() {
+    val scopes = generateScopes {
+      it.tracesSampleRate = 1.0
+      it.profilesSampleRate = 0.0
+    }
+
+    val transaction = scopes.startTransaction("name", "op")
+    assertTrue(transaction.isSampled!!)
+    assertFalse(transaction.isProfileSampled!!)
+  }
+
+  @Test
+  fun `when startTransaction with parent sampled and no traces sampler provided, transaction inherits sampling decision`() {
+    val scopes = generateScopes()
+    val transactionContext = TransactionContext("name", "op")
+    transactionContext.parentSampled = true
+    val transaction = scopes.startTransaction(transactionContext)
+    assertNotNull(transaction)
+    assertNotNull(transaction.isSampled)
+    assertTrue(transaction.isSampled!!)
+  }
+
+  @Test
+  fun `when startTransaction with parent profile sampled and no profile sampler provided, transaction inherits profile sampling decision`() {
+    val scopes = generateScopes()
+    val transactionContext = TransactionContext("name", "op")
+    transactionContext.setParentSampled(true, true)
+    val transaction = scopes.startTransaction(transactionContext)
+    assertTrue(transaction.isProfileSampled!!)
+  }
+
+  @Test
+  fun `Scopes should close the ichnois executor processor, profiler and performance collector on close call`() {
+    val executor = mock<IIchnoisCoreExecutorService>()
+    val profiler = mock<ITransactionProfiler>()
+    val backpressureMonitorMock = mock<IBackpressureMonitor>()
+    val continuousProfiler = mock<IContinuousProfiler>()
+    val performanceCollector = mock<CompositePerformanceCollector>()
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        cacheDirPath = file.absolutePath
+        executorService = executor
+        setTransactionProfiler(profiler)
+        compositePerformanceCollector = performanceCollector
+        setContinuousProfiler(continuousProfiler)
+        profileSessionSampleRate = 1.0
+        backpressureMonitor = backpressureMonitorMock
+      }
+    val sut = createScopes(options)
+    sut.close()
+    verify(backpressureMonitorMock).close()
+    verify(executor).close(any())
+    verify(profiler).close()
+    verify(continuousProfiler).close(eq(true))
+    verify(performanceCollector).close()
+  }
+
+  @Test
+  fun `Scopes with isRestarting true should close the ichnois executor in the background`() {
+    val executor = spy(DeferredExecutorService())
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        executorService = executor
+      }
+    val sut = createScopes(options)
+    sut.close(true)
+    verify(executor, never()).close(any())
+    executor.runAll()
+    verify(executor).close(any())
+  }
+
+  @Test
+  fun `Scopes with isRestarting false should close the ichnois executor in the background`() {
+    val executor = mock<IIchnoisCoreExecutorService>()
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        executorService = executor
+      }
+    val sut = createScopes(options)
+    sut.close(false)
+    verify(executor).close(any())
+  }
+
+  @Test
+  fun `Scopes with isRestarting true should not close the timer executor`() {
+    val timerExecutor = mock<IIchnoisCoreExecutorService>()
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        setTimerExecutorService(timerExecutor)
+      }
+    val sut = createScopes(options)
+    sut.close(true)
+    verify(timerExecutor, never()).close(any())
+  }
+
+  @Test
+  fun `Scopes with isRestarting false should close the timer executor`() {
+    val timerExecutor = mock<IIchnoisCoreExecutorService>()
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+        setTimerExecutorService(timerExecutor)
+      }
+    val sut = createScopes(options)
+    sut.close(false)
+    verify(timerExecutor).close(any())
+  }
+
+  @Test
+  fun `Scopes close should clear the scope`() {
+    val options = IchnoisCoreOptions().apply { dsn = "https://key@ichnois-h2jw.onrender.com/proj" }
+
+    val sut = createScopes(options)
+    sut.addBreadcrumb("Test")
+    sut.startTransaction("test", "test.op", TransactionOptions().also { it.isBindToScope = true })
+    sut.close()
+
+    // we have to clone the scope, so its isEnabled returns true, but it's still built up from
+    // the old scope preserving its data
+    val clone = sut.forkedScopes("test")
+    clone.bindClient(createIchnoisCoreClientMock(enabled = true))
+    var oldScope: IScope? = null
+    clone.configureScope { scope -> oldScope = scope }
+    assertNull(oldScope!!.transaction)
+    assertTrue(oldScope!!.breadcrumbs.isEmpty())
+  }
+
+  @Test
+  fun `when tracesSampleRate and tracesSampler are not set on IchnoisCoreOptions, startTransaction returns NoOp`() {
+    val scopes = generateScopes {
+      it.tracesSampleRate = null
+      it.tracesSampler = null
+    }
+    val transaction =
+      scopes.startTransaction(TransactionContext("name", "op", TracesSamplingDecision(true)))
+    assertTrue(transaction is NoOpTransaction)
+  }
+
+  @Test
+  fun `when startTransaction, trace profile session is started`() {
+    val scopes = generateScopes {
+      it.tracesSampleRate = 1.0
+      it.setContinuousProfiler(mockProfiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.TRACE
+    }
+
+    val transaction = scopes.startTransaction("name", "op")
+    assertTrue(transaction.isSampled!!)
+    verify(mockProfiler).startProfiler(eq(ProfileLifecycle.TRACE), any())
+  }
+
+  @Test
+  fun `when startTransaction, manual profile session is not started`() {
+    val scopes = generateScopes {
+      it.tracesSampleRate = 1.0
+      it.setContinuousProfiler(mockProfiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.MANUAL
+    }
+
+    val transaction = scopes.startTransaction("name", "op")
+    assertTrue(transaction.isSampled!!)
+    verify(mockProfiler, never()).startProfiler(any(), any())
+  }
+
+  @Test
+  fun `when startTransaction not sampled, trace profile session is not started`() {
+    val scopes = generateScopes {
+      // If transaction is not sampled, profiler should not start
+      it.tracesSampleRate = 0.0
+      it.setContinuousProfiler(mockProfiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.TRACE
+    }
+    val transaction = scopes.startTransaction("name", "op")
+    transaction.spanContext.setSampled(false, false)
+    assertFalse(transaction.isSampled!!)
+    verify(mockProfiler, never()).startProfiler(any(), any())
+  }
+
+  // endregion
+
+  // region getSpan tests
+  @Test
+  fun `when there is no active transaction, getSpan returns null`() {
+    val scopes = generateScopes()
+    assertNull(scopes.span)
+  }
+
+  @Test
+  fun `when there is no active transaction, getTransaction returns null`() {
+    val scopes = generateScopes()
+    assertNull(scopes.transaction)
+  }
+
+  @Test
+  fun `when there is active transaction bound to the scope, getTransaction and getSpan return active transaction`() {
+    val scopes = generateScopes()
+    val tx = scopes.startTransaction("aTransaction", "op")
+    scopes.configureScope { it.transaction = tx }
+
+    assertEquals(tx, scopes.transaction)
+    assertEquals(tx, scopes.span)
+  }
+
+  @Test
+  fun `when there is a transaction but the scopes is closed, getTransaction returns null`() {
+    val scopes = generateScopes()
+    scopes.startTransaction("name", "op")
+    scopes.close()
+
+    assertNull(scopes.transaction)
+  }
+
+  @Test
+  fun `when there is active span within a transaction bound to the scope, getSpan returns active span`() {
+    val scopes = generateScopes()
+    val tx = scopes.startTransaction("aTransaction", "op")
+    scopes.configureScope { it.setTransaction(tx) }
+    scopes.configureScope { it.setTransaction(tx) }
+    val span = tx.startChild("op")
+
+    assertEquals(tx, scopes.transaction)
+    assertEquals(span, scopes.span)
+  }
+
+  // endregion
+
+  // region setSpanContext
+  @Test
+  fun `associates span context with throwable`() {
+    val (scopes, mockClient) = getEnabledScopes()
+    val transaction = scopes.startTransaction("aTransaction", "op")
+    val span = transaction.startChild("op")
+    val exception = RuntimeException()
+
+    scopes.setSpanContext(exception, span, "tx-name")
+    scopes.captureEvent(IchnoisCoreEvent(exception))
+
+    verify(mockClient)
+      .captureEvent(
+        check { assertEquals(span.spanContext, it.contexts.trace) },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  // endregion
+
+  @Test
+  fun `isCrashedLastRun does not delete native marker if auto session is enabled`() {
+    val nativeMarker = File(hashedFolder(), EnvelopeCache.NATIVE_CRASH_MARKER_FILE)
+    nativeMarker.mkdirs()
+    nativeMarker.createNewFile()
+    val scopes = generateScopes() as Scopes
+
+    assertTrue(scopes.isCrashedLastRun!!)
+    assertTrue(nativeMarker.exists())
+  }
+
+  @Test
+  fun `isCrashedLastRun deletes the native marker if auto session is disabled`() {
+    val nativeMarker = File(hashedFolder(), EnvelopeCache.NATIVE_CRASH_MARKER_FILE)
+    nativeMarker.mkdirs()
+    nativeMarker.createNewFile()
+    val scopes = generateScopes { it.isEnableAutoSessionTracking = false }
+
+    assertTrue(scopes.isCrashedLastRun!!)
+    assertFalse(nativeMarker.exists())
+  }
+
+  @Test
+  fun `reportFullyDisplayed is ignored if TimeToFullDisplayTracing is disabled`() {
+    var called = false
+    val scopes = generateScopes {
+      it.fullyDisplayedReporter.registerFullyDrawnListener { called = !called }
+    }
+    scopes.reportFullyDisplayed()
+    assertFalse(called)
+  }
+
+  @Test
+  fun `reportFullyDisplayed calls FullyDisplayedReporter if TimeToFullDisplayTracing is enabled`() {
+    var called = false
+    val scopes = generateScopes {
+      it.isEnableTimeToFullDisplayTracing = true
+      it.fullyDisplayedReporter.registerFullyDrawnListener { called = !called }
+    }
+    scopes.reportFullyDisplayed()
+    assertTrue(called)
+  }
+
+  @Test
+  fun `reportFullyDisplayed calls FullyDisplayedReporter only once`() {
+    var called = false
+    val scopes = generateScopes {
+      it.isEnableTimeToFullDisplayTracing = true
+      it.fullyDisplayedReporter.registerFullyDrawnListener { called = !called }
+    }
+    scopes.reportFullyDisplayed()
+    assertTrue(called)
+    scopes.reportFullyDisplayed()
+    assertTrue(called)
+  }
+
+  @Test
+  fun `continueTrace creates propagation context from headers and returns transaction context if performance enabled`() {
+    val scopes = generateScopes()
+    val traceId = IchnoisCoreId()
+    val parentSpanId = SpanId()
+    val transactionContext =
+      scopes.continueTrace(
+        "$traceId-$parentSpanId-1",
+        listOf(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=$traceId,ichnois-transaction=HTTP%20GET"
+        ),
+      )
+
+    scopes.configureScope { scope ->
+      assertEquals(traceId, scope.propagationContext.traceId)
+      assertEquals(parentSpanId, scope.propagationContext.parentSpanId)
+    }
+
+    assertEquals(traceId, transactionContext!!.traceId)
+    assertEquals(parentSpanId, transactionContext!!.parentSpanId)
+  }
+
+  @Test
+  fun `continueTrace creates propagation context from headers and returns transaction context if performance enabled no sampled value`() {
+    val scopes = generateScopes()
+    val traceId = IchnoisCoreId()
+    val parentSpanId = SpanId()
+    val transactionContext =
+      scopes.continueTrace(
+        "$traceId-$parentSpanId",
+        listOf(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=$traceId,ichnois-transaction=HTTP%20GET"
+        ),
+      )
+
+    scopes.configureScope { scope ->
+      assertEquals(traceId, scope.propagationContext.traceId)
+      assertEquals(parentSpanId, scope.propagationContext.parentSpanId)
+    }
+
+    assertEquals(traceId, transactionContext!!.traceId)
+    assertEquals(parentSpanId, transactionContext!!.parentSpanId)
+    assertEquals(null, transactionContext!!.parentSamplingDecision)
+  }
+
+  @Test
+  fun `continueTrace creates new propagation context if header invalid and returns transaction context if performance enabled`() {
+    val scopes = generateScopes()
+    val traceId = IchnoisCoreId()
+    var propagationContextHolder = AtomicReference<PropagationContext>()
+
+    scopes.configureScope { propagationContextHolder.set(it.propagationContext) }
+    val propagationContextAtStart = propagationContextHolder.get()!!
+
+    val transactionContext =
+      scopes.continueTrace(
+        "invalid",
+        listOf(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=$traceId,ichnois-transaction=HTTP%20GET"
+        ),
+      )
+
+    scopes.configureScope { scope ->
+      assertNotEquals(propagationContextAtStart.traceId, scope.propagationContext.traceId)
+      assertNotEquals(propagationContextAtStart.parentSpanId, scope.propagationContext.parentSpanId)
+      assertNotEquals(propagationContextAtStart.spanId, scope.propagationContext.spanId)
+
+      assertEquals(scope.propagationContext.traceId, transactionContext!!.traceId)
+      assertEquals(scope.propagationContext.parentSpanId, transactionContext!!.parentSpanId)
+      assertEquals(scope.propagationContext.spanId, transactionContext!!.spanId)
+    }
+  }
+
+  @Test
+  fun `continueTrace creates propagation context from headers and returns null if performance disabled`() {
+    val scopes = generateScopes { it.tracesSampleRate = null }
+    val traceId = IchnoisCoreId()
+    val parentSpanId = SpanId()
+    val transactionContext =
+      scopes.continueTrace(
+        "$traceId-$parentSpanId-1",
+        listOf(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=$traceId,ichnois-transaction=HTTP%20GET"
+        ),
+      )
+
+    scopes.configureScope { scope ->
+      assertEquals(traceId, scope.propagationContext.traceId)
+      assertEquals(parentSpanId, scope.propagationContext.parentSpanId)
+    }
+
+    assertNull(transactionContext)
+  }
+
+  @Test
+  fun `continueTrace creates new propagation context if header invalid and returns null if performance disabled`() {
+    val scopes = generateScopes { it.tracesSampleRate = null }
+    val traceId = IchnoisCoreId()
+    var propagationContextHolder = AtomicReference<PropagationContext>()
+
+    scopes.configureScope { propagationContextHolder.set(it.propagationContext) }
+    val propagationContextAtStart = propagationContextHolder.get()!!
+
+    val transactionContext =
+      scopes.continueTrace(
+        "invalid",
+        listOf(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=$traceId,ichnois-transaction=HTTP%20GET"
+        ),
+      )
+
+    scopes.configureScope { scope ->
+      assertNotEquals(propagationContextAtStart.traceId, scope.propagationContext.traceId)
+      assertNotEquals(propagationContextAtStart.parentSpanId, scope.propagationContext.parentSpanId)
+      assertNotEquals(propagationContextAtStart.spanId, scope.propagationContext.spanId)
+    }
+
+    assertNull(transactionContext)
+  }
+
+  // region replay event tests
+  @Test
+  fun `when captureReplay is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.captureReplay(IchnoisCoreReplayEvent(), Hint())
+    verify(mockClient, never()).captureReplayEvent(any(), any(), any<Hint>())
+  }
+
+  @Test
+  fun `when captureReplay is called with a valid argument, captureReplay on the client should be called`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    val event = IchnoisCoreReplayEvent()
+    val hints = HintUtils.createWithTypeCheckHint({})
+    sut.captureReplay(event, hints)
+    verify(mockClient).captureReplayEvent(eq(event), any(), eq(hints))
+  }
+
+  // endregion replay event tests
+
+  @Test
+  fun `is considered enabled if client is enabled()`() {
+    val scopes = generateScopes() as Scopes
+    val client = mock<IIchnoisCoreClient>()
+    whenever(client.isEnabled).thenReturn(true)
+    scopes.bindClient(client)
+    assertTrue(scopes.isEnabled)
+  }
+
+  @Test
+  fun `is considered disabled if client is disabled()`() {
+    val scopes = generateScopes() as Scopes
+    val client = mock<IIchnoisCoreClient>()
+    whenever(client.isEnabled).thenReturn(false)
+    scopes.bindClient(client)
+    assertFalse(scopes.isEnabled)
+  }
+
+  @Test
+  fun `creating a transaction with an ignored origin noops`() {
+    val scopes = generateScopes { it.setIgnoredSpanOrigins(listOf("ignored.span.origin")) }
+
+    val transactionContext = TransactionContext("transaction-name", "transaction-op")
+    val transactionOptions =
+      TransactionOptions().also {
+        it.origin = "ignored.span.origin"
+        it.isBindToScope = true
+      }
+
+    val transaction = scopes.startTransaction(transactionContext, transactionOptions)
+    assertTrue(transaction.isNoOp)
+    scopes.configureScope { assertNull(it.transaction) }
+  }
+
+  @Test
+  fun `creating a transaction with a non ignored origin creates the transaction`() {
+    val scopes = generateScopes { it.setIgnoredSpanOrigins(listOf("ignored.span.origin")) }
+
+    val transactionContext = TransactionContext("transaction-name", "transaction-op")
+    val transactionOptions =
+      TransactionOptions().also {
+        it.origin = "other.span.origin"
+        it.isBindToScope = true
+      }
+
+    val transaction = scopes.startTransaction(transactionContext, transactionOptions)
+    assertFalse(transaction.isNoOp)
+    scopes.configureScope { assertSame(transaction, it.transaction) }
+  }
+
+  @Test
+  fun `creating a transaction with origin sets the origin on the transaction context`() {
+    val scopes = generateScopes()
+
+    val transactionContext = TransactionContext("transaction-name", "transaction-op")
+    val transactionOptions = TransactionOptions().also { it.origin = "other.span.origin" }
+
+    val transaction = scopes.startTransaction(transactionContext, transactionOptions)
+    assertEquals("other.span.origin", transaction.spanContext.origin)
+  }
+
+  @Test
+  fun `startTransaction start the continuous profiler before creating IchnoisCoreTracer in ProfileLifecycle TRACE`() {
+    val profiler = mock<IContinuousProfiler>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.TRACE
+    }
+
+    whenever(profiler.profilerId).thenReturn(IchnoisCoreId.EMPTY_ID)
+
+    val expectedIchnoisCoreId = IchnoisCoreId()
+
+    doAnswer { whenever(profiler.profilerId).thenReturn(expectedIchnoisCoreId) }
+      .whenever(profiler)
+      .startProfiler(eq(ProfileLifecycle.TRACE), any())
+
+    val transaction = scopes.startTransaction("test", "test")
+
+    val profilerId = transaction.getData("profiler_id") as? String
+    val profilingContext = transaction.contexts.get("profile") as? ProfileContext
+    assertNotNull(profilerId)
+    assertTrue(IchnoisCoreId(transaction.getData("profiler_id")!! as String) != IchnoisCoreId.EMPTY_ID)
+    assertEquals(expectedIchnoisCoreId, IchnoisCoreId(profilerId))
+    assertEquals(ProfileContext(IchnoisCoreId(profilerId)), profilingContext)
+    verify(profiler).startProfiler(eq(ProfileLifecycle.TRACE), any())
+  }
+
+  // region profileSession
+
+  @Test
+  fun `startProfiler starts the continuous profiler`() {
+    val profiler = mock<IContinuousProfiler>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+    }
+    scopes.startProfiler()
+    verify(profiler).startProfiler(eq(ProfileLifecycle.MANUAL), any())
+  }
+
+  @Test
+  fun `startProfiler logs instructions if continuous profiling is disabled`() {
+    val profiler = mock<IContinuousProfiler>()
+    val logger = mock<ILogger>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+      it.profilesSampleRate = 1.0
+      it.setLogger(logger)
+      it.isDebug = true
+    }
+    scopes.startProfiler()
+    verify(profiler, never()).startProfiler(eq(ProfileLifecycle.MANUAL), any())
+    verify(logger)
+      .log(
+        eq(IchnoisCoreLevel.WARNING),
+        eq(
+          "Continuous Profiling is not enabled. Set profilesSampleRate and profilesSampler to null to enable it."
+        ),
+      )
+  }
+
+  @Test
+  fun `startProfiler is ignored on trace lifecycle`() {
+    val profiler = mock<IContinuousProfiler>()
+    val logger = mock<ILogger>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.TRACE
+      it.setLogger(logger)
+      it.isDebug = true
+    }
+    scopes.startProfiler()
+    verify(logger)
+      .log(
+        eq(IchnoisCoreLevel.WARNING),
+        eq("Profiling lifecycle is %s. Profiling cannot be started manually."),
+        eq(ProfileLifecycle.TRACE.name),
+      )
+    verify(profiler, never()).startProfiler(any(), any())
+  }
+
+  @Test
+  fun `stopProfiler stops the continuous profiler`() {
+    val profiler = mock<IContinuousProfiler>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+    }
+    scopes.stopProfiler()
+    verify(profiler).stopProfiler(eq(ProfileLifecycle.MANUAL))
+  }
+
+  @Test
+  fun `stopProfiler logs instructions if continuous profiling is disabled`() {
+    val profiler = mock<IContinuousProfiler>()
+    val logger = mock<ILogger>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+      it.profilesSampleRate = 1.0
+      it.setLogger(logger)
+      it.isDebug = true
+    }
+    scopes.stopProfiler()
+    verify(profiler, never()).stopProfiler(eq(ProfileLifecycle.MANUAL))
+    verify(logger)
+      .log(
+        eq(IchnoisCoreLevel.WARNING),
+        eq(
+          "Continuous Profiling is not enabled. Set profilesSampleRate and profilesSampler to null to enable it."
+        ),
+      )
+  }
+
+  @Test
+  fun `stopProfiler is ignored on trace lifecycle`() {
+    val profiler = mock<IContinuousProfiler>()
+    val logger = mock<ILogger>()
+    val scopes = generateScopes {
+      it.setContinuousProfiler(profiler)
+      it.profileSessionSampleRate = 1.0
+      it.profileLifecycle = ProfileLifecycle.TRACE
+      it.setLogger(logger)
+      it.isDebug = true
+    }
+    scopes.stopProfiler()
+    verify(logger)
+      .log(
+        eq(IchnoisCoreLevel.WARNING),
+        eq("Profiling lifecycle is %s. Profiling cannot be stopped manually."),
+        eq(ProfileLifecycle.TRACE.name),
+      )
+    verify(profiler, never()).stopProfiler(any())
+  }
+
+  // endregion
+
+  // region logs
+
+  @Test
+  fun `when captureLog is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+    sut.close()
+
+    sut.logger().warn("test message")
+    verify(mockClient, never()).captureLog(any(), anyOrNull())
+  }
+
+  @Test
+  fun `when Logs option is omitted, capture manual log`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.logger().warn("test message")
+
+    verify(mockClient).captureLog(any(), anyOrNull())
+  }
+
+  @Test
+  fun `when Logs option is disabled, capture manual log`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = false }
+
+    sut.logger().warn("test message")
+
+    verify(mockClient).captureLog(any(), anyOrNull())
+  }
+
+  @Test
+  fun `capturing null log does nothing`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().warn(null)
+    verify(mockClient, never()).captureLog(any(), anyOrNull())
+  }
+
+  @Test
+  fun `creating trace log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().trace("trace log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("trace log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.TRACE, it.level)
+          assertEquals(1, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating debug log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().debug("debug log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("debug log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.DEBUG, it.level)
+          assertEquals(5, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating a info log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().info("info log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("info log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.INFO, it.level)
+          assertEquals(9, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating warn log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().warn("warn log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("warn log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating error log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().error("error log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("error log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.ERROR, it.level)
+          assertEquals(17, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating fatal log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().fatal("fatal log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("fatal log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.FATAL, it.level)
+          assertEquals(21, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `log with manual origin does not have origin attribute`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertNull(it.attributes!!.get("ichnois.origin"))
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `log with non manual origin does have origin attribute`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .logger()
+      .log(IchnoisCoreLogLevel.WARN, IchnoisCoreLogParameters().also { it.origin = "other" }, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(
+            "other",
+            (it.attributes!!.get("ichnois.origin") as? IchnoisCoreLogEventAttributeValue)?.value,
+          )
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with format string works`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.environment = "testenv"
+        it.release = "1.0"
+        it.serverName = "srv1"
+      }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log %s", "arg1")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log arg1", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val template = it.attributes?.get("ichnois.message.template")!!
+          assertEquals("log %s", template.value)
+          assertEquals("string", template.type)
+
+          val param0 = it.attributes?.get("ichnois.message.parameter.0")!!
+          assertEquals("arg1", param0.value)
+          assertEquals("string", param0.type)
+
+          val environment = it.attributes?.get("ichnois.environment")!!
+          assertEquals("testenv", environment.value)
+          assertEquals("string", environment.type)
+
+          val release = it.attributes?.get("ichnois.release")!!
+          assertEquals("1.0", release.value)
+          assertEquals("string", release.type)
+
+          val server = it.attributes?.get("server.address")!!
+          assertEquals("srv1", server.value)
+          assertEquals("string", server.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with timestamp works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, IchnoisCoreLongDate(123), "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(0.000000123, it.timestamp)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with attributes from map works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .logger()
+      .log(
+        IchnoisCoreLogLevel.WARN,
+        IchnoisCoreLogParameters.create(IchnoisCoreAttributes.fromMap(mapOf("attrname1" to "attrval1"))),
+        "log message",
+      )
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with attributes works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .logger()
+      .log(
+        IchnoisCoreLogLevel.WARN,
+        IchnoisCoreLogParameters.create(
+          IchnoisCoreAttributes.of(
+            IchnoisCoreAttribute.stringAttribute("strattr", "strval"),
+            IchnoisCoreAttribute.booleanAttribute("boolattr", true),
+            IchnoisCoreAttribute.integerAttribute("intattr", 17),
+            IchnoisCoreAttribute.doubleAttribute("doubleattr", 3.8),
+            IchnoisCoreAttribute.arrayAttribute("arrayattr", listOf("a", "b")),
+            IchnoisCoreAttribute.named("namedstrattr", "namedstrval"),
+            IchnoisCoreAttribute.named("namedboolattr", false),
+            IchnoisCoreAttribute.named("namedintattr", 18),
+            IchnoisCoreAttribute.named("nameddoubleattr", 4.9),
+            IchnoisCoreAttribute.named("namedarrayattr", listOf("x", "y")),
+          )
+        ),
+        "log message",
+      )
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val strattr = it.attributes?.get("strattr")!!
+          assertEquals("strval", strattr.value)
+          assertEquals("string", strattr.type)
+
+          val boolattr = it.attributes?.get("boolattr")!!
+          assertEquals(true, boolattr.value)
+          assertEquals("boolean", boolattr.type)
+
+          val intattr = it.attributes?.get("intattr")!!
+          assertEquals(17, intattr.value)
+          assertEquals("integer", intattr.type)
+
+          val doubleattr = it.attributes?.get("doubleattr")!!
+          assertEquals(3.8, doubleattr.value)
+          assertEquals("double", doubleattr.type)
+
+          val arrayattr = it.attributes?.get("arrayattr")!!
+          assertEquals(listOf("a", "b"), arrayattr.value)
+          assertEquals("array", arrayattr.type)
+
+          val namedstrattr = it.attributes?.get("namedstrattr")!!
+          assertEquals("namedstrval", namedstrattr.value)
+          assertEquals("string", namedstrattr.type)
+
+          val namedboolattr = it.attributes?.get("namedboolattr")!!
+          assertEquals(false, namedboolattr.value)
+          assertEquals("boolean", namedboolattr.type)
+
+          val namedintattr = it.attributes?.get("namedintattr")!!
+          assertEquals(18, namedintattr.value)
+          assertEquals("integer", namedintattr.type)
+
+          val nameddoubleattr = it.attributes?.get("nameddoubleattr")!!
+          assertEquals(4.9, nameddoubleattr.value)
+          assertEquals("double", nameddoubleattr.type)
+
+          val namedarrayattr = it.attributes?.get("namedarrayattr")!!
+          assertEquals(listOf("x", "y"), namedarrayattr.value)
+          assertEquals("array", namedarrayattr.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with attributes and timestamp works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .logger()
+      .log(
+        IchnoisCoreLogLevel.WARN,
+        IchnoisCoreLogParameters.create(
+          IchnoisCoreLongDate(123),
+          IchnoisCoreAttributes.of(IchnoisCoreAttribute.named("attrname1", "attrval1")),
+        ),
+        "log message",
+      )
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(0.000000123, it.timestamp)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with attributes and timestamp and format string works`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .logger()
+      .log(
+        IchnoisCoreLogLevel.WARN,
+        IchnoisCoreLogParameters.create(
+          IchnoisCoreLongDate(123),
+          IchnoisCoreAttributes.of(IchnoisCoreAttribute.named("attrname1", "attrval1")),
+        ),
+        "log %s %d %b %.0f",
+        "message",
+        1,
+        true,
+        3.2,
+      )
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message 1 true 3", it.body)
+          assertEquals(0.000000123, it.timestamp)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+
+          val template = it.attributes?.get("ichnois.message.template")!!
+          assertEquals("log %s %d %b %.0f", template.value)
+          assertEquals("string", template.type)
+
+          val param0 = it.attributes?.get("ichnois.message.parameter.0")!!
+          assertEquals("message", param0.value)
+          assertEquals("string", param0.type)
+
+          val param1 = it.attributes?.get("ichnois.message.parameter.1")!!
+          assertEquals(1, param1.value)
+          assertEquals("integer", param1.type)
+
+          val param2 = it.attributes?.get("ichnois.message.parameter.2")!!
+          assertEquals(true, param2.value)
+          assertEquals("boolean", param2.type)
+
+          val param3 = it.attributes?.get("ichnois.message.parameter.3")!!
+          assertEquals(3.2, param3.value)
+          assertEquals("double", param3.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating log with without args does not add template attribute`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log %s")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log %s", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val template = it.attributes?.get("ichnois.message.template")
+          assertNull(template)
+
+          val param0 = it.attributes?.get("ichnois.message.parameter.0")
+          assertNull(param0)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `captures format string on format error`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log %d", "arg1")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log %d", it.body)
+          assertEquals(IchnoisCoreLogLevel.WARN, it.level)
+          assertEquals(13, it.severityNumber)
+
+          val template = it.attributes?.get("ichnois.message.template")!!
+          assertEquals("log %d", template.value)
+          assertEquals("string", template.type)
+
+          val param0 = it.attributes?.get("ichnois.message.parameter.0")!!
+          assertEquals("arg1", param0.value)
+          assertEquals("string", param0.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds user fields to log attributes if sendDefaultPii is true`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.distinctId = "distinctId"
+        it.isSendDefaultPii = true
+      }
+
+    sut.configureScope { scope ->
+      scope.user =
+        User().also {
+          it.id = "usrid"
+          it.username = "usrname"
+          it.email = "user@ichnois.io"
+        }
+    }
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+
+          val userId = it.attributes?.get("user.id")!!
+          assertEquals("usrid", userId.value)
+          assertEquals("string", userId.type)
+
+          val userName = it.attributes?.get("user.name")!!
+          assertEquals("usrname", userName.value)
+          assertEquals("string", userName.type)
+
+          val userEmail = it.attributes?.get("user.email")!!
+          assertEquals("user@ichnois.io", userEmail.value)
+          assertEquals("string", userEmail.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds user fields to log attributes even if sendDefaultPii is false`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.distinctId = "distinctId"
+      }
+
+    sut.configureScope { scope ->
+      scope.user =
+        User().also {
+          it.id = "usrid"
+          it.username = "usrname"
+          it.email = "user@ichnois.io"
+        }
+    }
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+
+          val userId = it.attributes?.get("user.id")!!
+          assertEquals("usrid", userId.value)
+          assertEquals("string", userId.type)
+
+          val userName = it.attributes?.get("user.name")!!
+          assertEquals("usrname", userName.value)
+          assertEquals("string", userName.type)
+
+          val userEmail = it.attributes?.get("user.email")!!
+          assertEquals("user@ichnois.io", userEmail.value)
+          assertEquals("string", userEmail.type)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `unset user does provide distinct-id as user-id`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.distinctId = "distinctId"
+      }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+
+          assertEquals("distinctId", it.attributes?.get("user.id")?.value)
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `unset user does provide null user-id when distinct-id is missing`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.distinctId = null
+      }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertNull(it.attributes?.get("user.id"))
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `missing user fields do not break attributes`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.isSendDefaultPii = true
+        it.distinctId = "distinctId"
+      }
+
+    sut.configureScope { scope -> scope.user = User() }
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+
+          assertNull(it.attributes?.get("user.id"))
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds session replay id to log attributes`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = replayId
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")!!
+          assertEquals(replayId.toString(), logReplayId.value)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `missing session replay id do not break attributes`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          assertNull(logReplayId)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `does not add session replay buffering to log attributes if no replay id in scope and in controller`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.options.replayController.replayId)
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")
+          assertNull(logReplayId)
+          assertNull(logReplayType)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `does not add session replay buffering to log attributes if replay id in scope`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = replayId
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")
+          assertEquals(replayId.toString(), logReplayId!!.value)
+          assertNull(logReplayType)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds session replay buffering to log attributes if replay id in controller and not in scope`() {
+    val mockReplayController = mock<ReplayController>()
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.logs.isEnabled = true
+        it.setReplayController(mockReplayController)
+      }
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = IchnoisCoreId.EMPTY_ID
+    whenever(mockReplayController.replayId).thenReturn(replayId)
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")!!
+          assertEquals(replayId.toString(), logReplayId!!.value)
+          assertTrue(logReplayType.value as Boolean)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `log event has spanId from active span`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    val transaction =
+      sut.startTransaction(
+        "test transaction",
+        "test.op",
+        TransactionOptions().also { it.isBindToScope = true },
+      )
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(transaction.spanContext.traceId, it.traceId)
+          assertEquals(transaction.spanContext.spanId, it.spanId)
+        },
+        anyOrNull(),
+      )
+
+    transaction.finish()
+  }
+
+  @Test
+  fun `log event has spanId from propagation context when no active span`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    var propagationContext: PropagationContext? = null
+    sut.configureScope { propagationContext = it.propagationContext }
+
+    sut.logger().log(IchnoisCoreLogLevel.WARN, "log message")
+
+    verify(mockClient)
+      .captureLog(
+        check {
+          assertEquals("log message", it.body)
+          assertEquals(propagationContext!!.traceId, it.traceId)
+          assertEquals(propagationContext!!.spanId, it.spanId)
+        },
+        anyOrNull(),
+      )
+  }
+
+  // endregion
+
+  // region metrics
+
+  @Test
+  fun `when captureMetric is called on disabled client, do nothing`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.close()
+
+    sut.metrics().count("metric name")
+    verify(mockClient, never()).captureMetric(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `when Metrics option is disabled, capture manual metric`() {
+    val (sut, mockClient) = getEnabledScopes { it.metrics.isEnabled = false }
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient).captureMetric(any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `creating count metric works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("count metric")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("count metric", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals("counter", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().gauge("gauge metric", 2.3)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("gauge metric", it.name)
+          assertEquals(2.3, it.value)
+          assertEquals("gauge", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().distribution("distribution metric", 3.4)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("distribution metric", it.name)
+          assertEquals(3.4, it.value)
+          assertEquals("distribution", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `metric with manual origin does not have origin attribute`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertNull(it.attributes!!.get("ichnois.origin"))
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `metric with non manual origin does have origin attribute`() {
+    val (sut, mockClient) = getEnabledScopes { it.logs.isEnabled = true }
+
+    sut
+      .metrics()
+      .count(
+        "metric name",
+        1.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters().also { it.origin = "other" },
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(
+            "other",
+            (it.attributes!!.get("ichnois.origin") as? IchnoisCoreLogEventAttributeValue)?.value,
+          )
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with value and unit works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("metric name", 1.0, MetricsUnit.Information.BYTE)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with value works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("metric name", 1.0)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals("counter", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with unit works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("metric name", MetricsUnit.Information.BYTE)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with attributes from map works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .count(
+        "metric name",
+        1.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(IchnoisCoreAttributes.fromMap(mapOf("attrname1" to "attrval1"))),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with attributes from map and shortcut factory method works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .count(
+        "metric name",
+        1.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(mapOf("attrname1" to "attrval1")),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with attributes works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .count(
+        "metric name",
+        1.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreAttributes.of(
+            IchnoisCoreAttribute.stringAttribute("strattr", "strval"),
+            IchnoisCoreAttribute.booleanAttribute("boolattr", true),
+            IchnoisCoreAttribute.integerAttribute("intattr", 17),
+            IchnoisCoreAttribute.doubleAttribute("doubleattr", 3.8),
+            IchnoisCoreAttribute.arrayAttribute("arrayattr", listOf("a", "b")),
+            IchnoisCoreAttribute.named("namedstrattr", "namedstrval"),
+            IchnoisCoreAttribute.named("namedboolattr", false),
+            IchnoisCoreAttribute.named("namedintattr", 18),
+            IchnoisCoreAttribute.named("nameddoubleattr", 4.9),
+            IchnoisCoreAttribute.named("namedarrayattr", listOf("x", "y")),
+          )
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+
+          val strattr = it.attributes?.get("strattr")!!
+          assertEquals("strval", strattr.value)
+          assertEquals("string", strattr.type)
+
+          val boolattr = it.attributes?.get("boolattr")!!
+          assertEquals(true, boolattr.value)
+          assertEquals("boolean", boolattr.type)
+
+          val intattr = it.attributes?.get("intattr")!!
+          assertEquals(17, intattr.value)
+          assertEquals("integer", intattr.type)
+
+          val doubleattr = it.attributes?.get("doubleattr")!!
+          assertEquals(3.8, doubleattr.value)
+          assertEquals("double", doubleattr.type)
+
+          val arrayattr = it.attributes?.get("arrayattr")!!
+          assertEquals(listOf("a", "b"), arrayattr.value)
+          assertEquals("array", arrayattr.type)
+
+          val namedstrattr = it.attributes?.get("namedstrattr")!!
+          assertEquals("namedstrval", namedstrattr.value)
+          assertEquals("string", namedstrattr.type)
+
+          val namedboolattr = it.attributes?.get("namedboolattr")!!
+          assertEquals(false, namedboolattr.value)
+          assertEquals("boolean", namedboolattr.type)
+
+          val namedintattr = it.attributes?.get("namedintattr")!!
+          assertEquals(18, namedintattr.value)
+          assertEquals("integer", namedintattr.type)
+
+          val nameddoubleattr = it.attributes?.get("nameddoubleattr")!!
+          assertEquals(4.9, nameddoubleattr.value)
+          assertEquals("double", nameddoubleattr.type)
+
+          val namedarrayattr = it.attributes?.get("namedarrayattr")!!
+          assertEquals(listOf("x", "y"), namedarrayattr.value)
+          assertEquals("array", namedarrayattr.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating count metric with attributes and timestamp works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .count(
+        "metric name",
+        1.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreLongDate(123),
+          IchnoisCoreAttributes.of(IchnoisCoreAttribute.named("attrname1", "attrval1")),
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("counter", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric with value and unit works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().distribution("metric name", 1.0, MetricsUnit.Duration.MILLISECOND)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals(MetricsUnit.Duration.MILLISECOND, it.unit)
+          assertEquals("distribution", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric with value works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().distribution("metric name", 1.0)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(1.0, it.value)
+          assertEquals("distribution", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric with attributes from map works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .distribution(
+        "metric name",
+        3.7,
+        MetricsUnit.Duration.MILLISECOND,
+        IchnoisCoreMetricsParameters.create(IchnoisCoreAttributes.fromMap(mapOf("attrname1" to "attrval1"))),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(3.7, it.value)
+          assertEquals(MetricsUnit.Duration.MILLISECOND, it.unit)
+          assertEquals("distribution", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric with attributes works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .distribution(
+        "metric name",
+        3.7,
+        MetricsUnit.Duration.MILLISECOND,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreAttributes.of(
+            IchnoisCoreAttribute.stringAttribute("strattr", "strval"),
+            IchnoisCoreAttribute.booleanAttribute("boolattr", true),
+            IchnoisCoreAttribute.integerAttribute("intattr", 17),
+            IchnoisCoreAttribute.doubleAttribute("doubleattr", 3.8),
+            IchnoisCoreAttribute.arrayAttribute("arrayattr", listOf("a", "b")),
+            IchnoisCoreAttribute.named("namedstrattr", "namedstrval"),
+            IchnoisCoreAttribute.named("namedboolattr", false),
+            IchnoisCoreAttribute.named("namedintattr", 18),
+            IchnoisCoreAttribute.named("nameddoubleattr", 4.9),
+            IchnoisCoreAttribute.named("namedarrayattr", listOf("x", "y")),
+          )
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(3.7, it.value)
+          assertEquals(MetricsUnit.Duration.MILLISECOND, it.unit)
+          assertEquals("distribution", it.type)
+
+          val strattr = it.attributes?.get("strattr")!!
+          assertEquals("strval", strattr.value)
+          assertEquals("string", strattr.type)
+
+          val boolattr = it.attributes?.get("boolattr")!!
+          assertEquals(true, boolattr.value)
+          assertEquals("boolean", boolattr.type)
+
+          val intattr = it.attributes?.get("intattr")!!
+          assertEquals(17, intattr.value)
+          assertEquals("integer", intattr.type)
+
+          val doubleattr = it.attributes?.get("doubleattr")!!
+          assertEquals(3.8, doubleattr.value)
+          assertEquals("double", doubleattr.type)
+
+          val arrayattr = it.attributes?.get("arrayattr")!!
+          assertEquals(listOf("a", "b"), arrayattr.value)
+          assertEquals("array", arrayattr.type)
+
+          val namedstrattr = it.attributes?.get("namedstrattr")!!
+          assertEquals("namedstrval", namedstrattr.value)
+          assertEquals("string", namedstrattr.type)
+
+          val namedboolattr = it.attributes?.get("namedboolattr")!!
+          assertEquals(false, namedboolattr.value)
+          assertEquals("boolean", namedboolattr.type)
+
+          val namedintattr = it.attributes?.get("namedintattr")!!
+          assertEquals(18, namedintattr.value)
+          assertEquals("integer", namedintattr.type)
+
+          val nameddoubleattr = it.attributes?.get("nameddoubleattr")!!
+          assertEquals(4.9, nameddoubleattr.value)
+          assertEquals("double", nameddoubleattr.type)
+
+          val namedarrayattr = it.attributes?.get("namedarrayattr")!!
+          assertEquals(listOf("x", "y"), namedarrayattr.value)
+          assertEquals("array", namedarrayattr.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating distribution metric with attributes and timestamp works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .distribution(
+        "metric name",
+        3.7,
+        MetricsUnit.Duration.MILLISECOND,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreLongDate(123),
+          IchnoisCoreAttributes.of(IchnoisCoreAttribute.named("attrname1", "attrval1")),
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(3.7, it.value)
+          assertEquals(MetricsUnit.Duration.MILLISECOND, it.unit)
+          assertEquals("distribution", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric with value and unit works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().gauge("metric name", 128.0, MetricsUnit.Information.BYTE)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(128.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("gauge", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric with value works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().gauge("metric name", 128.0)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(128.0, it.value)
+          assertEquals("gauge", it.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric with attributes from map works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .gauge(
+        "metric name",
+        256.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(IchnoisCoreAttributes.fromMap(mapOf("attrname1" to "attrval1"))),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(256.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("gauge", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric with attributes works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .gauge(
+        "metric name",
+        256.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreAttributes.of(
+            IchnoisCoreAttribute.stringAttribute("strattr", "strval"),
+            IchnoisCoreAttribute.booleanAttribute("boolattr", true),
+            IchnoisCoreAttribute.integerAttribute("intattr", 17),
+            IchnoisCoreAttribute.doubleAttribute("doubleattr", 3.8),
+            IchnoisCoreAttribute.arrayAttribute("arrayattr", listOf("a", "b")),
+            IchnoisCoreAttribute.named("namedstrattr", "namedstrval"),
+            IchnoisCoreAttribute.named("namedboolattr", false),
+            IchnoisCoreAttribute.named("namedintattr", 18),
+            IchnoisCoreAttribute.named("nameddoubleattr", 4.9),
+            IchnoisCoreAttribute.named("namedarrayattr", listOf("x", "y")),
+          )
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(256.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("gauge", it.type)
+
+          val strattr = it.attributes?.get("strattr")!!
+          assertEquals("strval", strattr.value)
+          assertEquals("string", strattr.type)
+
+          val boolattr = it.attributes?.get("boolattr")!!
+          assertEquals(true, boolattr.value)
+          assertEquals("boolean", boolattr.type)
+
+          val intattr = it.attributes?.get("intattr")!!
+          assertEquals(17, intattr.value)
+          assertEquals("integer", intattr.type)
+
+          val doubleattr = it.attributes?.get("doubleattr")!!
+          assertEquals(3.8, doubleattr.value)
+          assertEquals("double", doubleattr.type)
+
+          val arrayattr = it.attributes?.get("arrayattr")!!
+          assertEquals(listOf("a", "b"), arrayattr.value)
+          assertEquals("array", arrayattr.type)
+
+          val namedstrattr = it.attributes?.get("namedstrattr")!!
+          assertEquals("namedstrval", namedstrattr.value)
+          assertEquals("string", namedstrattr.type)
+
+          val namedboolattr = it.attributes?.get("namedboolattr")!!
+          assertEquals(false, namedboolattr.value)
+          assertEquals("boolean", namedboolattr.type)
+
+          val namedintattr = it.attributes?.get("namedintattr")!!
+          assertEquals(18, namedintattr.value)
+          assertEquals("integer", namedintattr.type)
+
+          val nameddoubleattr = it.attributes?.get("nameddoubleattr")!!
+          assertEquals(4.9, nameddoubleattr.value)
+          assertEquals("double", nameddoubleattr.type)
+
+          val namedarrayattr = it.attributes?.get("namedarrayattr")!!
+          assertEquals(listOf("x", "y"), namedarrayattr.value)
+          assertEquals("array", namedarrayattr.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `creating gauge metric with attributes and timestamp works`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut
+      .metrics()
+      .gauge(
+        "metric name",
+        256.0,
+        MetricsUnit.Information.BYTE,
+        IchnoisCoreMetricsParameters.create(
+          IchnoisCoreLongDate(123),
+          IchnoisCoreAttributes.of(IchnoisCoreAttribute.named("attrname1", "attrval1")),
+        ),
+      )
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(256.0, it.value)
+          assertEquals(MetricsUnit.Information.BYTE, it.unit)
+          assertEquals("gauge", it.type)
+
+          val attr1 = it.attributes?.get("attrname1")!!
+          assertEquals("attrval1", attr1.value)
+          assertEquals("string", attr1.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds user fields to metric attributes if sendDefaultPii is true`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.distinctId = "distinctId"
+        it.isSendDefaultPii = true
+      }
+
+    sut.configureScope { scope ->
+      scope.user =
+        User().also {
+          it.id = "usrid"
+          it.username = "usrname"
+          it.email = "user@ichnois.io"
+        }
+    }
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+
+          val userId = it.attributes?.get("user.id")!!
+          assertEquals("usrid", userId.value)
+          assertEquals("string", userId.type)
+
+          val userName = it.attributes?.get("user.name")!!
+          assertEquals("usrname", userName.value)
+          assertEquals("string", userName.type)
+
+          val userEmail = it.attributes?.get("user.email")!!
+          assertEquals("user@ichnois.io", userEmail.value)
+          assertEquals("string", userEmail.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds user fields to metric attributes even if sendDefaultPii is false`() {
+    val (sut, mockClient) = getEnabledScopes { it.distinctId = "distinctId" }
+
+    sut.configureScope { scope ->
+      scope.user =
+        User().also {
+          it.id = "usrid"
+          it.username = "usrname"
+          it.email = "user@ichnois.io"
+        }
+    }
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+
+          val userId = it.attributes?.get("user.id")!!
+          assertEquals("usrid", userId.value)
+          assertEquals("string", userId.type)
+
+          val userName = it.attributes?.get("user.name")!!
+          assertEquals("usrname", userName.value)
+          assertEquals("string", userName.type)
+
+          val userEmail = it.attributes?.get("user.email")!!
+          assertEquals("user@ichnois.io", userEmail.value)
+          assertEquals("string", userEmail.type)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `unset user does provide distinct-id as user-id for metrics`() {
+    val (sut, mockClient) = getEnabledScopes { it.distinctId = "distinctId" }
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+
+          assertEquals("distinctId", it.attributes?.get("user.id")?.value)
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `unset user does provide null user-id when distinct-id is missing for metrics`() {
+    val (sut, mockClient) = getEnabledScopes { it.distinctId = null }
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertNull(it.attributes?.get("user.id"))
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `missing user fields do not break attributes for metrics`() {
+    val (sut, mockClient) =
+      getEnabledScopes {
+        it.isSendDefaultPii = true
+        it.distinctId = "distinctId"
+      }
+
+    sut.configureScope { scope -> scope.user = User() }
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+
+          assertNull(it.attributes?.get("user.id"))
+          assertNull(it.attributes?.get("user.name"))
+          assertNull(it.attributes?.get("user.email"))
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds session replay id to metric attributes`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = replayId
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")!!
+          assertEquals(replayId.toString(), logReplayId.value)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `missing session replay id do not break metric attributes`() {
+    val (sut, mockClient) = getEnabledScopes()
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          assertNull(logReplayId)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `does not add session replay buffering to metric attributes if no replay id in scope and in controller`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.metrics().count("metric name")
+    assertEquals(IchnoisCoreId.EMPTY_ID, sut.options.replayController.replayId)
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")
+          assertNull(logReplayId)
+          assertNull(logReplayType)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `does not add session replay buffering to metric attributes if replay id in scope`() {
+    val (sut, mockClient) = getEnabledScopes()
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = replayId
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")
+          assertEquals(replayId.toString(), logReplayId!!.value)
+          assertNull(logReplayType)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `adds session replay buffering to metric attributes if replay id in controller and not in scope`() {
+    val mockReplayController = mock<ReplayController>()
+    val (sut, mockClient) = getEnabledScopes { it.setReplayController(mockReplayController) }
+    val replayId = IchnoisCoreId()
+    sut.scope.replayId = IchnoisCoreId.EMPTY_ID
+    whenever(mockReplayController.replayId).thenReturn(replayId)
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          val logReplayId = it.attributes?.get("ichnois.replay_id")
+          val logReplayType = it.attributes?.get("ichnois._internal.replay_is_buffering")!!
+          assertEquals(replayId.toString(), logReplayId!!.value)
+          assertTrue(logReplayType.value as Boolean)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `metric event has spanId from active span`() {
+    val (sut, mockClient) = getEnabledScopes { it.metrics.isEnabled = true }
+
+    val transaction =
+      sut.startTransaction(
+        "test transaction",
+        "test.op",
+        TransactionOptions().also { it.isBindToScope = true },
+      )
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(transaction.spanContext.traceId, it.traceId)
+          assertEquals(transaction.spanContext.spanId, it.spanId)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+
+    transaction.finish()
+  }
+
+  @Test
+  fun `metric event has spanId from propagation context when no active span`() {
+    val (sut, mockClient) = getEnabledScopes { it.metrics.isEnabled = true }
+
+    var propagationContext: PropagationContext? = null
+    sut.configureScope { propagationContext = it.propagationContext }
+
+    sut.metrics().count("metric name")
+
+    verify(mockClient)
+      .captureMetric(
+        check {
+          assertEquals("metric name", it.name)
+          assertEquals(propagationContext!!.traceId, it.traceId)
+          assertEquals(propagationContext!!.spanId, it.spanId)
+        },
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  // endregion
+
+  @Test
+  fun `null tags do not cause NPE`() {
+    val scopes = generateScopes()
+    scopes.setTag(null, null)
+    scopes.setTag("k", null)
+    scopes.setTag(null, "v")
+    scopes.removeTag(null)
+    assertTrue(scopes.scope.tags.isEmpty())
+    assertTrue(scopes.isolationScope.tags.isEmpty())
+    assertTrue(scopes.globalScope.tags.isEmpty())
+  }
+
+  @Test
+  fun `null extras do not cause NPE`() {
+    val scopes = generateScopes()
+    scopes.setExtra(null, null)
+    scopes.setExtra("k", null)
+    scopes.setExtra(null, "v")
+    scopes.removeExtra(null)
+    assertTrue(scopes.scope.extras.isEmpty())
+    assertTrue(scopes.isolationScope.extras.isEmpty())
+    assertTrue(scopes.globalScope.extras.isEmpty())
+  }
+
+  @Test
+  fun `feature flags can be added to scopes`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.addFeatureFlag("test-feature-flag", true)
+    sut.scope.addFeatureFlag("current-feature-flag", true)
+    sut.isolationScope.addFeatureFlag("isolation-feature-flag", false)
+    sut.globalScope.addFeatureFlag("global-feature-flag", true)
+
+    sut.captureException(RuntimeException("test exception"))
+
+    verify(mockClient)
+      .captureEvent(
+        any(),
+        check {
+          val featureFlags = it.featureFlags
+          assertNotNull(featureFlags)
+
+          val flag0 = featureFlags.values[0]
+          assertEquals("test-feature-flag", flag0.flag)
+          assertTrue(flag0.result)
+
+          val flag1 = featureFlags.values[1]
+          assertEquals("current-feature-flag", flag1.flag)
+          assertTrue(flag1.result)
+
+          val flag2 = featureFlags.values[2]
+          assertEquals("isolation-feature-flag", flag2.flag)
+          assertFalse(flag2.result)
+
+          val flag3 = featureFlags.values[3]
+          assertEquals("global-feature-flag", flag3.flag)
+          assertTrue(flag3.result)
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `null feature flags are ignored`() {
+    val (sut, mockClient) = getEnabledScopes()
+
+    sut.addFeatureFlag(null, true)
+    sut.addFeatureFlag("flag-1", null)
+    sut.addFeatureFlag(null, null)
+
+    sut.scope.addFeatureFlag(null, true)
+    sut.scope.addFeatureFlag("current-feature-flag", null)
+    sut.scope.addFeatureFlag(null, null)
+
+    sut.isolationScope.addFeatureFlag(null, false)
+    sut.isolationScope.addFeatureFlag("isolation-feature-flag", null)
+    sut.isolationScope.addFeatureFlag(null, null)
+
+    sut.globalScope.addFeatureFlag(null, true)
+    sut.globalScope.addFeatureFlag("global-feature-flag", null)
+    sut.globalScope.addFeatureFlag(null, null)
+
+    sut.captureException(RuntimeException("test exception"))
+
+    verify(mockClient).captureEvent(any(), check { assertNull(it.featureFlags) }, anyOrNull())
+  }
+
+  private val dsnTest = "https://key@ichnois-h2jw.onrender.com/proj"
+
+  private fun generateScopes(
+    optionsConfiguration: IchnoisCore.OptionsConfiguration<IchnoisCoreOptions>? = null
+  ): IScopes {
+    val options =
+      IchnoisCoreOptions().apply {
+        dsn = dsnTest
+        cacheDirPath = file.absolutePath
+        setSerializer(mock())
+        tracesSampleRate = 1.0
+      }
+    optionsConfiguration?.configure(options)
+    return createScopes(options)
+  }
+
+  private fun getEnabledScopes(
+    optionsConfiguration: IchnoisCore.OptionsConfiguration<IchnoisCoreOptions>? = null
+  ): Triple<Scopes, IIchnoisCoreClient, ILogger> {
+    val logger = mock<ILogger>()
+
+    val options = IchnoisCoreOptions()
+    options.cacheDirPath = file.absolutePath
+    options.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+    options.setSerializer(mock())
+    options.tracesSampleRate = 1.0
+    options.isDebug = true
+    options.setLogger(logger)
+    optionsConfiguration?.configure(options)
+
+    val sut = createScopes(options)
+    val mockClient = createIchnoisCoreClientMock()
+    sut.bindClient(mockClient)
+    return Triple(sut, mockClient, logger)
+  }
+
+  private fun hashedFolder(): String {
+    val hash = StringUtils.calculateStringHash(dsnTest, mock())
+    val fileHashFolder = File(file.absolutePath, hash!!)
+    return fileHashFolder.absolutePath
+  }
+
+  private fun equalTraceContext(expectedContext: TraceContext?): TraceContext? {
+    expectedContext ?: return eq<TraceContext?>(null)
+
+    return argWhere { actual ->
+      expectedContext.traceId == actual.traceId &&
+        expectedContext.transaction == actual.transaction &&
+        expectedContext.environment == actual.environment &&
+        expectedContext.release == actual.release &&
+        expectedContext.publicKey == actual.publicKey &&
+        expectedContext.sampleRate == actual.sampleRate &&
+        expectedContext.userId == actual.userId
+    }
+  }
+}

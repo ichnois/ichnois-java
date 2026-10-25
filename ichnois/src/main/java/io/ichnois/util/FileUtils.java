@@ -1,0 +1,158 @@
+package io.ichnois.util;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStream;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class FileUtils {
+
+  /**
+   * Deletes the file or directory denoted by a path. If it is a directory, all files and directory
+   * inside it are deleted recursively. Note that if this operation fails then partial deletion may
+   * have taken place.
+   *
+   * @param file file or directory to delete
+   * @return true if the file/directory is successfully deleted, false otherwise
+   */
+  public static boolean deleteRecursively(@Nullable File file) {
+    if (file == null || !file.exists()) {
+      return true;
+    }
+    if (file.isFile()) {
+      return file.delete();
+    }
+    File[] children = file.listFiles();
+    if (children == null) return true;
+    for (File f : children) {
+      if (!deleteRecursively(f)) return false;
+    }
+    return file.delete();
+  }
+
+  /**
+   * Creates the directory and any missing parents, if it does not exist yet.
+   *
+   * <p>Callers are expected to log a failure: a missing directory otherwise surfaces later as an
+   * unrelated-looking write error.
+   *
+   * @param directory the directory to create
+   * @return true if the directory exists once this returns, false if it could not be created
+   */
+  public static boolean createDirectory(final @NotNull File directory) {
+    // mkdirs() also returns false when another thread created the directory first, so re-check
+    // instead of reporting a failure the caller would act on by skipping its write.
+    return directory.isDirectory() || directory.mkdirs() || directory.isDirectory();
+  }
+
+  /**
+   * Reads the content of a File into a String. If the file does not exist or is not a file, null is
+   * returned. Do not use with large files, as the String is kept in memory!
+   *
+   * @param file file to read
+   * @return a String containing all the content of the file, or null if it doesn't exists
+   * @throws IOException In case of error reading the file
+   */
+  @SuppressWarnings("DefaultCharset")
+  public static @Nullable String readText(@Nullable File file) throws IOException {
+    if (file == null || !file.exists() || !file.isFile() || !file.canRead()) {
+      return null;
+    }
+    StringBuilder contentBuilder = new StringBuilder();
+    try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+
+      String line;
+      // The first line doesn't need the leading \n
+      if ((line = br.readLine()) != null) {
+        contentBuilder.append(line);
+      }
+      while ((line = br.readLine()) != null) {
+        contentBuilder.append("\n").append(line);
+      }
+    }
+    return contentBuilder.toString();
+  }
+
+  /**
+   * Reads the content of a path into a byte array. If the path is does not exists, it's not a file,
+   * can't be read or is larger than max size allowed IOException is thrown. Do not use with large
+   * files, as the byte array is kept in memory!
+   *
+   * @param pathname file to read
+   * @return a byte array containing all the content of the file
+   * @throws IOException In case of error reading the file
+   */
+  public static byte[] readBytesFromFile(String pathname, long maxFileLength)
+      throws IOException, SecurityException {
+    File file = new File(pathname);
+
+    if (!file.exists()) {
+      throw new IOException(String.format("File '%s' doesn't exists", file.getName()));
+    }
+
+    if (!file.isFile()) {
+      throw new IOException(
+          String.format("Reading path %s failed, because it's not a file.", pathname));
+    }
+
+    if (!file.canRead()) {
+      throw new IOException(
+          String.format("Reading the item %s failed, because can't read the file.", pathname));
+    }
+
+    if (file.length() > maxFileLength) {
+      throw new IOException(
+          String.format(
+              "Reading file failed, because size located at '%s' with %d bytes is bigger "
+                  + "than the maximum allowed size of %d bytes.",
+              pathname, file.length(), maxFileLength));
+    }
+
+    try (FileInputStream fileInputStream = new FileInputStream(pathname);
+        BufferedInputStream inputStream = new BufferedInputStream(fileInputStream); ) {
+      return inputStreamToByteArray(inputStream, maxFileLength);
+    }
+  }
+
+  /**
+   * Reads the content of an input stream into a byte array.
+   *
+   * @param input the input stream
+   * @param maxLength the maximum length to read, if more than n bytes are read, an exception is
+   *     thrown
+   * @return a byte array containing all the content of the file
+   * @throws IOException In case of error reading the file
+   */
+  public static byte[] inputStreamToByteArray(
+      final @NotNull InputStream input, final long maxLength)
+      throws IOException, SecurityException {
+
+    try (final BufferedInputStream inputStream = new BufferedInputStream(input);
+        final ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+      byte[] bytes = new byte[1024];
+      int length;
+      int offset = 0;
+      long totalLength = 0;
+      while ((length = inputStream.read(bytes)) != -1) {
+        totalLength += length;
+        if (totalLength > maxLength) {
+          throw new IOException(
+              String.format(
+                  "Reading input failed, because %d read bytes is bigger "
+                      + "than the maximum allowed size of %d bytes.",
+                  totalLength, maxLength));
+        }
+        outputStream.write(bytes, offset, length);
+      }
+      return outputStream.toByteArray();
+    }
+  }
+}

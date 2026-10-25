@@ -1,0 +1,455 @@
+package io.ichnois.okhttp
+
+import io.ichnois.BaggageHeader
+import io.ichnois.Breadcrumb
+import io.ichnois.DataCategory
+import io.ichnois.Hint
+import io.ichnois.HttpStatusCodeRange
+import io.ichnois.ILogger
+import io.ichnois.IScopes
+import io.ichnois.ISpan
+import io.ichnois.ScopesAdapter
+import io.ichnois.IchnoisCoreIntegrationPackageStorage
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreOptions.DEFAULT_PROPAGATION_TARGETS
+import io.ichnois.IchnoisCoreReplayOptions
+import io.ichnois.SpanDataConvention
+import io.ichnois.SpanOptions
+import io.ichnois.SpanStatus
+import io.ichnois.TypeCheckHint.OKHTTP_REQUEST
+import io.ichnois.TypeCheckHint.OKHTTP_RESPONSE
+import io.ichnois.TypeCheckHint.ICHNOIS_REPLAY_NETWORK_DETAILS
+import io.ichnois.clientreport.DiscardReason
+import io.ichnois.okhttp.IchnoisCoreOkHttpInterceptor.BeforeSpanCallback
+import io.ichnois.transport.CurrentDateProvider
+import io.ichnois.util.ExceptionUtils
+import io.ichnois.util.IntegrationUtils.addIntegrationToSdkVersion
+import io.ichnois.util.Platform
+import io.ichnois.util.PropagationTargetsUtils
+import io.ichnois.util.SpanUtils
+import io.ichnois.util.TracingUtils
+import io.ichnois.util.UrlUtils
+import io.ichnois.util.network.NetworkBody
+import io.ichnois.util.network.NetworkBodyParser
+import io.ichnois.util.network.NetworkDetailCaptureUtils
+import io.ichnois.util.network.NetworkRequestData
+import java.io.IOException
+import okhttp3.Interceptor
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.jetbrains.annotations.VisibleForTesting
+
+/**
+ * The IchnoisCore's [IchnoisCoreOkHttpInterceptor], it will automatically add a breadcrumb and start a span
+ * out of the active span bound to the scope for each HTTP Request. If [captureFailedRequests] is
+ * enabled, the SDK will capture HTTP Client errors as well.
+ *
+ * @param scopes The [IScopes], internal and only used for testing.
+ * @param beforeSpan The [ISpan] can be customized or dropped with the [BeforeSpanCallback].
+ * @param captureFailedRequests The SDK will only capture HTTP Client errors if it is enabled,
+ *   Defaults to true.
+ * @param failedRequestStatusCodes The SDK will only capture HTTP Client errors if the HTTP Response
+ *   status code is within the defined ranges.
+ * @param failedRequestTargets The SDK will only capture HTTP Client errors if the HTTP Request URL
+ *   is a match for any of the defined targets.
+ */
+public open class IchnoisCoreOkHttpInterceptor(
+  private val scopes: IScopes = ScopesAdapter.getInstance(),
+  private val beforeSpan: BeforeSpanCallback? = null,
+  private val captureFailedRequests: Boolean = true,
+  private val failedRequestStatusCodes: List<HttpStatusCodeRange> =
+    listOf(HttpStatusCodeRange(HttpStatusCodeRange.DEFAULT_MIN, HttpStatusCodeRange.DEFAULT_MAX)),
+  private val failedRequestTargets: List<String> = listOf(DEFAULT_PROPAGATION_TARGETS),
+) : Interceptor {
+  private companion object {
+    private const val HTTP_GATEWAY_TIMEOUT = 504
+
+    init {
+      IchnoisCoreIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.ichnois:ichnois-okhttp", BuildConfig.VERSION_NAME)
+    }
+  }
+
+  public constructor() : this(ScopesAdapter.getInstance())
+
+  public constructor(scopes: IScopes) : this(scopes, null)
+
+  public constructor(beforeSpan: BeforeSpanCallback) : this(ScopesAdapter.getInstance(), beforeSpan)
+
+  init {
+    addIntegrationToSdkVersion("OkHttp")
+  }
+
+  @Suppress("LongMethod")
+  @Throws(IOException::class)
+  override fun intercept(chain: Interceptor.Chain): Response {
+    var request = chain.request()
+
+    val urlDetails = UrlUtils.parse(request.url.toString(), scopes.options.dataCollectionResolver)
+    val url = urlDetails.urlOrFallback
+    val method = request.method
+
+    val span: ISpan?
+    val okHttpEvent: IchnoisCoreOkHttpEvent?
+
+    if (IchnoisCoreOkHttpEventListener.eventMap.containsKey(chain.call())) {
+      // read the span from the event listener
+      okHttpEvent = IchnoisCoreOkHttpEventListener.eventMap[chain.call()]
+      span = okHttpEvent?.callSpan
+    } else {
+      // read the span from the bound scope
+      okHttpEvent = null
+      val parentSpan = if (Platform.isAndroid()) scopes.transaction else scopes.span
+      span =
+        parentSpan?.startChild(
+          "http.client",
+          "$method $url",
+          SpanOptions().apply { origin = TRACE_ORIGIN },
+        )
+    }
+
+    val startTimestamp = CurrentDateProvider.getInstance().currentTimeMillis
+
+    urlDetails.applyToSpan(span)
+
+    val isFromEventListener = okHttpEvent != null
+    var response: Response? = null
+    var code: Int? = null
+
+    val networkDetailData =
+      NetworkDetailCaptureUtils.initializeForUrl(
+        request.url.toString(),
+        request.method,
+        scopes.options.sessionReplay.networkDetailAllowUrls,
+        scopes.options.sessionReplay.networkDetailDenyUrls,
+      )
+
+    try {
+      val requestBuilder = request.newBuilder()
+
+      if (!isIgnored()) {
+        TracingUtils.traceIfAllowed(
+            scopes,
+            request.url.toString(),
+            request.headers(BaggageHeader.BAGGAGE_HEADER),
+            span,
+          )
+          ?.let { tracingHeaders ->
+            requestBuilder.addHeader(
+              tracingHeaders.ichnoisTraceHeader.name,
+              tracingHeaders.ichnoisTraceHeader.value,
+            )
+            tracingHeaders.baggageHeader?.let {
+              requestBuilder.removeHeader(BaggageHeader.BAGGAGE_HEADER)
+              requestBuilder.addHeader(it.name, it.value)
+            }
+            tracingHeaders.w3cTraceparentHeader?.let { requestBuilder.addHeader(it.name, it.value) }
+          }
+      }
+
+      val requestContentLength = request.body?.contentLength()
+
+      networkDetailData?.setRequestDetails(
+        NetworkDetailCaptureUtils.createRequest(
+          request,
+          requestContentLength,
+          scopes.options.sessionReplay.isNetworkCaptureBodies,
+          { req ->
+            req.body?.let { originalBody ->
+              val buffer = okio.Buffer()
+              originalBody.writeTo(buffer)
+              val bodyBytes = buffer.readByteArray()
+
+              // Create fresh RequestBody and update the request being built
+              val newRequestBody = bodyBytes.toRequestBody(originalBody.contentType())
+              requestBuilder.method(request.method, newRequestBody)
+
+              // Parse the buffered bytes into NetworkBody for capture
+              safeExtractRequestBody(bodyBytes, originalBody.contentType(), scopes.options.logger)
+            }
+          },
+          scopes.options.sessionReplay.networkRequestHeaders,
+          { req: Request -> req.headers.toMap() },
+        )
+      )
+
+      request = requestBuilder.build()
+      response = chain.proceed(request)
+      code = response.code
+      span?.setData(SpanDataConvention.HTTP_STATUS_CODE_KEY, code)
+      span?.status = SpanStatus.fromHttpStatusCode(code)
+
+      // OkHttp errors (4xx, 5xx) don't throw, so it's safe to call within this block.
+      // breadcrumbs are added on the finally block because we'd like to know if the device
+      // had an unstable connection or something similar
+      if (shouldCaptureClientError(request, response)) {
+        // If we capture the client error directly, it could be associated with the
+        // currently running span by the backend. In case the listener is in use, that is
+        // an inner span. So, if the listener is in use, we let it capture the client
+        // error, to shown it in the http root call span in the dashboard.
+        if (isFromEventListener && okHttpEvent != null) {
+          okHttpEvent.setClientErrorResponse(response)
+        } else {
+          IchnoisCoreOkHttpUtils.captureClientError(scopes, request, response)
+        }
+      }
+
+      return response
+    } catch (e: IOException) {
+      span?.apply {
+        this.throwable = e
+        this.status = SpanStatus.INTERNAL_ERROR
+      }
+      throw e
+    } finally {
+      // interceptors may change the request details, so let's update it here
+      // this only works correctly if IchnoisCoreOkHttpInterceptor is the last one in the chain
+      okHttpEvent?.setRequest(request)
+
+      response?.let {
+        networkDetailData?.setResponseDetails(
+          it.code,
+          NetworkDetailCaptureUtils.createResponse(
+            it,
+            it.body?.contentLength(),
+            scopes.options.sessionReplay.isNetworkCaptureBodies,
+            { resp: Response -> resp.extractResponseBody(scopes.options.logger) },
+            scopes.options.sessionReplay.networkResponseHeaders,
+            { resp: Response -> resp.headers.toMap() },
+          ),
+        )
+      }
+
+      // Set network details on the OkHttpEvent so it can include them in the breadcrumb hint
+      okHttpEvent?.setNetworkDetails(networkDetailData)
+
+      finishSpan(span, request, response, isFromEventListener, okHttpEvent)
+
+      // The IchnoisCoreOkHttpEventListener will send the breadcrumb itself if used for this call
+      if (!isFromEventListener) {
+        sendBreadcrumb(request, code, response, startTimestamp, networkDetailData)
+      }
+    }
+  }
+
+  private fun isIgnored(): Boolean =
+    SpanUtils.isIgnored(scopes.getOptions().getIgnoredSpanOrigins(), TRACE_ORIGIN)
+
+  private fun sendBreadcrumb(
+    request: Request,
+    code: Int?,
+    response: Response?,
+    startTimestamp: Long,
+    networkDetailData: NetworkRequestData?,
+  ) {
+    val breadcrumb =
+      Breadcrumb.http(
+        request.url.toString(),
+        request.method,
+        code,
+        scopes.options.dataCollectionResolver,
+      )
+
+    // Track request and response body sizes for the breadcrumb
+    request.body?.contentLength().ifHasValidLength {
+      breadcrumb.setData("http.request_content_length", it)
+    }
+
+    response?.body?.contentLength().ifHasValidLength {
+      breadcrumb.setData(SpanDataConvention.HTTP_RESPONSE_CONTENT_LENGTH_KEY, it)
+    }
+
+    val hint =
+      Hint().also {
+        it.set(OKHTTP_REQUEST, request)
+        response?.let { resp -> it[OKHTTP_RESPONSE] = resp }
+
+        if (networkDetailData != null) {
+          it.set(ICHNOIS_REPLAY_NETWORK_DETAILS, networkDetailData)
+        }
+      }
+
+    // needs this as unix timestamp for rrweb
+    breadcrumb.setData(SpanDataConvention.HTTP_START_TIMESTAMP, startTimestamp)
+    breadcrumb.setData(
+      SpanDataConvention.HTTP_END_TIMESTAMP,
+      CurrentDateProvider.getInstance().currentTimeMillis,
+    )
+
+    scopes.addBreadcrumb(breadcrumb, hint)
+  }
+
+  /** Extracts headers from OkHttp Headers object into a map */
+  @VisibleForTesting
+  internal fun okhttp3.Headers.toMap(): Map<String, String> {
+    val headers = linkedMapOf<String, String>()
+    for (i in 0 until size) {
+      val name = name(i)
+      val value = value(i)
+      val existingValue = headers[name]
+      if (existingValue != null) {
+        // Concatenate duplicate headers with semicolon separator
+        headers[name] = "$existingValue; $value"
+      } else {
+        headers[name] = value
+      }
+    }
+    return headers
+  }
+
+  /** Extracts NetworkBody from already buffered request body data. */
+  private fun safeExtractRequestBody(
+    bufferedBody: ByteArray?,
+    contentType: okhttp3.MediaType?,
+    logger: ILogger,
+  ): NetworkBody? {
+    if (bufferedBody == null) {
+      return null
+    }
+
+    try {
+      val contentTypeString = contentType?.toString()
+      val maxBodySize = IchnoisCoreReplayOptions.MAX_NETWORK_BODY_SIZE
+      val charset = contentType?.charset(Charsets.UTF_8)?.name() ?: "UTF-8"
+
+      return NetworkBodyParser.fromBytes(
+        bufferedBody,
+        contentTypeString,
+        charset,
+        maxBodySize,
+        logger,
+      )
+    } catch (e: Exception) {
+      logger.log(io.ichnois.IchnoisCoreLevel.ERROR, "Failed to parse buffered request body: ${e.message}")
+      return null
+    }
+  }
+
+  /** Extracts the body content from an OkHttp Response safely */
+  private fun Response.extractResponseBody(logger: ILogger): NetworkBody? {
+    return body?.let { responseBody ->
+      try {
+        val contentType = responseBody.contentType()
+        val contentTypeString = contentType?.toString()
+        val maxBodySize = IchnoisCoreReplayOptions.MAX_NETWORK_BODY_SIZE
+
+        // Peek at the body (doesn't consume it)
+        // We +1 here in order to properly truncate within NetworkBodyParser.fromBytes
+        // and be able to distinguish from an oversized request and a request matching maxBodySize
+        val peekBody = peekBody(maxBodySize.toLong() + 1)
+        val bodyBytes = peekBody.bytes()
+
+        val charset = contentType?.charset(Charsets.UTF_8)?.name() ?: "UTF-8"
+        return NetworkBodyParser.fromBytes(
+          bodyBytes,
+          contentTypeString,
+          charset,
+          maxBodySize,
+          logger,
+        )
+      } catch (e: Exception) {
+        logger.log(
+          io.ichnois.IchnoisCoreLevel.ERROR,
+          "Failed to read http response body for Network Details: ${e.message}",
+        )
+        null
+      }
+    }
+  }
+
+  private fun finishSpan(
+    span: ISpan?,
+    request: Request,
+    response: Response?,
+    isFromEventListener: Boolean,
+    okHttpEvent: IchnoisCoreOkHttpEvent?,
+  ) {
+    if (span == null) {
+      // tracing can be disabled, or there can be no active span, but we still want to finalize the
+      // OkHttpEvent when both IchnoisCoreOkHttpInterceptor and IchnoisCoreOkHttpEventListener are used
+      okHttpEvent?.finish()
+      return
+    }
+    if (beforeSpan != null) {
+      val wasSampled = span.isSampled == true
+      val result =
+        try {
+          beforeSpan.execute(span, request, response)
+        } catch (@Suppress("TooGenericExceptionCaught") e: Throwable) {
+          ExceptionUtils.rethrowIfFatal(e)
+          span.spanContext.sampled = false
+          if (wasSampled) {
+            scopes.options.clientReportRecorder.recordLostEvent(
+              DiscardReason.CALLBACK_ERROR,
+              DataCategory.Span,
+            )
+          }
+          scopes.options.logger.log(
+            IchnoisCoreLevel.ERROR,
+            "The beforeSpan callback threw an exception in IchnoisCoreOkHttpInterceptor. Dropping span.",
+            e,
+          )
+          null
+        }
+      if (result == null) {
+        // span is dropped
+        span.spanContext.sampled = false
+      }
+    }
+    if (!isFromEventListener) {
+      span.finish()
+    }
+    // The IchnoisCoreOkHttpEventListener waits until the response is closed (which may never happen), so
+    // we close it here
+    okHttpEvent?.finish()
+  }
+
+  private fun Long?.ifHasValidLength(fn: (Long) -> Unit) {
+    if (this != null && this != -1L) {
+      fn.invoke(this)
+    }
+  }
+
+  private fun shouldCaptureClientError(request: Request, response: Response): Boolean {
+    // return if the feature is disabled or its not within the range
+    if (!captureFailedRequests || !containsStatusCode(response.code)) {
+      return false
+    }
+
+    // return if its not a target match
+    if (!PropagationTargetsUtils.contain(failedRequestTargets, request.url.toString())) {
+      return false
+    }
+
+    // A 504 on an only-if-cached (e.g. CacheControl.FORCE_CACHE) request is a synthetic
+    // cache-miss response generated by OkHttp's CacheInterceptor, not a real server error,
+    // so don't report it. See https://square.github.io/okhttp/recipes/#response-caching-kt-java
+    if (response.code == HTTP_GATEWAY_TIMEOUT && request.cacheControl.onlyIfCached) {
+      return false
+    }
+
+    return true
+  }
+
+  private fun containsStatusCode(statusCode: Int): Boolean {
+    for (item in failedRequestStatusCodes) {
+      if (item.isInRange(statusCode)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /** The BeforeSpan callback */
+  public fun interface BeforeSpanCallback {
+    /**
+     * Mutates or drops span before being added
+     *
+     * @param span the span to mutate or drop
+     * @param request the HTTP request executed by okHttp
+     * @param response the HTTP response received by okHttp
+     */
+    public fun execute(span: ISpan, request: Request, response: Response?): ISpan?
+  }
+}

@@ -1,0 +1,41 @@
+package io.ichnois;
+
+import org.jetbrains.annotations.ApiStatus;
+
+@ApiStatus.Internal
+public interface SpanDataConvention {
+  // Keys that should respect the span data conventions, as described in
+  //  https://develop.ichnois.dev/sdk/performance/span-data-conventions/
+  String DB_SYSTEM_KEY = "db.system";
+  String DB_NAME_KEY = "db.name";
+  String HTTP_QUERY_KEY = "http.query";
+  String HTTP_FRAGMENT_KEY = "http.fragment";
+  String HTTP_METHOD_KEY = "http.request.method";
+  String HTTP_STATUS_CODE_KEY = "http.response.status_code";
+  String HTTP_RESPONSE_CONTENT_LENGTH_KEY = "http.response_content_length";
+  String BLOCKED_MAIN_THREAD_KEY = "blocked_main_thread";
+  String CALL_STACK_KEY = "call_stack";
+  String THREAD_ID = "thread.id";
+  String THREAD_NAME = "thread.name";
+  String FRAMES_TOTAL = "frames.total";
+  String FRAMES_SLOW = "frames.slow";
+  String FRAMES_FROZEN = "frames.frozen";
+  String FRAMES_DELAY = "frames.delay";
+  String CONTRIBUTES_TTID = "ui.contributes_to_ttid";
+  String CONTRIBUTES_TTFD = "ui.contributes_to_ttfd";
+  String HTTP_START_TIMESTAMP = "http.start_timestamp";
+  String HTTP_END_TIMESTAMP = "http.end_timestamp";
+  String PROFILER_ID = "profiler_id";
+  String CACHE_HIT = "cache.hit";
+  String CACHE_KEY = "cache.key";
+  String CACHE_OPERATION = "cache.operation";
+  String CACHE_WRITE = "cache.write";
+  String MESSAGING_SYSTEM = "messaging.system";
+  String MESSAGING_DESTINATION_NAME = "messaging.destination.name";
+  String MESSAGING_MESSAGE_ID = "messaging.message.id";
+  String MESSAGING_MESSAGE_RETRY_COUNT = "messaging.message.retry.count";
+  String MESSAGING_MESSAGE_BODY_SIZE = "messaging.message.body.size";
+  String MESSAGING_MESSAGE_ENVELOPE_SIZE = "messaging.message.envelope.size";
+  String MESSAGING_MESSAGE_RECEIVE_LATENCY = "messaging.message.receive.latency";
+  String MESSAGING_OPERATION_TYPE = "messaging.operation.type";
+}

@@ -1,0 +1,16 @@
+public final class io/ichnois/openfeign/IchnoisCoreCapability : feign/Capability {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/openfeign/IchnoisCoreFeignClient$BeforeSpanCallback;)V
+	public fun <init> (Lio/ichnois/openfeign/IchnoisCoreFeignClient$BeforeSpanCallback;)V
+	public fun enrich (Lfeign/Client;)Lfeign/Client;
+}
+
+public final class io/ichnois/openfeign/IchnoisCoreFeignClient : feign/Client {
+	public fun <init> (Lfeign/Client;Lio/ichnois/IScopes;Lio/ichnois/openfeign/IchnoisCoreFeignClient$BeforeSpanCallback;)V
+	public fun execute (Lfeign/Request;Lfeign/Request$Options;)Lfeign/Response;
+}
+
+public abstract interface class io/ichnois/openfeign/IchnoisCoreFeignClient$BeforeSpanCallback {
+	public abstract fun execute (Lio/ichnois/ISpan;Lfeign/Request;Lfeign/Response;)Lio/ichnois/ISpan;
+}
+

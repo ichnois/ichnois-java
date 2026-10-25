@@ -1,0 +1,220 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import io.ichnois.gradle.ChildJvmTestArguments
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+plugins {
+  `java-library`
+  id("io.ichnois.animalsniffer")
+  id("io.ichnois.javadoc")
+  alias(libs.plugins.kotlin.jvm)
+  alias(libs.plugins.shadow)
+}
+
+tasks.named<KotlinCompile>("compileKotlin") {
+  compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+}
+
+fun relocatePackages(shadowJar: ShadowJar) {
+  // rewrite dependencies calling Logger.getLogger
+  shadowJar.relocate("java.util.logging.Logger", "io.opentelemetry.javaagent.bootstrap.PatchLogger")
+
+  // prevents conflict with library instrumentation, since these classes live in the bootstrap class
+  // loader
+  shadowJar.relocate(
+    "io.opentelemetry.instrumentation",
+    "io.opentelemetry.javaagent.shaded.instrumentation",
+  ) {
+    // Exclude resource providers since they live in the agent class loader
+    exclude("io.opentelemetry.instrumentation.resources.*")
+    exclude("io.opentelemetry.instrumentation.spring.resources.*")
+  }
+
+  // relocate OpenTelemetry API usage
+  shadowJar.relocate(
+    "io.opentelemetry.api",
+    "io.opentelemetry.javaagent.shaded.io.opentelemetry.api",
+  )
+  shadowJar.relocate(
+    "io.opentelemetry.semconv",
+    "io.opentelemetry.javaagent.shaded.io.opentelemetry.semconv",
+  )
+  shadowJar.relocate(
+    "io.opentelemetry.context",
+    "io.opentelemetry.javaagent.shaded.io.opentelemetry.context",
+  )
+
+  // relocate the OpenTelemetry extensions that are used by instrumentation modules
+  // these extensions live in the AgentClassLoader, and are injected into the user's class loader
+  // by the instrumentation modules that use them
+  shadowJar.relocate(
+    "io.opentelemetry.extension.aws",
+    "io.opentelemetry.javaagent.shaded.io.opentelemetry.extension.aws",
+  )
+  shadowJar.relocate(
+    "io.opentelemetry.extension.kotlin",
+    "io.opentelemetry.javaagent.shaded.io.opentelemetry.extension.kotlin",
+  )
+}
+
+// this configuration collects libs that will be placed in the bootstrap classloader
+val bootstrapLibs =
+  configurations.create("bootstrapLibs") {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+  }
+
+// this configuration collects libs that will be placed in the agent classloader, isolated from the
+// instrumented application code
+val javaagentLibs =
+  configurations.create("javaagentLibs") {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+  }
+
+// this configuration stores the upstream agent dep that's extended by this project
+val upstreamAgent =
+  configurations.create("upstreamAgent") {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+  }
+
+dependencies {
+  bootstrapLibs(projects.ichnois)
+  bootstrapLibs(projects.ichnoisOpentelemetry.ichnoisOpentelemetryBootstrap)
+  javaagentLibs(projects.ichnoisOpentelemetry.ichnoisOpentelemetryAgentcustomization)
+  upstreamAgent(libs.otel.javaagent)
+
+  testImplementation(projects.ichnoisTestSupport)
+  testImplementation(kotlin(Config.kotlinStdLib))
+  testImplementation(libs.kotlin.test.junit)
+  testImplementation(libs.google.truth)
+}
+
+fun isolateClasses(jars: Iterable<File>): CopySpec = copySpec {
+  jars.forEach {
+    from(zipTree(it)) {
+      into("inst")
+      rename("^(.*)\\.class\$", "\$1.classdata")
+      // Rename LICENSE file since it clashes with license dir on non-case sensitive FSs (i.e. Mac)
+      rename("^LICENSE\$", "LICENSE.renamed")
+      exclude("META-INF/INDEX.LIST")
+      exclude("META-INF/*.DSA")
+      exclude("META-INF/*.SF")
+    }
+  }
+}
+
+// Don't publish non-shadowed jar (shadowJar is in shadowRuntimeElements)
+with(components["java"] as AdhocComponentWithVariants) {
+  configurations.forEach {
+    withVariantsFromConfiguration(configurations["apiElements"]) { skip() }
+    withVariantsFromConfiguration(configurations["runtimeElements"]) { skip() }
+  }
+}
+
+tasks {
+  jar { archiveClassifier.set("dontuse") }
+
+  // building the final javaagent jar is done in 3 steps:
+
+  // 1. all distro specific javaagent libs are relocated
+  register("relocateJavaagentLibs", ShadowJar::class.java) {
+    configurations = listOf(javaagentLibs)
+
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+
+    archiveFileName.set("javaagentLibs-relocated.jar")
+
+    mergeServiceFiles()
+    exclude("**/module-info.class")
+    relocatePackages(this)
+
+    // exclude known bootstrap dependencies - they can't appear in the inst/ directory
+    dependencies {
+      exclude("org.slf4j:slf4j-api")
+      exclude("io.opentelemetry:opentelemetry-api")
+      exclude("io.opentelemetry:opentelemetry-api-logs")
+      exclude("io.opentelemetry:opentelemetry-context")
+      exclude("io.opentelemetry:opentelemetry-semconv")
+    }
+  }
+
+  // 2. the distro javaagent libs are then isolated - moved to the inst/ directory
+  // having a separate task for isolating javaagent libs is required to avoid duplicates with the
+  // upstream javaagent
+  // duplicatesStrategy in shadowJar won't be applied when adding files with with(CopySpec) because
+  // each CopySpec has
+  // its own duplicatesStrategy
+  register("isolateJavaagentLibs", Copy::class.java) {
+    findByName("relocateJavaagentLibs")?.let { task -> dependsOn(task) }
+    with(isolateClasses(findByName("relocateJavaagentLibs")!!.outputs.files))
+
+    into(project.layout.buildDirectory.file("isolated/javaagentLibs").get().asFile)
+  }
+
+  // 3. the relocated and isolated javaagent libs are merged together with the bootstrap libs (which
+  // undergo relocation
+  // in this task) and the upstream javaagent jar; duplicates are removed
+  named("shadowJar", ShadowJar::class) {
+    configurations = listOf(bootstrapLibs) + listOf(upstreamAgent)
+
+    findByName("isolateJavaagentLibs")?.let { task -> dependsOn(task) }
+    from(findByName("isolateJavaagentLibs")!!.outputs)
+
+    archiveClassifier.set("")
+
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+
+    filesMatching("META-INF/services/**") { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
+    filesMatching("inst/META-INF/services/**") { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
+
+    // Shadow 9.x only applies relocations to service files handled by a ServiceFileTransformer.
+    // We need two mergeServiceFiles calls:
+    // 1. Default path (META-INF/services) — ensures bootstrap service files get relocated
+    //    (e.g., ContextStorageProvider → shaded path). Without this, Shadow 9.x skips
+    //    relocation for service file names/contents not claimed by a transformer.
+    // 2. inst/ path — merges isolated agent service files from both the upstream agent
+    //    and the distro libs. Uses `path` instead of `include` filter because Shadow 9.x's
+    //    include() strips the `inst/` prefix on output.
+    mergeServiceFiles()
+    mergeServiceFiles { path = "inst/META-INF/services" }
+    exclude("**/module-info.class")
+    relocatePackages(this)
+
+    manifest {
+      attributes.put("Main-Class", "io.opentelemetry.javaagent.OpenTelemetryAgent")
+      attributes.put("Agent-Class", "io.opentelemetry.javaagent.OpenTelemetryAgent")
+      attributes.put("Premain-Class", "io.opentelemetry.javaagent.OpenTelemetryAgent")
+      attributes.put("Can-Redefine-Classes", "true")
+      attributes.put("Can-Retransform-Classes", "true")
+      attributes.put("Implementation-Vendor", "IchnoisCore")
+      attributes.put("Implementation-Title", project.name)
+      attributes.put("Implementation-Version", project.version)
+      attributes.put(
+        "IchnoisCore-Version-Name",
+        "ichnois-${project.version}-otel-${libs.versions.otelInstrumentation.get()}",
+      )
+      attributes.put("IchnoisCore-SDK-Name", Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENT_SDK_NAME)
+      attributes.put("IchnoisCore-SDK-Package-Name", "maven:io.ichnois:ichnois-opentelemetry-agent")
+      attributes.put(
+        "IchnoisCore-Opentelemetry-SDK-Name",
+        Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENT_SDK_NAME,
+      )
+      attributes.put("IchnoisCore-Opentelemetry-Version-Name", libs.versions.otel.get())
+      attributes.put(
+        "IchnoisCore-Opentelemetry-Javaagent-Version-Name",
+        libs.versions.otelInstrumentation.get(),
+      )
+    }
+  }
+
+  assemble { dependsOn(shadowJar) }
+
+  test {
+    jvmArgumentProviders.add(
+      objects.newInstance<ChildJvmTestArguments>().apply { agentJar.from(shadowJar) }
+    )
+  }
+}
+
+tasks.named("distZip").configure { this.dependsOn("jar") }

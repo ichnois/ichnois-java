@@ -1,0 +1,20 @@
+public final class io/ichnois/log4j2/BuildConfig {
+	public static final field ICHNOIS_LOG4J2_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public class io/ichnois/log4j2/IchnoisCoreAppender : org/apache/logging/log4j/core/appender/AbstractAppender {
+	public static final field MECHANISM_TYPE Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;Lorg/apache/logging/log4j/core/Filter;Ljava/lang/String;Lorg/apache/logging/log4j/Level;Lorg/apache/logging/log4j/Level;Ljava/lang/Boolean;Lio/ichnois/ITransportFactory;Lio/ichnois/IScopes;[Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Lorg/apache/logging/log4j/core/Filter;Ljava/lang/String;Lorg/apache/logging/log4j/Level;Lorg/apache/logging/log4j/Level;Lorg/apache/logging/log4j/Level;Ljava/lang/Boolean;Lio/ichnois/ITransportFactory;Lio/ichnois/IScopes;[Ljava/lang/String;)V
+	public fun append (Lorg/apache/logging/log4j/core/LogEvent;)V
+	protected fun captureLog (Lorg/apache/logging/log4j/core/LogEvent;)V
+	public static fun createAppender (Ljava/lang/String;Lorg/apache/logging/log4j/Level;Lorg/apache/logging/log4j/Level;Lorg/apache/logging/log4j/Level;Ljava/lang/String;Ljava/lang/Boolean;Lorg/apache/logging/log4j/core/Filter;Ljava/lang/String;)Lio/ichnois/log4j2/IchnoisCoreAppender;
+	protected fun createBreadcrumb (Lorg/apache/logging/log4j/core/LogEvent;)Lio/ichnois/Breadcrumb;
+	protected fun createEvent (Lorg/apache/logging/log4j/core/LogEvent;)Lio/ichnois/IchnoisCoreEvent;
+	public fun getMinimumBreadcrumbLevel ()Lorg/apache/logging/log4j/Level;
+	public fun getMinimumEventLevel ()Lorg/apache/logging/log4j/Level;
+	public fun getMinimumLevel ()Lorg/apache/logging/log4j/Level;
+	public fun start ()V
+}
+

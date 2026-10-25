@@ -1,0 +1,9 @@
+public final class io/ichnois/android/distribution/DistributionIntegration : io/ichnois/IDistributionApi, io/ichnois/Integration {
+	public fun <init> (Landroid/content/Context;)V
+	public fun checkForUpdate ()Ljava/util/concurrent/Future;
+	public fun checkForUpdateBlocking ()Lio/ichnois/UpdateStatus;
+	public fun downloadUpdate (Lio/ichnois/UpdateInfo;)V
+	public fun isEnabled ()Z
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+

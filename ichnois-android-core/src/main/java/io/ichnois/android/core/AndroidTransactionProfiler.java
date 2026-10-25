@@ -1,0 +1,347 @@
+package io.ichnois.android.core;
+
+import static java.util.concurrent.TimeUnit.SECONDS;
+
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.os.Build;
+import io.ichnois.DateUtils;
+import io.ichnois.ILogger;
+import io.ichnois.IIchnoisCoreExecutorService;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.ITransaction;
+import io.ichnois.ITransactionProfiler;
+import io.ichnois.PerformanceCollectionData;
+import io.ichnois.ProfilingTraceData;
+import io.ichnois.ProfilingTransactionData;
+import io.ichnois.ScopesAdapter;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.android.core.internal.util.CpuInfoUtils;
+import io.ichnois.android.core.internal.util.IchnoisCoreFrameMetricsCollector;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.LazyEvaluator;
+import io.ichnois.util.Objects;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+final class AndroidTransactionProfiler implements ITransactionProfiler {
+  private final @NotNull Context context;
+  private final @NotNull ILogger logger;
+  private final @Nullable String profilingTracesDirPath;
+  private final boolean isProfilingEnabled;
+  private final int profilingTracesHz;
+  private final @NotNull LazyEvaluator.Evaluator<IIchnoisCoreExecutorService> executorServiceSupplier;
+  private final @NotNull BuildInfoProvider buildInfoProvider;
+  private boolean isInitialized = false;
+  private final @NotNull AtomicBoolean isRunning = new AtomicBoolean(false);
+  private final @NotNull IchnoisCoreFrameMetricsCollector frameMetricsCollector;
+  private volatile @Nullable ProfilingTransactionData currentProfilingTransactionData;
+
+  /**
+   * The underlying profiler instance. It is thread safe to call it after checking if it's not null,
+   * because we never nullify it after instantiation.
+   */
+  private volatile @Nullable AndroidProfiler profiler = null;
+
+  private long profileStartNanos;
+  private long profileStartCpuMillis;
+  private @NotNull Date profileStartTimestamp;
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  public AndroidTransactionProfiler(
+      final @NotNull Context context,
+      final @NotNull IchnoisCoreAndroidOptions ichnoisAndroidOptions,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull IchnoisCoreFrameMetricsCollector frameMetricsCollector) {
+    this(
+        context,
+        buildInfoProvider,
+        frameMetricsCollector,
+        ichnoisAndroidOptions.getLogger(),
+        ichnoisAndroidOptions.getProfilingTracesDirPath(),
+        ichnoisAndroidOptions.isProfilingEnabled(),
+        ichnoisAndroidOptions.getProfilingTracesHz(),
+        () -> ichnoisAndroidOptions.getExecutorService());
+  }
+
+  public AndroidTransactionProfiler(
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull IchnoisCoreFrameMetricsCollector frameMetricsCollector,
+      final @NotNull ILogger logger,
+      final @Nullable String profilingTracesDirPath,
+      final boolean isProfilingEnabled,
+      final int profilingTracesHz,
+      final @NotNull IIchnoisCoreExecutorService executorService) {
+    this(
+        context,
+        buildInfoProvider,
+        frameMetricsCollector,
+        logger,
+        profilingTracesDirPath,
+        isProfilingEnabled,
+        profilingTracesHz,
+        () -> executorService);
+  }
+
+  public AndroidTransactionProfiler(
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull IchnoisCoreFrameMetricsCollector frameMetricsCollector,
+      final @NotNull ILogger logger,
+      final @Nullable String profilingTracesDirPath,
+      final boolean isProfilingEnabled,
+      final int profilingTracesHz,
+      final @NotNull LazyEvaluator.Evaluator<IIchnoisCoreExecutorService> executorServiceSupplier) {
+    this.context =
+        Objects.requireNonNull(
+            ContextUtils.getApplicationContext(context), "The application context is required");
+    this.logger = Objects.requireNonNull(logger, "ILogger is required");
+    this.frameMetricsCollector =
+        Objects.requireNonNull(frameMetricsCollector, "IchnoisCoreFrameMetricsCollector is required");
+    this.buildInfoProvider =
+        Objects.requireNonNull(buildInfoProvider, "The BuildInfoProvider is required.");
+    this.profilingTracesDirPath = profilingTracesDirPath;
+    this.isProfilingEnabled = isProfilingEnabled;
+    this.profilingTracesHz = profilingTracesHz;
+    this.executorServiceSupplier =
+        Objects.requireNonNull(
+            executorServiceSupplier, "A supplier for IIchnoisCoreExecutorService is required.");
+    this.profileStartTimestamp = DateUtils.getCurrentDateTime();
+  }
+
+  private void init() {
+    // We initialize it only once
+    if (isInitialized) {
+      return;
+    }
+    isInitialized = true;
+
+    if (!isProfilingEnabled) {
+      logger.log(IchnoisCoreLevel.INFO, "Profiling is disabled in options.");
+      return;
+    }
+    if (profilingTracesDirPath == null) {
+      logger.log(
+          IchnoisCoreLevel.WARNING,
+          "Disabling profiling because no profiling traces dir path is defined in options.");
+      return;
+    }
+    if (profilingTracesHz <= 0) {
+      logger.log(
+          IchnoisCoreLevel.WARNING,
+          "Disabling profiling because trace rate is set to %d",
+          profilingTracesHz);
+      return;
+    }
+
+    profiler =
+        new AndroidProfiler(
+            profilingTracesDirPath,
+            (int) SECONDS.toMicros(1) / profilingTracesHz,
+            frameMetricsCollector,
+            executorServiceSupplier,
+            logger);
+  }
+
+  @Override
+  public void start() {
+    // Debug.startMethodTracingSampling() is only available since Lollipop, but Android Profiler
+    // causes crashes on api 21 -> https://github.com/getsentry/sentry-java/issues/3392
+    if (buildInfoProvider.getSdkInfoVersion() < Build.VERSION_CODES.LOLLIPOP_MR1) return;
+
+    // When the first transaction is starting, we can start profiling
+    if (!isRunning.getAndSet(true)) {
+      // Let's initialize trace folder and profiling interval
+      init();
+
+      if (onFirstStart()) {
+        logger.log(IchnoisCoreLevel.DEBUG, "Profiler started.");
+      } else {
+        // If profiler is not null and is running, it means that a profile is already running
+        if (profiler != null && profiler.isRunning()) {
+          logger.log(
+              IchnoisCoreLevel.WARNING, "A profile is already running. This profile will be ignored.");
+        } else {
+          try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+            // Ensure we unbind any transaction data, just in case of concurrent starts
+            currentProfilingTransactionData = null;
+          }
+          // Otherwise we update the flag, because it means the profiler is not running
+          isRunning.set(false);
+        }
+      }
+    }
+  }
+
+  @SuppressLint("NewApi")
+  private boolean onFirstStart() {
+    // init() didn't create profiler, should never happen
+    if (profiler == null) {
+      return false;
+    }
+
+    final AndroidProfiler.ProfileStartData startData = profiler.start();
+    // check if profiling started
+    if (startData == null) {
+      return false;
+    }
+    profileStartNanos = startData.startNanos;
+    profileStartCpuMillis = startData.startCpuMillis;
+    profileStartTimestamp = startData.startTimestamp;
+    return true;
+  }
+
+  @Override
+  public void bindTransaction(final @NotNull ITransaction transaction) {
+    // If the profiler is running, but no profilingTransactionData is set, we bind it here
+    if (isRunning.get() && currentProfilingTransactionData == null) {
+      try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+        // If the profiler is running, but no profilingTransactionData is set, we bind it here
+        if (isRunning.get() && currentProfilingTransactionData == null) {
+          currentProfilingTransactionData =
+              new ProfilingTransactionData(transaction, profileStartNanos, profileStartCpuMillis);
+        }
+      }
+    }
+  }
+
+  @Override
+  public @Nullable ProfilingTraceData onTransactionFinish(
+      final @NotNull ITransaction transaction,
+      final @Nullable List<PerformanceCollectionData> performanceCollectionData,
+      final @NotNull IchnoisCoreOptions options) {
+    return onTransactionFinish(
+        transaction.getName(),
+        transaction.getEventId().toString(),
+        transaction.getSpanContext().getTraceId().toString(),
+        false,
+        performanceCollectionData,
+        options);
+  }
+
+  @SuppressLint("NewApi")
+  private @Nullable ProfilingTraceData onTransactionFinish(
+      final @NotNull String transactionName,
+      final @NotNull String transactionId,
+      final @NotNull String traceId,
+      final boolean isTimeout,
+      final @Nullable List<PerformanceCollectionData> performanceCollectionData,
+      final @NotNull IchnoisCoreOptions options) {
+
+    // onTransactionStart() is only available since Lollipop_MR1
+    // and SystemClock.elapsedRealtimeNanos() since Jelly Bean
+    // and SUPPORTED_ABIS since KITKAT
+    if (buildInfoProvider.getSdkInfoVersion() < Build.VERSION_CODES.LOLLIPOP_MR1) return null;
+
+    // check if profiler was created
+    if (profiler == null) {
+      return null;
+    }
+
+    final ProfilingTransactionData txData;
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      txData = currentProfilingTransactionData;
+
+      // Transaction finished, but it's not in the current profile
+      if (txData == null || !txData.getId().equals(transactionId)) {
+        // A transaction is finishing, but it's not profiled. We can skip it
+        logger.log(
+            IchnoisCoreLevel.INFO,
+            "Transaction %s (%s) finished, but was not currently being profiled. Skipping",
+            transactionName,
+            traceId);
+        return null;
+      }
+      currentProfilingTransactionData = null;
+    }
+
+    logger.log(IchnoisCoreLevel.DEBUG, "Transaction %s (%s) finished.", transactionName, traceId);
+
+    final AndroidProfiler.ProfileEndData endData =
+        profiler.endAndCollect(false, performanceCollectionData);
+
+    isRunning.set(false);
+
+    // check if profiler end successfully
+    if (endData == null) {
+      return null;
+    }
+
+    long transactionDurationNanos = endData.endNanos - profileStartNanos;
+
+    final @NotNull List<ProfilingTransactionData> transactionList = new ArrayList<>(1);
+    transactionList.add(txData);
+    txData.notifyFinish(
+        endData.endNanos, profileStartNanos, endData.endCpuMillis, profileStartCpuMillis);
+
+    String totalMem = "0";
+    final @Nullable Long memory =
+        (options instanceof IchnoisCoreAndroidOptions)
+            ? DeviceInfoUtil.getInstance(context, (IchnoisCoreAndroidOptions) options).getTotalMemory()
+            : null;
+    if (memory != null) {
+      totalMem = Long.toString(memory);
+    }
+    final String[] abis = Build.SUPPORTED_ABIS;
+
+    // cpu max frequencies are read with a lambda because reading files is involved, so it will be
+    // done in the background when the trace file is read
+    return new ProfilingTraceData(
+        endData.traceFile,
+        profileStartTimestamp,
+        transactionList,
+        transactionName,
+        transactionId,
+        traceId,
+        Long.toString(transactionDurationNanos),
+        buildInfoProvider.getSdkInfoVersion(),
+        abis != null && abis.length > 0 ? abis[0] : "",
+        () -> CpuInfoUtils.getInstance().readMaxFrequencies(),
+        buildInfoProvider.getManufacturer(),
+        buildInfoProvider.getModel(),
+        buildInfoProvider.getVersionRelease(),
+        buildInfoProvider.isEmulator(),
+        totalMem,
+        options.getProguardUuid(),
+        options.getRelease(),
+        options.getEnvironment(),
+        (endData.didTimeout || isTimeout)
+            ? ProfilingTraceData.TRUNCATION_REASON_TIMEOUT
+            : ProfilingTraceData.TRUNCATION_REASON_NORMAL,
+        endData.measurementsMap);
+  }
+
+  @Override
+  public boolean isRunning() {
+    return isRunning.get();
+  }
+
+  @Override
+  public void close() {
+    final @Nullable ProfilingTransactionData txData = currentProfilingTransactionData;
+    // we stop profiling
+    if (txData != null) {
+      onTransactionFinish(
+          txData.getName(),
+          txData.getId(),
+          txData.getTraceId(),
+          true,
+          null,
+          ScopesAdapter.getInstance().getOptions());
+    }
+    // in case the app start profiling is running, and it's not bound to a transaction, we still
+    // stop profiling, but we also have to manually update the flag.
+    isRunning.set(false);
+
+    // we have to first stop profiling otherwise we would lost the last profile
+    if (profiler != null) {
+      profiler.close();
+    }
+  }
+}

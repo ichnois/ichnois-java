@@ -1,0 +1,820 @@
+package io.ichnois.android.replay
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.Build
+import android.view.MotionEvent
+import io.ichnois.Breadcrumb
+import io.ichnois.DataCategory.All
+import io.ichnois.DataCategory.Replay
+import io.ichnois.Hint
+import io.ichnois.IConnectionStatusProvider.ConnectionStatus
+import io.ichnois.IConnectionStatusProvider.ConnectionStatus.DISCONNECTED
+import io.ichnois.IConnectionStatusProvider.IConnectionStatusObserver
+import io.ichnois.IScopes
+import io.ichnois.Integration
+import io.ichnois.NoOpReplayBreadcrumbConverter
+import io.ichnois.ReplayBreadcrumbConverter
+import io.ichnois.ReplayController
+import io.ichnois.IchnoisCoreIntegrationPackageStorage
+import io.ichnois.IchnoisCoreLevel.DEBUG
+import io.ichnois.IchnoisCoreLevel.ERROR
+import io.ichnois.IchnoisCoreLevel.INFO
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreReplayEvent
+import io.ichnois.TypeCheckHint
+import io.ichnois.android.replay.ReplayLifecycleState.CLOSED
+import io.ichnois.android.replay.ReplayLifecycleState.PAUSED
+import io.ichnois.android.replay.ReplayLifecycleState.RESUMED
+import io.ichnois.android.replay.ReplayLifecycleState.STARTED
+import io.ichnois.android.replay.ReplayLifecycleState.STOPPED
+import io.ichnois.android.replay.capture.BufferCaptureStrategy
+import io.ichnois.android.replay.capture.CaptureStrategy
+import io.ichnois.android.replay.capture.CaptureStrategy.ReplaySegment
+import io.ichnois.android.replay.capture.SessionCaptureStrategy
+import io.ichnois.android.replay.gestures.GestureRecorder
+import io.ichnois.android.replay.gestures.TouchRecorderCallback
+import io.ichnois.android.replay.util.MainLooperHandler
+import io.ichnois.android.replay.util.ReplayExecutorService
+import io.ichnois.android.replay.util.appContext
+import io.ichnois.android.replay.util.sample
+import io.ichnois.android.replay.util.submitSafely
+import io.ichnois.cache.PersistingOptionsObserver
+import io.ichnois.cache.PersistingOptionsObserver.DIST_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.ENVIRONMENT_FILENAME
+import io.ichnois.cache.PersistingOptionsObserver.RELEASE_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.BREADCRUMBS_FILENAME
+import io.ichnois.cache.PersistingScopeObserver.REPLAY_FILENAME
+import io.ichnois.hints.Backfillable
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.transport.ICurrentDateProvider
+import io.ichnois.transport.RateLimiter
+import io.ichnois.transport.RateLimiter.IRateLimitObserver
+import io.ichnois.util.FileUtils
+import io.ichnois.util.HintUtils
+import io.ichnois.util.IntegrationUtils.addIntegrationToSdkVersion
+import io.ichnois.util.Random
+import java.io.Closeable
+import java.io.File
+import java.util.Date
+import java.util.LinkedList
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit.MILLISECONDS
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+public class ReplayIntegration(
+  private val context: Context,
+  private val dateProvider: ICurrentDateProvider,
+  private val recorderProvider: (() -> Recorder)? = null,
+  private val replayCacheProvider: ((replayId: IchnoisCoreId) -> ReplayCache)? = null,
+) :
+  Integration,
+  Closeable,
+  ScreenshotRecorderCallback,
+  TouchRecorderCallback,
+  ReplayController,
+  IConnectionStatusObserver,
+  IRateLimitObserver,
+  WindowCallback {
+  private companion object {
+    init {
+      IchnoisCoreIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.ichnois:ichnois-android-replay", BuildConfig.VERSION_NAME)
+    }
+
+    // Replays recorded by this process. Their folders hold segment videos the transport may still
+    // read after the replay stopped, so the startup cleanup of previous replays must keep them.
+    // Shared across instances, because a second SDK init registers a new ReplayIntegration.
+    val replayIdsOfThisProcess = CopyOnWriteArraySet<String>()
+  }
+
+  // needed for the Java's call site
+  public constructor(
+    context: Context,
+    dateProvider: ICurrentDateProvider,
+  ) : this(context.appContext(), dateProvider, null, null)
+
+  internal constructor(
+    context: Context,
+    dateProvider: ICurrentDateProvider,
+    recorderProvider: (() -> Recorder)?,
+    replayCacheProvider: ((replayId: IchnoisCoreId) -> ReplayCache)?,
+    replayCaptureStrategyProvider: ((isFullSession: Boolean) -> CaptureStrategy)? = null,
+    mainLooperHandler: MainLooperHandler? = null,
+    gestureRecorderProvider: (() -> GestureRecorder)? = null,
+  ) : this(context.appContext(), dateProvider, recorderProvider, replayCacheProvider) {
+    this.replayCaptureStrategyProvider = replayCaptureStrategyProvider
+    this.mainLooperHandler = mainLooperHandler ?: MainLooperHandler()
+    this.gestureRecorderProvider = gestureRecorderProvider
+  }
+
+  private var lastKnownConnectionStatus: ConnectionStatus = ConnectionStatus.UNKNOWN
+  private var debugMaskingEnabled: Boolean = false
+  private lateinit var options: IchnoisCoreOptions
+  private var scopes: IScopes? = null
+  private var recorder: Recorder? = null
+  private var gestureRecorder: GestureRecorder? = null
+  private val random = ThreadLocal<Random>()
+  internal val rootViewsSpy by lazy { RootViewsSpy.install() }
+  internal val lazyReplayExecutor = lazy {
+    val delegate = Executors.newSingleThreadScheduledExecutor(ReplayExecutorServiceThreadFactory())
+    ReplayExecutorService(delegate, options)
+  }
+  internal val replayExecutor by lazyReplayExecutor
+  internal val lazyPersistingExecutor = lazy {
+    val delegate =
+      Executors.newSingleThreadScheduledExecutor(ReplayPersistingExecutorServiceThreadFactory())
+    ReplayExecutorService(delegate, options)
+  }
+  internal val persistingExecutor by lazyPersistingExecutor
+
+  internal val isEnabled = AtomicBoolean(false)
+  internal var isManualPause = false
+  public val replayCacheDir: File?
+    get() = state.get().captureStrategy?.replayCacheDir
+
+  private var replayBreadcrumbConverter: ReplayBreadcrumbConverter =
+    NoOpReplayBreadcrumbConverter.getInstance()
+  private var replayCaptureStrategyProvider: ((isFullSession: Boolean) -> CaptureStrategy)? = null
+  private var mainLooperHandler: MainLooperHandler = MainLooperHandler()
+  private var gestureRecorderProvider: (() -> GestureRecorder)? = null
+  private val state = AtomicReference(ReplayState())
+
+  override fun register(scopes: IScopes, options: IchnoisCoreOptions) {
+    this.options = options
+
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      options.logger.log(INFO, "Session replay is only supported on API 26 and above")
+      return
+    }
+
+    this.scopes = scopes
+    recorder =
+      recorderProvider?.invoke()
+        ?: WindowRecorder(options, this, this, mainLooperHandler, replayExecutor)
+    gestureRecorder = gestureRecorderProvider?.invoke() ?: GestureRecorder(options, this)
+    isEnabled.set(true)
+
+    options.connectionStatusProvider.addConnectionStatusObserver(this)
+    scopes.rateLimiter?.addRateLimitObserver(this)
+
+    addIntegrationToSdkVersion("Replay")
+
+    finalizePreviousReplay()
+  }
+
+  override fun isRecording(): Boolean = state.get().isRecording
+
+  override fun start() {
+    enqueueOnMainThread { startInternal(isFullSession = true) }
+  }
+
+  override fun startBuffering() {
+    enqueueOnMainThread { startInternal(isFullSession = false) }
+  }
+
+  override fun onAppForegrounded(startNewSession: Boolean) {
+    enqueueOnMainThread {
+      if (!isEnabled.get()) {
+        return@enqueueOnMainThread
+      }
+      if (startNewSession) {
+        val wasManuallyPaused = isManualPause
+        stopInternal()
+        val isFullSession = sample(options.sessionReplay.sessionSampleRate)
+        if (!isFullSession && !options.sessionReplay.isSessionReplayForErrorsEnabled) {
+          options.logger.log(
+            INFO,
+            "Session replay is not started, full session was not sampled and onErrorSampleRate is not specified",
+          )
+        } else {
+          startInternal(isFullSession)
+        }
+        isManualPause = wasManuallyPaused
+        if (wasManuallyPaused) {
+          pauseInternal()
+        }
+      }
+      resumeInternal()
+    }
+  }
+
+  override fun onAppBackgrounded() {
+    enqueueOnMainThread { pauseInternal() }
+  }
+
+  override fun onAppSessionEnded() {
+    enqueueOnMainThread { stopInternal(resetManualPause = false) }
+  }
+
+  private fun startInternal(isFullSession: Boolean) {
+    if (!isEnabled.get()) {
+      return
+    }
+
+    val current = state.get()
+    if (!current.lifecycleState.isAllowed(STARTED)) {
+      options.logger.log(
+        DEBUG,
+        "Session replay is already being recorded, not starting a new one",
+      )
+      return
+    }
+
+    isManualPause = false
+    val strategy =
+      replayCaptureStrategyProvider?.invoke(isFullSession)
+        ?: if (isFullSession) {
+          SessionCaptureStrategy(
+            options,
+            scopes,
+            dateProvider,
+            options.monotonicTicker,
+            replayExecutor,
+            persistingExecutor,
+            replayCacheProvider,
+          )
+        } else {
+          BufferCaptureStrategy(
+            options,
+            scopes,
+            dateProvider,
+            options.monotonicTicker,
+            replayExecutor,
+            persistingExecutor,
+            replayCacheProvider,
+          )
+        }
+    recorder?.start()
+    strategy.start()
+    val replayId: IchnoisCoreId? = strategy.currentReplayId
+    if (replayId != null && replayId != IchnoisCoreId.EMPTY_ID) {
+      replayIdsOfThisProcess += replayId.toString()
+    }
+    state.set(
+      ReplayState(
+        generation = current.generation + 1,
+        lifecycleState = STARTED,
+        replayId = replayId ?: IchnoisCoreId.EMPTY_ID,
+        captureStrategy = strategy,
+      )
+    )
+
+    registerRootViewListeners()
+  }
+
+  override fun resume() {
+    enqueueOnMainThread {
+      isManualPause = false
+      resumeInternal()
+    }
+  }
+
+  private fun resumeInternal() {
+    val current = state.get()
+    if (!isEnabled.get() || !current.lifecycleState.isAllowed(RESUMED)) {
+      return
+    }
+
+    if (
+      isManualPause ||
+        lastKnownConnectionStatus == DISCONNECTED ||
+        scopes?.rateLimiter?.isActiveForCategory(All) == true ||
+        scopes?.rateLimiter?.isActiveForCategory(Replay) == true
+    ) {
+      return
+    }
+
+    current.captureStrategy?.resume()
+    recorder?.resume()
+    state.set(current.copy(lifecycleState = RESUMED))
+  }
+
+  override fun captureReplay(isTerminating: Boolean?): IchnoisCoreId {
+    val current = state.get()
+    if (!isEnabled.get() || !current.isRecording) {
+      return IchnoisCoreId.EMPTY_ID
+    }
+
+    if (current.replayId == IchnoisCoreId.EMPTY_ID) {
+      options.logger.log(DEBUG, "Replay id is not set, not capturing for event")
+      return IchnoisCoreId.EMPTY_ID
+    }
+
+    if (current.isBuffering && !sample(options.sessionReplay.onErrorSampleRate)) {
+      options.logger.log(
+        INFO,
+        "Replay wasn't sampled by onErrorSampleRate, not capturing for event",
+      )
+      return IchnoisCoreId.EMPTY_ID
+    }
+
+    // Set it synchronously so the event that triggered the flush picks it up before conversion.
+    scopes?.configureScope { it.replayId = current.replayId }
+    if (isTerminating == true) {
+      // A main-thread crash blocks the looper while flushing, so mark termination synchronously.
+      current.captureStrategy?.captureReplay(true) {}
+    } else {
+      enqueueOnMainThread {
+        captureCurrentReplay(current.generation, current.replayId) { strategy, onSegmentSent ->
+          strategy.captureReplay(false, onSegmentSent)
+        }
+      }
+    }
+    return current.replayId
+  }
+
+  private fun captureCurrentReplay(
+    expectedGeneration: Long,
+    expectedReplayId: IchnoisCoreId,
+    capture: (CaptureStrategy, (Date) -> Unit) -> Unit,
+  ) {
+    val current = state.get()
+    val strategy = current.captureStrategy
+    if (!current.matches(expectedGeneration, expectedReplayId) || strategy == null) {
+      scopes?.configureScope {
+        if (it.replayId == expectedReplayId) {
+          it.replayId = IchnoisCoreId.EMPTY_ID
+        }
+      }
+      options.logger.log(
+        INFO,
+        "Replay was stopped or restarted before capture could run, not capturing replay",
+      )
+      return
+    }
+
+    // Convert before capturing, so the callback knows which strategy continues the replay.
+    val activeStrategy = strategy.convert()
+    capture(strategy) { newTimestamp ->
+      // Runs on the replay executor, which the converted strategy shares. Advancing the segment
+      // here lands before any segment the converted strategy creates later (e.g. on stop), so the
+      // flushed segment id is not reused. A stale strategy (stopped or restarted replay) is not
+      // in the state anymore, so updating it has no effect.
+      activeStrategy.currentSegment++
+      activeStrategy.segmentTimestamp = newTimestamp
+      activeStrategy.isFlushed = true
+    }
+    val replayId: IchnoisCoreId? = activeStrategy.currentReplayId
+    state.set(
+      current.copy(
+        replayId = replayId ?: IchnoisCoreId.EMPTY_ID,
+        captureStrategy = activeStrategy,
+      )
+    )
+  }
+
+  override fun getReplayId(): IchnoisCoreId = state.get().replayId
+
+  override fun flush() {
+    enqueueOnMainThread {
+      val current = state.get()
+      if (!current.isRecording) {
+        startInternal(isFullSession = true)
+      } else {
+        captureCurrentReplay(current.generation, current.replayId) { strategy, onSegmentSent ->
+          strategy.flush(onSegmentSent)
+        }
+      }
+    }
+  }
+
+  override fun setBreadcrumbConverter(converter: ReplayBreadcrumbConverter) {
+    replayBreadcrumbConverter = converter
+  }
+
+  override fun getBreadcrumbConverter(): ReplayBreadcrumbConverter = replayBreadcrumbConverter
+
+  override fun pause() {
+    enqueueOnMainThread {
+      isManualPause = true
+      pauseInternal()
+    }
+  }
+
+  override fun enableDebugMaskingOverlay() {
+    debugMaskingEnabled = true
+  }
+
+  override fun disableDebugMaskingOverlay() {
+    debugMaskingEnabled = false
+  }
+
+  override fun isDebugMaskingOverlayEnabled(): Boolean = debugMaskingEnabled
+
+  override fun registerTraceId(traceId: IchnoisCoreId) {
+    val current = state.get()
+    if (!isEnabled.get() || !current.isRecording) {
+      return
+    }
+    current.captureStrategy?.registerTraceId(traceId)
+  }
+
+  override fun registerSegmentName(segmentName: String) {
+    val current = state.get()
+    if (!isEnabled.get() || !current.isRecording) {
+      return
+    }
+    current.captureStrategy?.registerSegmentName(segmentName)
+  }
+
+  private fun pauseInternal() {
+    val current = state.get()
+    if (!isEnabled.get() || !current.lifecycleState.isAllowed(PAUSED)) {
+      return
+    }
+
+    recorder?.pause()
+    current.captureStrategy?.pause()
+    state.set(current.copy(lifecycleState = PAUSED))
+  }
+
+  override fun stop() {
+    enqueueOnMainThread { stopInternal() }
+  }
+
+  private fun stopInternal(resetManualPause: Boolean = true) {
+    val current = state.get()
+    if (!isEnabled.get() || !current.lifecycleState.isAllowed(STOPPED)) {
+      return
+    }
+
+    unregisterRootViewListeners()
+    recorder?.reset()
+    recorder?.stop()
+    gestureRecorder?.stop()
+    current.captureStrategy?.stop()
+    if (resetManualPause) {
+      isManualPause = false
+    }
+    state.set(
+      current.copy(
+        lifecycleState = STOPPED,
+        replayId = IchnoisCoreId.EMPTY_ID,
+        captureStrategy = null,
+      )
+    )
+  }
+
+  override fun onScreenshotRecorded(bitmap: Bitmap) {
+    var screen: String? = null
+    scopes?.configureScope { screen = it.screen?.substringAfterLast('.') }
+    state.get().captureStrategy?.onScreenshotRecorded(bitmap) { frameTimeStamp ->
+      val observer = options.sessionReplay.frameObserver
+      if (observer != null) {
+        val copy = bitmap.copy(bitmap.config!!, false)
+        if (copy != null) {
+          try {
+            val hint = Hint()
+            hint.set(TypeCheckHint.REPLAY_FRAME_BITMAP, copy)
+            observer.onMaskedFrameCaptured(hint, frameTimeStamp, screen)
+          } catch (e: Throwable) {
+            options.logger.log(ERROR, "Error in ReplayFrameObserver", e)
+            copy.recycle()
+          }
+        }
+      }
+      addFrame(bitmap, frameTimeStamp, screen)
+    }
+    enqueueOnMainThread { checkCanRecord() }
+  }
+
+  override fun onScreenshotRecorded(screenshot: File, frameTimestamp: Long) {
+    var screen: String? = null
+    scopes?.configureScope { screen = it.screen?.substringAfterLast('.') }
+    state.get().captureStrategy?.onScreenshotRecorded { _ ->
+      val observer = options.sessionReplay.frameObserver
+      if (observer != null) {
+        val bitmap = BitmapFactory.decodeFile(screenshot.absolutePath)
+        if (bitmap != null) {
+          try {
+            val hint = Hint()
+            hint.set(TypeCheckHint.REPLAY_FRAME_BITMAP, bitmap)
+            observer.onMaskedFrameCaptured(hint, frameTimestamp, screen)
+          } catch (e: Throwable) {
+            options.logger.log(ERROR, "Error in ReplayFrameObserver", e)
+            bitmap.recycle()
+          }
+        }
+      }
+      addFrame(screenshot, frameTimestamp, screen)
+    }
+    enqueueOnMainThread { checkCanRecord() }
+  }
+
+  override fun close() {
+    if (!isEnabled.get()) {
+      return
+    }
+
+    val isMainThread = options.threadChecker.isMainThread
+    if (isMainThread) {
+      closeInternal()
+      shutdownExecutors(waitForTermination = false)
+      return
+    }
+
+    val closeCompleted = CountDownLatch(1)
+    if (
+      !mainLooperHandler.post {
+        try {
+          closeInternal()
+        } finally {
+          shutdownExecutors(waitForTermination = false)
+          closeCompleted.countDown()
+        }
+      }
+    ) {
+      return
+    }
+    try {
+      if (closeCompleted.await(options.shutdownTimeoutMillis, MILLISECONDS)) {
+        shutdownExecutors(waitForTermination = true)
+      }
+    } catch (e: InterruptedException) {
+      Thread.currentThread().interrupt()
+    }
+  }
+
+  private fun shutdownExecutors(waitForTermination: Boolean) {
+    if (lazyReplayExecutor.isInitialized()) {
+      if (waitForTermination) {
+        replayExecutor.shutdown()
+      } else {
+        replayExecutor.gracefulShutdown()
+      }
+    }
+    if (lazyPersistingExecutor.isInitialized()) {
+      if (waitForTermination) {
+        persistingExecutor.shutdown()
+      } else {
+        persistingExecutor.gracefulShutdown()
+      }
+    }
+  }
+
+  private fun closeInternal() {
+    if (!state.get().lifecycleState.isAllowed(CLOSED)) {
+      return
+    }
+
+    options.connectionStatusProvider.removeConnectionStatusObserver(this)
+    scopes?.rateLimiter?.removeRateLimitObserver(this)
+    stopInternal()
+    recorder?.close()
+    recorder = null
+    rootViewsSpy.close()
+    state.set(state.get().copy(lifecycleState = CLOSED))
+  }
+
+  override fun onConnectionStatusChanged(status: ConnectionStatus) {
+    enqueueOnMainThread {
+      lastKnownConnectionStatus = status
+      if (state.get().captureStrategy !is SessionCaptureStrategy) {
+        // we only want to stop recording when offline for session mode
+        return@enqueueOnMainThread
+      }
+
+      if (status == DISCONNECTED) {
+        pauseInternal()
+      } else {
+        // being positive for other states, even if it's NO_PERMISSION
+        resumeInternal()
+      }
+    }
+  }
+
+  override fun onRateLimitChanged(rateLimiter: RateLimiter) {
+    enqueueOnMainThread {
+      if (state.get().captureStrategy !is SessionCaptureStrategy) {
+        // we only want to stop recording when rate-limited for session mode
+        return@enqueueOnMainThread
+      }
+
+      if (rateLimiter.isActiveForCategory(All) || rateLimiter.isActiveForCategory(Replay)) {
+        pauseInternal()
+      } else {
+        resumeInternal()
+      }
+    }
+  }
+
+  override fun onTouchEvent(event: MotionEvent) {
+    val current = state.get()
+    if (!isEnabled.get() || !current.isTouchRecordingAllowed) {
+      return
+    }
+    current.captureStrategy?.onTouchEvent(event)
+  }
+
+  // Lifecycle commands are always queued so calls from main cannot overtake earlier commands.
+  private inline fun enqueueOnMainThread(crossinline block: () -> Unit) {
+    mainLooperHandler.post { block() }
+  }
+
+  /**
+   * Check if we're offline or rate-limited and pause for session mode to not overflow the envelope
+   * cache.
+   */
+  private fun checkCanRecord() {
+    if (
+      state.get().captureStrategy is SessionCaptureStrategy &&
+        (lastKnownConnectionStatus == DISCONNECTED ||
+          scopes?.rateLimiter?.isActiveForCategory(All) == true ||
+          scopes?.rateLimiter?.isActiveForCategory(Replay) == true)
+    ) {
+      pauseInternal()
+    }
+  }
+
+  private fun registerRootViewListeners() {
+    if (recorder is OnRootViewsChangedListener) {
+      rootViewsSpy.listeners += (recorder as OnRootViewsChangedListener)
+    }
+    rootViewsSpy.listeners += gestureRecorder
+  }
+
+  private fun unregisterRootViewListeners() {
+    if (recorder is OnRootViewsChangedListener) {
+      rootViewsSpy.listeners -= (recorder as OnRootViewsChangedListener)
+    }
+    rootViewsSpy.listeners -= gestureRecorder
+  }
+
+  private fun cleanupReplays(unfinishedReplayId: String = "") {
+    // clean up old replays, but keep the replays of this process and the previous process's
+    // unfinished replay (its folder is cleaned up after its envelope is assembled)
+    val keptReplayIds = replayIdsOfThisProcess + listOfNotNull(unfinishedReplayId.ifBlank { null })
+    options.cacheDirPath?.let { cacheDir ->
+      File(cacheDir).listFiles()?.forEach { file ->
+        val name = file.name
+        if (name.startsWith("replay_") && keptReplayIds.none { name.contains(it) }) {
+          FileUtils.deleteRecursively(file)
+        }
+      }
+    }
+  }
+
+  private fun finalizePreviousReplay() {
+    options.executorService.submitSafely(options, "ReplayIntegration.finalize_previous_replay") {
+      val persistingScopeObserver = options.findPersistingScopeObserver()
+      val previousReplayIdString =
+        persistingScopeObserver?.read(options, REPLAY_FILENAME, String::class.java)
+          ?: run {
+            cleanupReplays()
+            return@submitSafely
+          }
+      val previousReplayId = IchnoisCoreId(previousReplayIdString)
+      // when this task runs late, the persisted replay id can already be one this process recorded,
+      // which is not a previous replay to recover
+      if (
+        previousReplayId == IchnoisCoreId.EMPTY_ID ||
+          previousReplayId.toString() in replayIdsOfThisProcess
+      ) {
+        cleanupReplays()
+        return@submitSafely
+      }
+      val lastSegment =
+        ReplayCache.fromDisk(options, previousReplayId, replayCacheProvider)
+          ?: run {
+            cleanupReplays()
+            return@submitSafely
+          }
+
+      @Suppress("UNCHECKED_CAST")
+      val breadcrumbs =
+        persistingScopeObserver.read(options, BREADCRUMBS_FILENAME, List::class.java)
+          as? List<Breadcrumb>
+      val segment =
+        CaptureStrategy.createSegment(
+          scopes = scopes,
+          options = options,
+          duration = lastSegment.duration,
+          currentSegmentTimestamp = lastSegment.timestamp,
+          replayId = previousReplayId,
+          segmentId = lastSegment.id,
+          height = lastSegment.recorderConfig.recordingHeight,
+          width = lastSegment.recorderConfig.recordingWidth,
+          frameRate = lastSegment.recorderConfig.frameRate,
+          bitRate = lastSegment.recorderConfig.bitRate,
+          cache = lastSegment.cache,
+          replayType = lastSegment.replayType,
+          screenAtStart = lastSegment.screenAtStart,
+          breadcrumbs = breadcrumbs,
+          events = LinkedList(lastSegment.events),
+        )
+
+      if (segment is ReplaySegment.Created) {
+        segment.replay.applyRecordingMetadata(lastSegment.metadata, options)
+        val hint = HintUtils.createWithTypeCheckHint(PreviousReplayHint())
+        segment.capture(scopes, hint)
+      }
+      cleanupReplays(
+        unfinishedReplayId = previousReplayIdString
+      ) // will be cleaned up after the envelope is assembled
+    }
+  }
+
+  override fun onWindowSizeChanged(width: Int, height: Int) {
+    if (!isEnabled.get() || !state.get().isRecording) {
+      return
+    }
+    if (options.sessionReplay.isTrackConfiguration) {
+      val recorderConfig =
+        ScreenshotRecorderConfig.fromSize(context, options.sessionReplay, width, height)
+      onConfigurationChanged(recorderConfig)
+    }
+  }
+
+  public fun onConfigurationChanged(config: ScreenshotRecorderConfig) {
+    val current = state.get()
+    if (!isEnabled.get() || !current.isRecording) {
+      return
+    }
+    current.captureStrategy?.onConfigurationChanged(config)
+    recorder?.onConfigurationChanged(config)
+
+    // we have to restart recorder with a new config and pause immediately if the replay is paused
+    if (current.lifecycleState == PAUSED) {
+      recorder?.pause()
+    }
+  }
+
+  private fun sample(rate: Double?): Boolean =
+    (random.get() ?: Random().also { random.set(it) }).sample(rate)
+
+  private data class ReplayState(
+    val generation: Long = 0,
+    val lifecycleState: ReplayLifecycleState = ReplayLifecycleState.INITIAL,
+    val replayId: IchnoisCoreId = IchnoisCoreId.EMPTY_ID,
+    val captureStrategy: CaptureStrategy? = null,
+  ) {
+    val isBuffering: Boolean
+      get() = captureStrategy is BufferCaptureStrategy
+
+    val isRecording: Boolean
+      get() = lifecycleState >= STARTED && lifecycleState < STOPPED
+
+    val isTouchRecordingAllowed: Boolean
+      get() = lifecycleState == STARTED || lifecycleState == RESUMED
+
+    fun matches(generation: Long, replayId: IchnoisCoreId): Boolean =
+      isRecording && this.generation == generation && this.replayId == replayId
+  }
+
+  private class PreviousReplayHint : Backfillable {
+    override fun shouldEnrich(): Boolean = false
+  }
+
+  private class ReplayExecutorServiceThreadFactory : ThreadFactory {
+    private var cnt = 0
+
+    override fun newThread(r: Runnable): Thread {
+      val ret = Thread(r, "IchnoisCoreReplayIntegration-" + cnt++)
+      ret.setDaemon(true)
+      return ret
+    }
+  }
+
+  private class ReplayPersistingExecutorServiceThreadFactory : ThreadFactory {
+    private var cnt = 0
+
+    override fun newThread(r: Runnable): Thread {
+      val ret = Thread(r, "IchnoisCoreReplayPersister-" + cnt++)
+      ret.setDaemon(true)
+      return ret
+    }
+  }
+}
+
+/**
+ * Replays from the previous run are sent with a [Backfillable] hint, so MainEventProcessor does not
+ * apply release, environment, dist or SDK from the current run. Use the values persisted with the
+ * replay when it started recording instead.
+ *
+ * Replays recorded by older SDK versions don't have them stored. For those, read release,
+ * environment and dist from the options persisted by the previous run: this runs on the SDK
+ * executor before IchnoisCore.init persists the current options, so they still describe that run. The
+ * SDK falls back to the one MainEventProcessor applies to current-run segments rather than none.
+ */
+private fun IchnoisCoreReplayEvent.applyRecordingMetadata(
+  metadata: RecordingMetadata?,
+  options: IchnoisCoreOptions,
+) {
+  if (metadata != null) {
+    release = metadata.release
+    environment = metadata.environment
+    dist = metadata.dist
+    sdk = metadata.sdkVersion ?: options.sessionReplay.sdkVersion ?: options.sdkVersion
+  } else {
+    release = PersistingOptionsObserver.read(options, RELEASE_FILENAME, String::class.java)
+    environment = PersistingOptionsObserver.read(options, ENVIRONMENT_FILENAME, String::class.java)
+    dist = PersistingOptionsObserver.read(options, DIST_FILENAME, String::class.java)
+    sdk = options.sessionReplay.sdkVersion ?: options.sdkVersion
+  }
+}

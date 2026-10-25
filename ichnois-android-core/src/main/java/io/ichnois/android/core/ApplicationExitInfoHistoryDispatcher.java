@@ -1,0 +1,319 @@
+package io.ichnois.android.core;
+
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
+import android.content.Context;
+import android.os.Build;
+import androidx.annotation.RequiresApi;
+import io.ichnois.Hint;
+import io.ichnois.IScopes;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.cache.EnvelopeCache;
+import io.ichnois.cache.IEnvelopeCache;
+import io.ichnois.hints.BlockingFlushHint;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.transport.ICurrentDateProvider;
+import io.ichnois.util.HintUtils;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/**
+ * Shared startup-time pipeline for reporting process deaths recovered from Android's {@link
+ * ApplicationExitInfo} history.
+ *
+ * <p>This class provides the generic flow used by integrations like ANR, tombstone, and
+ * MemoryLimiter recovery. That flow involves:
+ *
+ * <ul>
+ *   <li>reading the system's historical exit list;
+ *   <li>finding matching records through an {@link ApplicationExitInfoPolicy};
+ *   <li>skipping exits that are too old or have already been reported; and
+ *   <li>capturing synthetic IchnoisCore events for the remaining matches.
+ * </ul>
+ *
+ * <p>The {@code ApplicationExitInfoPolicy} provides the exit-specific rules, while the dispatcher
+ * owns the lifecycle and bookkeeping around them.
+ */
+@ApiStatus.Internal
+final class ApplicationExitInfoHistoryDispatcher implements Runnable {
+
+  // using 91 to avoid timezone change hassle, 90 days is how long IchnoisCore keeps the events
+  static final long NINETY_DAYS_THRESHOLD = TimeUnit.DAYS.toMillis(91);
+
+  private final @NotNull Context context;
+  private final @NotNull IScopes scopes;
+  private final @NotNull IchnoisCoreAndroidOptions options;
+  private final @NotNull ApplicationExitInfoPolicy policy;
+  private final long threshold;
+
+  ApplicationExitInfoHistoryDispatcher(
+      final @NotNull Context context,
+      final @NotNull IScopes scopes,
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull ICurrentDateProvider dateProvider,
+      final @NotNull ApplicationExitInfoPolicy policy) {
+    this.context = ContextUtils.getApplicationContext(context);
+    this.scopes = scopes;
+    this.options = options;
+    this.policy = policy;
+    this.threshold = dateProvider.getCurrentTimeMillis() - NINETY_DAYS_THRESHOLD;
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.R)
+  @Override
+  public void run() {
+    final ActivityManager activityManager =
+        (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+
+    if (activityManager == null) {
+      options.getLogger().log(IchnoisCoreLevel.ERROR, "Failed to retrieve ActivityManager.");
+      return;
+    }
+
+    final List<ApplicationExitInfo> applicationExitInfoList =
+        activityManager.getHistoricalProcessExitReasons(null, 0, 0);
+
+    if (applicationExitInfoList.isEmpty()) {
+      options.getLogger().log(IchnoisCoreLevel.DEBUG, "No records in historical exit reasons.");
+      return;
+    }
+
+    waitPreviousSessionFlush();
+
+    final List<ApplicationExitInfo> exitInfos = new ArrayList<>(applicationExitInfoList.size());
+    for (final ApplicationExitInfo exitInfo : applicationExitInfoList) {
+      if (exitInfo != null) {
+        exitInfos.add(exitInfo);
+      }
+    }
+
+    final @Nullable Long lastReportedTimestamp = policy.getLastReportedTimestamp();
+
+    final ApplicationExitInfo latest = removeLatest(exitInfos);
+    if (latest == null) {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "No %ss have been found in the historical exit reasons list.",
+              policy.getLabel());
+      return;
+    }
+
+    if (latest.getTimestamp() < threshold) {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "Latest %s happened too long ago, returning early.",
+              policy.getLabel());
+      return;
+    }
+
+    if (lastReportedTimestamp != null && latest.getTimestamp() <= lastReportedTimestamp) {
+      options
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "Latest %s has already been reported, returning early.",
+              policy.getLabel());
+      return;
+    }
+
+    if (policy.shouldReportHistorical()) {
+      reportHistorical(exitInfos, lastReportedTimestamp);
+    }
+
+    report(latest, true);
+  }
+
+  private void waitPreviousSessionFlush() {
+    final IEnvelopeCache cache = options.getEnvelopeDiskCache();
+    if (cache instanceof EnvelopeCache) {
+      if (options.isEnableAutoSessionTracking()
+          && !((EnvelopeCache) cache).waitPreviousSessionFlush()) {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.WARNING,
+                "Timed out waiting to flush previous session to its own file.");
+
+        // if we timed out waiting here, we can already flush the latch, because the timeout is
+        // big enough to wait for it only once and we don't have to wait again in
+        // PreviousSessionFinalizer
+        ((EnvelopeCache) cache).flushPreviousSession();
+      }
+    }
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.R)
+  private @Nullable ApplicationExitInfo removeLatest(
+      final @NotNull List<ApplicationExitInfo> exitInfos) {
+    for (Iterator<ApplicationExitInfo> it = exitInfos.iterator(); it.hasNext(); ) {
+      ApplicationExitInfo applicationExitInfo = it.next();
+      if (policy.matches(applicationExitInfo)) {
+        it.remove();
+        return applicationExitInfo;
+      }
+    }
+    return null;
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.R)
+  private void reportHistorical(
+      final @NotNull List<ApplicationExitInfo> exitInfos,
+      final @Nullable Long lastReportedTimestamp) {
+    Collections.reverse(exitInfos);
+    for (ApplicationExitInfo applicationExitInfo : exitInfos) {
+      if (policy.matches(applicationExitInfo)) {
+        if (applicationExitInfo.getTimestamp() < threshold) {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.DEBUG,
+                  "%s happened too long ago %s.",
+                  policy.getLabel(),
+                  applicationExitInfo);
+          continue;
+        }
+
+        if (lastReportedTimestamp != null
+            && applicationExitInfo.getTimestamp() <= lastReportedTimestamp) {
+          options
+              .getLogger()
+              .log(
+                  IchnoisCoreLevel.DEBUG,
+                  "%s has already been reported %s.",
+                  policy.getLabel(),
+                  applicationExitInfo);
+          continue;
+        }
+
+        report(applicationExitInfo, false); // do not enrich past events
+      }
+    }
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.R)
+  private void report(final @NotNull ApplicationExitInfo exitInfo, final boolean enrich) {
+    final @Nullable Report report = policy.buildReport(exitInfo, enrich);
+
+    if (report == null) {
+      return;
+    }
+
+    final @NotNull IchnoisCoreId ichnoisId = scopes.captureEvent(report.getEvent(), report.getHint());
+    final boolean isEventDropped = ichnoisId.equals(IchnoisCoreId.EMPTY_ID);
+    if (isEventDropped) {
+      // A dropped event never reaches the envelope disk cache, which is where the last reported
+      // marker is normally written. Without writing it here, the very same exit would be turned
+      // into an event again on the next app start, no matter why it was dropped. Only a technical
+      // failure to hand the event over keeps the exit eligible for another attempt.
+      if (HintUtils.isCaptureFailed(report.getHint())) {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.DEBUG,
+                "Capturing the %s event failed, leaving the exit for the next app start.",
+                policy.getLabel());
+      } else {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.DEBUG,
+                "%s event was dropped, marking the exit as reported.",
+                policy.getLabel());
+        policy.markReported(exitInfo.getTimestamp());
+      }
+    } else {
+      final @Nullable BlockingFlushHint flushHint = report.getFlushHint();
+      if (flushHint != null && !flushHint.waitFlush()) {
+        options
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.WARNING,
+                "Timed out waiting to flush %s event to disk. Event: %s",
+                policy.getLabel(),
+                report.getEvent().getEventId());
+      }
+    }
+  }
+
+  /**
+   * Exit-specific contract for the shared {@link ApplicationExitInfo} recovery pipeline.
+   *
+   * <p>{@link ApplicationExitInfoHistoryDispatcher} owns the generic startup flow for recovering
+   * past process deaths from Android's historical exit list. An {@code ApplicationExitInfoPolicy}
+   * provides the rules for a given exit family, including how to recognize matching records,
+   * whether older matches should also be reported, how deduplication is tracked, and how matching
+   * record is turned into a synthetic IchnoisCore event.
+   */
+  interface ApplicationExitInfoPolicy {
+
+    /** Returns the human-readable label used in dispatcher logs for this exit family. */
+    @NotNull
+    String getLabel();
+
+    /** Returns {@code true} when the given {@link ApplicationExitInfo} belongs to this policy. */
+    boolean matches(@NotNull ApplicationExitInfo exitInfo);
+
+    /** Returns whether older matching exits should be reported in addition to the latest one. */
+    boolean shouldReportHistorical();
+
+    /** Returns the timestamp of the most recently reported matching exit, if one was recorded. */
+    @Nullable
+    Long getLastReportedTimestamp();
+
+    /**
+     * Records {@code timestamp} as the last reported matching exit, so it is not reported again.
+     */
+    void markReported(long timestamp);
+
+    /**
+     * Builds the synthetic report for a matching exit.
+     *
+     * <p>{@code enrich} indicates whether the dispatcher is reporting the latest recovered exit,
+     * which may be backfilled with persisted launch state, or an older historical one, which is
+     * typically kept leaner.
+     */
+    @Nullable
+    Report buildReport(@NotNull ApplicationExitInfo exitInfo, boolean enrich);
+  }
+
+  public static final class Report {
+    private final @NotNull IchnoisCoreEvent event;
+    private final @NotNull Hint hint;
+    private final @Nullable BlockingFlushHint flushHint;
+
+    Report(
+        final @NotNull IchnoisCoreEvent event,
+        final @NotNull Hint hint,
+        final @Nullable BlockingFlushHint flushHint) {
+      this.event = event;
+      this.hint = hint;
+      this.flushHint = flushHint;
+    }
+
+    @NotNull
+    public IchnoisCoreEvent getEvent() {
+      return event;
+    }
+
+    @NotNull
+    public Hint getHint() {
+      return hint;
+    }
+
+    @Nullable
+    public BlockingFlushHint getFlushHint() {
+      return flushHint;
+    }
+  }
+}

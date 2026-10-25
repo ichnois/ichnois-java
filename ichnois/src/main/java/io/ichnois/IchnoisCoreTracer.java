@@ -1,0 +1,1105 @@
+package io.ichnois;
+
+import io.ichnois.profiling.ProfileRecordingState;
+import io.ichnois.protocol.Contexts;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.protocol.TransactionNameSource;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.CollectionUtils;
+import io.ichnois.util.Objects;
+import io.ichnois.util.SpanUtils;
+import io.ichnois.util.thread.IThreadChecker;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+@ApiStatus.Internal
+public final class IchnoisCoreTracer implements ITransaction {
+  private final @NotNull IchnoisCoreId eventId = new IchnoisCoreId();
+  private final @NotNull Span root;
+  private final @NotNull List<Span> children = new CopyOnWriteArrayList<>();
+  private final @NotNull IScopes scopes;
+  private @NotNull String name;
+
+  /**
+   * Holds the status for finished tracer. Tracer can have finishedStatus set, but not be finished
+   * itself when `waitForChildren` is set to `true`, `#finish()` method was called but there are
+   * unfinished children spans.
+   */
+  private @NotNull FinishStatus finishStatus = FinishStatus.NOT_FINISHED;
+
+  private volatile @Nullable Future<?> idleTimeoutFuture;
+  private volatile @Nullable Future<?> deadlineTimeoutFuture;
+
+  // Whether timeout tasks may still be scheduled. Set to false once the tracer is finished. The
+  // executor itself is owned by the options (shared SDK-wide) and obtained from there when needed.
+  private volatile boolean timersEnabled = false;
+  private final @NotNull AutoClosableReentrantLock timerLock = new AutoClosableReentrantLock();
+  private final @NotNull AutoClosableReentrantLock tracerLock = new AutoClosableReentrantLock();
+
+  private final @NotNull AtomicBoolean isIdleFinishTimerRunning = new AtomicBoolean(false);
+  private final @NotNull AtomicBoolean isDeadlineTimerRunning = new AtomicBoolean(false);
+
+  private @NotNull TransactionNameSource transactionNameSource;
+  private final @NotNull Instrumenter instrumenter;
+  private final @NotNull Contexts contexts = new Contexts();
+  private final @Nullable CompositePerformanceCollector compositePerformanceCollector;
+  private final @NotNull TransactionOptions transactionOptions;
+
+  public IchnoisCoreTracer(final @NotNull TransactionContext context, final @NotNull IScopes scopes) {
+    this(context, scopes, new TransactionOptions(), null);
+  }
+
+  public IchnoisCoreTracer(
+      final @NotNull TransactionContext context,
+      final @NotNull IScopes scopes,
+      final @NotNull TransactionOptions transactionOptions) {
+    this(context, scopes, transactionOptions, null);
+  }
+
+  IchnoisCoreTracer(
+      final @NotNull TransactionContext context,
+      final @NotNull IScopes scopes,
+      final @NotNull TransactionOptions transactionOptions,
+      final @Nullable CompositePerformanceCollector compositePerformanceCollector) {
+    Objects.requireNonNull(context, "context is required");
+    Objects.requireNonNull(scopes, "scopes are required");
+
+    this.root = new Span(context, this, scopes, transactionOptions);
+
+    this.name = context.getName();
+    this.instrumenter = context.getInstrumenter();
+    this.scopes = scopes;
+    // Let's collect performance data (cpu, ram, frames) only when the transaction is sampled
+    this.compositePerformanceCollector =
+        Boolean.TRUE.equals(isSampled()) ? compositePerformanceCollector : null;
+    this.transactionNameSource = context.getTransactionNameSource();
+    this.transactionOptions = transactionOptions;
+
+    setDefaultSpanData(root);
+
+    final @NotNull IchnoisCoreId continuousProfilerId = getProfilerId();
+
+    if (!continuousProfilerId.equals(IchnoisCoreId.EMPTY_ID) && Boolean.TRUE.equals(isSampled())) {
+      this.contexts.setProfile(new ProfileContext(continuousProfilerId));
+    }
+
+    // We are currently sending the performance data only in profiles, but we are always sending
+    // performance measurements (frames data in spans).
+    if (this.compositePerformanceCollector != null) {
+      this.compositePerformanceCollector.start(this);
+    }
+
+    if (transactionOptions.getIdleTimeout() != null
+        || transactionOptions.getDeadlineTimeout() != null) {
+      timersEnabled = true;
+
+      scheduleDeadlineTimeout();
+      scheduleFinish();
+    }
+  }
+
+  @Override
+  public void scheduleFinish() {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = timerLock.acquire()) {
+      if (timersEnabled) {
+        final @Nullable Long idleTimeout = transactionOptions.getIdleTimeout();
+
+        if (idleTimeout != null) {
+          cancelIdleTimer();
+          isIdleFinishTimerRunning.set(true);
+
+          try {
+            idleTimeoutFuture =
+                scopes
+                    .getOptions()
+                    .getTimerExecutorService()
+                    .schedule(this::onIdleTimeoutReached, idleTimeout);
+          } catch (Throwable e) {
+            scopes
+                .getOptions()
+                .getLogger()
+                .log(IchnoisCoreLevel.WARNING, "Failed to schedule finish timer", e);
+            // if we failed to schedule the finish timer for some reason, we finish it here right
+            // away
+            onIdleTimeoutReached();
+          }
+        }
+      }
+    }
+  }
+
+  private void onIdleTimeoutReached() {
+    final @Nullable SpanStatus status = getStatus();
+    finish((status != null) ? status : SpanStatus.OK);
+    isIdleFinishTimerRunning.set(false);
+  }
+
+  private void onDeadlineTimeoutReached() {
+    final @Nullable SpanStatus status = getStatus();
+    forceFinish(
+        (status != null) ? status : SpanStatus.DEADLINE_EXCEEDED,
+        transactionOptions.getIdleTimeout() != null,
+        null);
+    isDeadlineTimerRunning.set(false);
+  }
+
+  @Override
+  public void forceFinish(
+      final @NotNull SpanStatus status, final boolean dropIfNoChildren, final @Nullable Hint hint) {
+    if (isFinished()) {
+      return;
+    }
+
+    final @NotNull IchnoisCoreDate finishTimestamp = scopes.getOptions().getDateProvider().now();
+
+    // abort all child-spans first, this ensures the transaction can be finished,
+    // even if waitForChildren is true
+    // iterate in reverse order to ensure leaf spans are processed before their parents
+    @NotNull
+    final ListIterator<Span> iterator =
+        CollectionUtils.reverseListIterator((CopyOnWriteArrayList<Span>) this.children);
+    while (iterator.hasPrevious()) {
+      @NotNull final Span span = iterator.previous();
+      span.setSpanFinishedCallback(null);
+      span.finish(status, finishTimestamp);
+    }
+    finish(status, finishTimestamp, dropIfNoChildren, hint);
+  }
+
+  @Override
+  public void finish(
+      @Nullable SpanStatus status,
+      @Nullable IchnoisCoreDate finishDate,
+      boolean dropIfNoChildren,
+      @Nullable Hint hint) {
+    // try to get the high precision timestamp from the root span
+    IchnoisCoreDate finishTimestamp = root.getFinishDate();
+
+    // if a finishDate was passed in, use that instead
+    if (finishDate != null) {
+      finishTimestamp = finishDate;
+    }
+
+    // if it's not set -> fallback to the current time
+    if (finishTimestamp == null) {
+      finishTimestamp = scopes.getOptions().getDateProvider().now();
+    }
+
+    // auto-finish any idle spans first
+    for (final Span span : children) {
+      if (span.getOptions().isIdle()) {
+        span.finish((status != null) ? status : getSpanContext().status, finishTimestamp);
+      }
+    }
+
+    this.finishStatus = FinishStatus.finishing(status);
+    if (!root.isFinished()
+        && (!transactionOptions.isWaitForChildren() || hasAllChildrenFinished())) {
+
+      final @NotNull AtomicReference<List<PerformanceCollectionData>> performanceCollectionData =
+          new AtomicReference<>();
+      // We set the new spanFinishedCallback here instead of creation time, calling the old one to
+      // avoid the user overwrites it by setting a custom spanFinishedCallback on the root span
+      final @Nullable SpanFinishedCallback oldCallback = this.root.getSpanFinishedCallback();
+      this.root.setSpanFinishedCallback(
+          span -> {
+            if (oldCallback != null) {
+              oldCallback.execute(span);
+            }
+
+            // Let's call the finishCallback here, when the root span has a finished date but it's
+            // not finished, yet
+            final @Nullable TransactionFinishedCallback finishedCallback =
+                transactionOptions.getTransactionFinishedCallback();
+            if (finishedCallback != null) {
+              finishedCallback.execute(this);
+            }
+
+            if (compositePerformanceCollector != null) {
+              performanceCollectionData.set(compositePerformanceCollector.stop(this));
+            }
+          });
+
+      // any un-finished children will remain unfinished
+      // as relay takes care of setting the end-timestamp + deadline_exceeded
+      // see
+      // https://github.com/getsentry/relay/blob/40697d0a1c54e5e7ad8d183fc7f9543b94fe3839/relay-general/src/store/transactions/processor.rs#L374-L378
+      root.finish(finishStatus.spanStatus, finishTimestamp);
+
+      ProfilingTraceData profilingTraceData = null;
+      if (Boolean.TRUE.equals(isSampled()) && Boolean.TRUE.equals(isProfileSampled())) {
+        profilingTraceData =
+            scopes
+                .getOptions()
+                .getTransactionProfiler()
+                .onTransactionFinish(this, performanceCollectionData.get(), scopes.getOptions());
+      }
+      if (scopes.getOptions().isContinuousProfilingEnabled()
+          && scopes.getOptions().getProfileLifecycle() == ProfileLifecycle.TRACE
+          && root.getSpanContext().getProfilerId().equals(IchnoisCoreId.EMPTY_ID)) {
+        scopes.getOptions().getContinuousProfiler().stopProfiler(ProfileLifecycle.TRACE);
+      }
+      if (performanceCollectionData.get() != null) {
+        performanceCollectionData.get().clear();
+      }
+
+      scopes.configureScope(
+          scope -> {
+            scope.withTransaction(
+                transaction -> {
+                  if (transaction == this) {
+                    scope.clearTransaction();
+                  }
+                });
+          });
+      dropUnrecordedProfilerIds(finishTimestamp);
+
+      final IchnoisCoreTransaction transaction = new IchnoisCoreTransaction(this);
+
+      if (timersEnabled) {
+        try (final @NotNull IIchnoisCoreLifecycleToken ignored = timerLock.acquire()) {
+          if (timersEnabled) {
+            cancelIdleTimer();
+            cancelDeadlineTimer();
+            timersEnabled = false;
+          }
+        }
+      }
+
+      if (dropIfNoChildren && children.isEmpty() && transactionOptions.getIdleTimeout() != null) {
+        // if it's an idle transaction which has no children, we drop it to save user's quota
+        scopes
+            .getOptions()
+            .getLogger()
+            .log(
+                IchnoisCoreLevel.DEBUG,
+                "Dropping idle transaction %s because it has no child spans",
+                name);
+        return;
+      }
+
+      transaction.getMeasurements().putAll(root.getMeasurements());
+      scopes.captureTransaction(transaction, traceContext(), hint, profilingTraceData);
+    }
+  }
+
+  private void cancelIdleTimer() {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = timerLock.acquire()) {
+      if (idleTimeoutFuture != null) {
+        idleTimeoutFuture.cancel(false);
+        isIdleFinishTimerRunning.set(false);
+        idleTimeoutFuture = null;
+      }
+    }
+  }
+
+  private void scheduleDeadlineTimeout() {
+    final @Nullable Long deadlineTimeOut = transactionOptions.getDeadlineTimeout();
+    if (deadlineTimeOut != null) {
+      try (final @NotNull IIchnoisCoreLifecycleToken ignored = timerLock.acquire()) {
+        if (timersEnabled) {
+          cancelDeadlineTimer();
+          isDeadlineTimerRunning.set(true);
+          try {
+            deadlineTimeoutFuture =
+                scopes
+                    .getOptions()
+                    .getTimerExecutorService()
+                    .schedule(this::onDeadlineTimeoutReached, deadlineTimeOut);
+          } catch (Throwable e) {
+            scopes
+                .getOptions()
+                .getLogger()
+                .log(IchnoisCoreLevel.WARNING, "Failed to schedule finish timer", e);
+            // if we failed to schedule the finish timer for some reason, we finish it here right
+            // away
+            onDeadlineTimeoutReached();
+          }
+        }
+      }
+    }
+  }
+
+  private void cancelDeadlineTimer() {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = timerLock.acquire()) {
+      if (deadlineTimeoutFuture != null) {
+        deadlineTimeoutFuture.cancel(false);
+        isDeadlineTimerRunning.set(false);
+        deadlineTimeoutFuture = null;
+      }
+    }
+  }
+
+  public @NotNull List<Span> getChildren() {
+    return children;
+  }
+
+  @Override
+  public @NotNull IchnoisCoreDate getStartDate() {
+    return this.root.getStartDate();
+  }
+
+  @Override
+  public @Nullable IchnoisCoreDate getFinishDate() {
+    return this.root.getFinishDate();
+  }
+
+  /**
+   * Starts a child Span with given trace id and parent span id.
+   *
+   * @param parentSpanId - parent span id
+   * @param operation - span operation name
+   * @param description - span description
+   * @return a new transaction span
+   */
+  @NotNull
+  ISpan startChild(
+      final @NotNull SpanId parentSpanId,
+      final @NotNull String operation,
+      final @Nullable String description) {
+    return startChild(parentSpanId, operation, description, new SpanOptions());
+  }
+
+  /**
+   * Starts a child Span with given trace id and parent span id.
+   *
+   * @param parentSpanId - parent span id
+   * @param operation - span operation name
+   * @param description - span description
+   * @param spanOptions - span options
+   * @return a new transaction span
+   */
+  @NotNull
+  ISpan startChild(
+      final @NotNull SpanId parentSpanId,
+      final @NotNull String operation,
+      final @Nullable String description,
+      final @NotNull SpanOptions spanOptions) {
+    return createChild(parentSpanId, operation, description, spanOptions);
+  }
+
+  @NotNull
+  ISpan startChild(
+      final @NotNull SpanId parentSpanId,
+      final @NotNull String operation,
+      final @Nullable String description,
+      final @Nullable IchnoisCoreDate timestamp,
+      final @NotNull Instrumenter instrumenter) {
+    final @NotNull SpanContext spanContext =
+        getSpanContext().copyForChild(operation, parentSpanId, null);
+    spanContext.setDescription(description);
+    spanContext.setInstrumenter(instrumenter);
+
+    final @NotNull SpanOptions spanOptions = new SpanOptions();
+    spanOptions.setStartTimestamp(timestamp);
+
+    return createChild(spanContext, spanOptions);
+  }
+
+  @NotNull
+  ISpan startChild(
+      final @NotNull SpanId parentSpanId,
+      final @NotNull String operation,
+      final @Nullable String description,
+      final @Nullable IchnoisCoreDate timestamp,
+      final @NotNull Instrumenter instrumenter,
+      final @NotNull SpanOptions spanOptions) {
+    final @NotNull SpanContext spanContext =
+        getSpanContext().copyForChild(operation, parentSpanId, null);
+    spanContext.setDescription(description);
+    spanContext.setInstrumenter(instrumenter);
+
+    spanOptions.setStartTimestamp(timestamp);
+
+    return createChild(spanContext, spanOptions);
+  }
+
+  /**
+   * Starts a child Span with given trace id and parent span id.
+   *
+   * @param parentSpanId - parent span id
+   * @param operation - the span operation
+   * @param description - the optional span description
+   * @param options - span options
+   * @return a new transaction span
+   */
+  @NotNull
+  private ISpan createChild(
+      final @NotNull SpanId parentSpanId,
+      final @NotNull String operation,
+      final @Nullable String description,
+      final @NotNull SpanOptions options) {
+    final @NotNull SpanContext spanContext =
+        getSpanContext().copyForChild(operation, parentSpanId, null);
+    spanContext.setDescription(description);
+    spanContext.setInstrumenter(Instrumenter.ICHNOIS);
+
+    return createChild(spanContext, options);
+  }
+
+  @NotNull
+  private ISpan createChild(
+      final @NotNull SpanContext spanContext, final @NotNull SpanOptions spanOptions) {
+    if (root.isFinished()) {
+      return NoOpSpan.getInstance();
+    }
+
+    if (!this.instrumenter.equals(spanContext.getInstrumenter())) {
+      return NoOpSpan.getInstance();
+    }
+
+    if (SpanUtils.isIgnored(scopes.getOptions().getIgnoredSpanOrigins(), spanOptions.getOrigin())) {
+      return NoOpSpan.getInstance();
+    }
+
+    final @Nullable SpanId parentSpanId = spanContext.getParentSpanId();
+    final @NotNull String operation = spanContext.getOperation();
+    final @Nullable String description = spanContext.getDescription();
+
+    if (children.size() < scopes.getOptions().getMaxSpans()) {
+      Objects.requireNonNull(parentSpanId, "parentSpanId is required");
+      Objects.requireNonNull(operation, "operation is required");
+      cancelIdleTimer();
+      final Span span =
+          new Span(
+              this,
+              scopes,
+              spanContext,
+              spanOptions,
+              finishingSpan -> {
+                if (compositePerformanceCollector != null) {
+                  compositePerformanceCollector.onSpanFinished(finishingSpan);
+                }
+                final FinishStatus finishStatus = this.finishStatus;
+                if (transactionOptions.getIdleTimeout() != null) {
+                  // if it's an idle transaction, no matter the status, we'll reset the timeout here
+                  // so the transaction will either idle and finish itself, or a new child will be
+                  // added and we'll wait for it again
+                  if (!transactionOptions.isWaitForChildren() || hasAllChildrenFinished()) {
+                    scheduleFinish();
+                  }
+                } else if (finishStatus.isFinishing) {
+                  finish(finishStatus.spanStatus);
+                }
+              });
+      // TODO [POTEL] missing features
+      //      final Span span =
+      //          new Span(
+      //              root.getTraceId(),
+      //              parentSpanId,
+      //              this,
+      //              operation,
+      //              this.scopes,
+      //              timestamp,
+      //              spanOptions,
+      //              finishingSpan -> {
+      //                if (compositePerformanceCollector != null) {
+      //                  compositePerformanceCollector.onSpanFinished(finishingSpan);
+      //                }
+      //                final FinishStatus finishStatus = this.finishStatus;
+      //                if (transactionOptions.getIdleTimeout() != null) {
+      //                  // if it's an idle transaction, no matter the status, we'll reset the
+      // timeout here
+      //                  // so the transaction will either idle and finish itself, or a new child
+      // will be
+      //                  // added and we'll wait for it again
+      //                  if (!transactionOptions.isWaitForChildren() || hasAllChildrenFinished()) {
+      //                    scheduleFinish();
+      //                  }
+      //                } else if (finishStatus.isFinishing) {
+      //                  finish(finishStatus.spanStatus);
+      //                }
+      //              });
+      //      span.setDescription(description);
+      setDefaultSpanData(span);
+      this.children.add(span);
+      if (compositePerformanceCollector != null) {
+        compositePerformanceCollector.onSpanStarted(span);
+      }
+      return span;
+    } else {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.WARNING,
+              "Span operation: %s, description: %s dropped due to limit reached. Returning NoOpSpan.",
+              operation,
+              description);
+      return NoOpSpan.getInstance();
+    }
+  }
+
+  /** Sets the default data in the span, including profiler _id, thread id and thread name */
+  private void setDefaultSpanData(final @NotNull ISpan span) {
+    final @NotNull IThreadChecker threadChecker = scopes.getOptions().getThreadChecker();
+    final @NotNull IchnoisCoreId profilerId = getProfilerId();
+    if (!profilerId.equals(IchnoisCoreId.EMPTY_ID) && Boolean.TRUE.equals(span.isSampled())) {
+      span.setData(SpanDataConvention.PROFILER_ID, profilerId.toString());
+    }
+    span.setData(
+        SpanDataConvention.THREAD_ID, String.valueOf(threadChecker.currentThreadSystemId()));
+    span.setData(SpanDataConvention.THREAD_NAME, threadChecker.getCurrentThreadName());
+  }
+
+  /**
+   * Spans are tagged with the profiler id when they start, but the profiler may only learn later
+   * that no profile was recorded, e.g. when the OS rate limits profiling requests. Spans that no
+   * profile covers drop the reference here, so they don't point to a profile that never arrives.
+   */
+  private void dropUnrecordedProfilerIds(final @NotNull IchnoisCoreDate finishTimestamp) {
+    final @NotNull IContinuousProfiler continuousProfiler =
+        scopes.getOptions().getContinuousProfiler();
+    if (continuousProfiler instanceof NoOpContinuousProfiler) {
+      // Without a profiler no span can carry a profiler id, so the children are not worth walking
+      return;
+    }
+
+    if (isProfileMissing(continuousProfiler, root, finishTimestamp)) {
+      root.setData(SpanDataConvention.PROFILER_ID, null);
+      contexts.remove(ProfileContext.TYPE);
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "No profile was recorded for transaction, dropping its profiler id.");
+    }
+
+    for (final @NotNull Span child : children) {
+      if (isProfileMissing(continuousProfiler, child, finishTimestamp)) {
+        child.setData(SpanDataConvention.PROFILER_ID, null);
+      }
+    }
+  }
+
+  /**
+   * Whether the profiler knows that no profile covers the given span.
+   *
+   * @param finishTimestamp end of the window for a span that never finished
+   */
+  private boolean isProfileMissing(
+      final @NotNull IContinuousProfiler continuousProfiler,
+      final @NotNull Span span,
+      final @NotNull IchnoisCoreDate finishTimestamp) {
+    final @Nullable Object data = span.getData(SpanDataConvention.PROFILER_ID);
+    if (!(data instanceof String)) {
+      return false;
+    }
+    final @NotNull IchnoisCoreId profilerId;
+    try {
+      profilerId = new IchnoisCoreId((String) data);
+    } catch (IllegalArgumentException e) {
+      // The span data key is public API, so the value is not necessarily an id the SDK wrote
+      return false;
+    }
+    final @Nullable IchnoisCoreDate spanFinishDate = span.getFinishDate();
+    return continuousProfiler.getProfileRecordingState(
+            profilerId,
+            span.getStartDate(),
+            spanFinishDate != null ? spanFinishDate : finishTimestamp)
+        == ProfileRecordingState.NOT_RECORDED;
+  }
+
+  private @NotNull IchnoisCoreId getProfilerId() {
+    return !root.getSpanContext().getProfilerId().equals(IchnoisCoreId.EMPTY_ID)
+        ? root.getSpanContext().getProfilerId()
+        : scopes.getOptions().getContinuousProfiler().getProfilerId();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(final @NotNull String operation) {
+    return this.startChild(operation, (String) null);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation,
+      @Nullable String description,
+      @Nullable IchnoisCoreDate timestamp,
+      @NotNull Instrumenter instrumenter) {
+    return startChild(operation, description, timestamp, instrumenter, new SpanOptions());
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      final @NotNull String operation,
+      @Nullable String description,
+      @Nullable IchnoisCoreDate timestamp,
+      @NotNull Instrumenter instrumenter,
+      @NotNull SpanOptions spanOptions) {
+    return createChild(operation, description, timestamp, instrumenter, spanOptions);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      final @NotNull String operation,
+      @Nullable String description,
+      @Nullable IchnoisCoreDate timestamp) {
+    return createChild(operation, description, timestamp, Instrumenter.ICHNOIS, new SpanOptions());
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      final @NotNull String operation, final @Nullable String description) {
+    return startChild(operation, description, null, Instrumenter.ICHNOIS, new SpanOptions());
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation, @Nullable String description, @NotNull SpanOptions spanOptions) {
+    return createChild(operation, description, null, Instrumenter.ICHNOIS, spanOptions);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull SpanContext spanContext, @NotNull SpanOptions spanOptions) {
+    return createChild(spanContext, spanOptions);
+  }
+
+  private @NotNull ISpan createChild(
+      final @NotNull String operation,
+      final @Nullable String description,
+      @Nullable IchnoisCoreDate timestamp,
+      final @NotNull Instrumenter instrumenter,
+      final @NotNull SpanOptions spanOptions) {
+    if (root.isFinished()) {
+      return NoOpSpan.getInstance();
+    }
+
+    if (!this.instrumenter.equals(instrumenter)) {
+      return NoOpSpan.getInstance();
+    }
+
+    if (children.size() < scopes.getOptions().getMaxSpans()) {
+      return root.startChild(operation, description, timestamp, instrumenter, spanOptions);
+    } else {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.WARNING,
+              "Span operation: %s, description: %s dropped due to limit reached. Returning NoOpSpan.",
+              operation,
+              description);
+      return NoOpSpan.getInstance();
+    }
+  }
+
+  @Override
+  public @NotNull IchnoisCoreTraceHeader toIchnoisCoreTrace() {
+    return root.toIchnoisCoreTrace();
+  }
+
+  @Override
+  public void finish() {
+    this.finish(this.getStatus());
+  }
+
+  @Override
+  public void finish(@Nullable SpanStatus status) {
+    this.finish(status, null);
+  }
+
+  @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
+  @Override
+  @ApiStatus.Internal
+  public void finish(@Nullable SpanStatus status, @Nullable IchnoisCoreDate finishDate) {
+    finish(status, finishDate, true, null);
+  }
+
+  @Override
+  public @Nullable TraceContext traceContext() {
+    if (scopes.getOptions().isTraceSampling()) {
+      final @Nullable Baggage baggage = getSpanContext().getBaggage();
+      if (baggage != null) {
+        updateBaggageValues(baggage);
+        return baggage.toTraceContext();
+      }
+    }
+    return null;
+  }
+
+  private void updateBaggageValues(final @NotNull Baggage baggage) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = tracerLock.acquire()) {
+      if (baggage.isMutable()) {
+        final AtomicReference<IchnoisCoreId> replayId = new AtomicReference<>();
+        scopes.configureScope(
+            scope -> {
+              replayId.set(scope.getReplayId());
+            });
+        baggage.setValuesFromTransaction(
+            getSpanContext().getTraceId(),
+            replayId.get(),
+            scopes.getOptions(),
+            this.getSamplingDecision(),
+            getName(),
+            getTransactionNameSource());
+        baggage.freeze();
+      }
+    }
+  }
+
+  @Override
+  public @Nullable BaggageHeader toBaggageHeader(@Nullable List<String> thirdPartyBaggageHeaders) {
+    if (scopes.getOptions().isTraceSampling()) {
+      final @Nullable Baggage baggage = getSpanContext().getBaggage();
+      if (baggage != null) {
+        updateBaggageValues(baggage);
+        return BaggageHeader.fromBaggageAndOutgoingHeader(baggage, thirdPartyBaggageHeaders);
+      }
+    }
+    return null;
+  }
+
+  private boolean hasAllChildrenFinished() {
+    @NotNull final ListIterator<Span> iterator = this.children.listIterator();
+    while (iterator.hasNext()) {
+      @NotNull final Span span = iterator.next();
+      // This is used in the spanFinishCallback, when the span isn't finished, but has a finish
+      // date
+      if (!span.isFinished() && span.getFinishDate() == null) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  public void setOperation(final @NotNull String operation) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "The transaction is already finished. Operation %s cannot be set",
+              operation);
+      return;
+    }
+
+    this.root.setOperation(operation);
+  }
+
+  @Override
+  public @NotNull String getOperation() {
+    return this.root.getOperation();
+  }
+
+  @Override
+  public void setDescription(final @Nullable String description) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "The transaction is already finished. Description %s cannot be set",
+              description);
+      return;
+    }
+
+    this.root.setDescription(description);
+  }
+
+  @Override
+  public @Nullable String getDescription() {
+    return this.root.getDescription();
+  }
+
+  @Override
+  public void setStatus(final @Nullable SpanStatus status) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "The transaction is already finished. Status %s cannot be set",
+              status == null ? "null" : status.name());
+      return;
+    }
+
+    this.root.setStatus(status);
+  }
+
+  @Override
+  public @Nullable SpanStatus getStatus() {
+    return this.root.getStatus();
+  }
+
+  @Override
+  public void setThrowable(final @Nullable Throwable throwable) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(IchnoisCoreLevel.DEBUG, "The transaction is already finished. Throwable cannot be set");
+      return;
+    }
+
+    this.root.setThrowable(throwable);
+  }
+
+  @Override
+  public @Nullable Throwable getThrowable() {
+    return this.root.getThrowable();
+  }
+
+  @Override
+  public @NotNull SpanContext getSpanContext() {
+    return this.root.getSpanContext();
+  }
+
+  @Override
+  public void setTag(final @Nullable String key, final @Nullable String value) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(IchnoisCoreLevel.DEBUG, "The transaction is already finished. Tag %s cannot be set", key);
+      return;
+    }
+
+    this.root.setTag(key, value);
+  }
+
+  @Override
+  public @Nullable String getTag(final @Nullable String key) {
+    return this.root.getTag(key);
+  }
+
+  @Override
+  public boolean isFinished() {
+    return this.root.isFinished();
+  }
+
+  @Override
+  public void setData(@Nullable String key, @Nullable Object value) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG, "The transaction is already finished. Data %s cannot be set", key);
+      return;
+    }
+
+    this.root.setData(key, value);
+  }
+
+  @Override
+  public @Nullable Object getData(@Nullable String key) {
+    return this.root.getData(key);
+  }
+
+  @ApiStatus.Internal
+  public void setMeasurementFromChild(final @NotNull String name, final @NotNull Number value) {
+    // We don't want to overwrite the root span measurement, if it comes from a child.
+    if (!root.getMeasurements().containsKey(name)) {
+      setMeasurement(name, value);
+    }
+  }
+
+  @ApiStatus.Internal
+  public void setMeasurementFromChild(
+      final @NotNull String name,
+      final @NotNull Number value,
+      final @NotNull MeasurementUnit unit) {
+    // We don't want to overwrite the root span measurement, if it comes from a child.
+    if (!root.getMeasurements().containsKey(name)) {
+      setMeasurement(name, value, unit);
+    }
+  }
+
+  @Override
+  public void setMeasurement(final @NotNull String name, final @NotNull Number value) {
+    root.setMeasurement(name, value);
+  }
+
+  @Override
+  public void setMeasurement(
+      final @NotNull String name,
+      final @NotNull Number value,
+      final @NotNull MeasurementUnit unit) {
+    root.setMeasurement(name, value, unit);
+  }
+
+  public @Nullable Map<String, Object> getData() {
+    return this.root.getData();
+  }
+
+  @Override
+  public @Nullable Boolean isSampled() {
+    return this.root.isSampled();
+  }
+
+  @Override
+  public @Nullable Boolean isProfileSampled() {
+    return this.root.isProfileSampled();
+  }
+
+  @Override
+  public @Nullable TracesSamplingDecision getSamplingDecision() {
+    return this.root.getSamplingDecision();
+  }
+
+  @Override
+  public void setName(@NotNull String name) {
+    setName(name, TransactionNameSource.CUSTOM);
+  }
+
+  @ApiStatus.Internal
+  @Override
+  public void setName(@NotNull String name, @NotNull TransactionNameSource transactionNameSource) {
+    if (root.isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              IchnoisCoreLevel.DEBUG,
+              "The transaction is already finished. Name %s cannot be set",
+              name);
+      return;
+    }
+
+    this.name = name;
+    this.transactionNameSource = transactionNameSource;
+  }
+
+  @Override
+  public @NotNull String getName() {
+    return this.name;
+  }
+
+  @Override
+  public @NotNull TransactionNameSource getTransactionNameSource() {
+    return this.transactionNameSource;
+  }
+
+  @Override
+  public @NotNull List<Span> getSpans() {
+    return this.children;
+  }
+
+  @Override
+  public @Nullable ISpan getLatestActiveSpan() {
+    @NotNull
+    final ListIterator<Span> iterator =
+        CollectionUtils.reverseListIterator((CopyOnWriteArrayList<Span>) this.children);
+    while (iterator.hasPrevious()) {
+      @NotNull final Span span = iterator.previous();
+      if (!span.isFinished()) {
+        return span;
+      }
+    }
+    return null;
+  }
+
+  @Override
+  public @NotNull IchnoisCoreId getEventId() {
+    return eventId;
+  }
+
+  @ApiStatus.Internal
+  @Override
+  public @NotNull IIchnoisCoreLifecycleToken makeCurrent() {
+    scopes.configureScope(
+        (scope) -> {
+          scope.setTransaction(this);
+        });
+
+    return NoOpScopesLifecycleToken.getInstance();
+  }
+
+  @NotNull
+  Span getRoot() {
+    return root;
+  }
+
+  @TestOnly
+  @Nullable
+  Future<?> getIdleTimeoutFuture() {
+    return idleTimeoutFuture;
+  }
+
+  @TestOnly
+  @Nullable
+  Future<?> getDeadlineTimeoutFuture() {
+    return deadlineTimeoutFuture;
+  }
+
+  @TestOnly
+  boolean areTimersEnabled() {
+    return timersEnabled;
+  }
+
+  @TestOnly
+  @NotNull
+  AtomicBoolean isFinishTimerRunning() {
+    return isIdleFinishTimerRunning;
+  }
+
+  @TestOnly
+  @NotNull
+  AtomicBoolean isDeadlineTimerRunning() {
+    return isDeadlineTimerRunning;
+  }
+
+  @ApiStatus.Internal
+  @Override
+  public void setContext(final @Nullable String key, final @Nullable Object context) {
+    contexts.put(key, context);
+  }
+
+  @ApiStatus.Internal
+  @Override
+  public @NotNull Contexts getContexts() {
+    return contexts;
+  }
+
+  @Override
+  public boolean updateEndDate(final @NotNull IchnoisCoreDate date) {
+    return root.updateEndDate(date);
+  }
+
+  @Override
+  public boolean isNoOp() {
+    return false;
+  }
+
+  @Override
+  public void addFeatureFlag(final @Nullable String flag, final @Nullable Boolean result) {
+    this.root.addFeatureFlag(flag, result);
+  }
+
+  private static final class FinishStatus {
+    static final FinishStatus NOT_FINISHED = FinishStatus.notFinished();
+
+    private final boolean isFinishing;
+    private final @Nullable SpanStatus spanStatus;
+
+    static @NotNull FinishStatus finishing(final @Nullable SpanStatus finishStatus) {
+      return new FinishStatus(true, finishStatus);
+    }
+
+    private static @NotNull FinishStatus notFinished() {
+      return new FinishStatus(false, null);
+    }
+
+    private FinishStatus(final boolean isFinishing, final @Nullable SpanStatus spanStatus) {
+      this.isFinishing = isFinishing;
+      this.spanStatus = spanStatus;
+    }
+  }
+}

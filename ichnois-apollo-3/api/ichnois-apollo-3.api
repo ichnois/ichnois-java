@@ -1,0 +1,53 @@
+public final class io/ichnois/apollo3/BuildConfig {
+	public static final field ICHNOIS_APOLLO3_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApollo3ClientException : java/lang/Exception {
+	public static final field Companion Lio/ichnois/apollo3/IchnoisCoreApollo3ClientException$Companion;
+	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApollo3ClientException$Companion {
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor : com/apollographql/apollo3/network/http/HttpInterceptor {
+	public static final field Companion Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$Companion;
+	public static final field DEFAULT_CAPTURE_FAILED_REQUESTS Z
+	public static final field ICHNOIS_APOLLO_3_OPERATION_TYPE Ljava/lang/String;
+	public static final field ICHNOIS_APOLLO_3_VARIABLES Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;)V
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;Z)V
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;ZLjava/util/List;)V
+	public synthetic fun <init> (Lio/ichnois/IScopes;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;ZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun dispose ()V
+	public fun intercept (Lcom/apollographql/apollo3/api/http/HttpRequest;Lcom/apollographql/apollo3/network/http/HttpInterceptorChain;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public abstract interface class io/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback {
+	public abstract fun execute (Lio/ichnois/ISpan;Lcom/apollographql/apollo3/api/http/HttpRequest;Lcom/apollographql/apollo3/api/http/HttpResponse;)Lio/ichnois/ISpan;
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$Companion {
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApollo3Interceptor : com/apollographql/apollo3/interceptor/ApolloInterceptor {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public synthetic fun <init> (Lio/ichnois/IScopes;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun intercept (Lcom/apollographql/apollo3/api/ApolloRequest;Lcom/apollographql/apollo3/interceptor/ApolloInterceptorChain;)Lkotlinx/coroutines/flow/Flow;
+}
+
+public final class io/ichnois/apollo3/IchnoisCoreApolloBuilderExtensionsKt {
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;Lio/ichnois/IScopes;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;Lio/ichnois/IScopes;Z)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;Lio/ichnois/IScopes;ZLjava/util/List;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;Lio/ichnois/IScopes;ZLjava/util/List;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static final fun ichnoisTracing (Lcom/apollographql/apollo3/ApolloClient$Builder;ZLjava/util/List;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static synthetic fun ichnoisTracing$default (Lcom/apollographql/apollo3/ApolloClient$Builder;Lio/ichnois/IScopes;ZLjava/util/List;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;ILjava/lang/Object;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+	public static synthetic fun ichnoisTracing$default (Lcom/apollographql/apollo3/ApolloClient$Builder;ZLjava/util/List;Lio/ichnois/apollo3/IchnoisCoreApollo3HttpInterceptor$BeforeSpanCallback;ILjava/lang/Object;)Lcom/apollographql/apollo3/ApolloClient$Builder;
+}
+

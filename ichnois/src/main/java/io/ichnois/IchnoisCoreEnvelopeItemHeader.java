@@ -1,0 +1,321 @@
+package io.ichnois;
+
+import io.ichnois.util.Objects;
+import io.ichnois.vendor.gson.stream.JsonToken;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class IchnoisCoreEnvelopeItemHeader implements JsonSerializable, JsonUnknown {
+
+  private final @Nullable String contentType;
+  private final @Nullable Integer itemCount;
+  private final @Nullable String fileName;
+  private final @Nullable String platform;
+  private final @NotNull IchnoisCoreItemType type;
+  private final int length;
+  @Nullable private final Callable<Integer> getLength;
+  private final @Nullable String attachmentType;
+  @Nullable private final Callable<Integer> calculateMetaLength;
+
+  private @Nullable Map<String, Object> unknown;
+
+  public @NotNull IchnoisCoreItemType getType() {
+    return type;
+  }
+
+  public int getLength() {
+    if (getLength != null) {
+      try {
+        return getLength.call();
+      } catch (Throwable ignored) {
+        // TODO: Take ILogger via ctor or hook into internal static logger
+        return -1;
+      }
+    }
+    return length;
+  }
+
+  public @Nullable String getContentType() {
+    return contentType;
+  }
+
+  public @Nullable String getFileName() {
+    return fileName;
+  }
+
+  public @Nullable String getPlatform() {
+    return platform;
+  }
+
+  public @Nullable Integer getItemCount() {
+    return itemCount;
+  }
+
+  @Nullable
+  Integer getMetaLength() {
+    if (calculateMetaLength != null) {
+      try {
+        return calculateMetaLength.call();
+      } catch (Throwable ignored) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  private IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      int length,
+      final @Nullable Callable<Integer> getLength,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType,
+      final @Nullable String platform,
+      final @Nullable Integer itemCount,
+      final @Nullable Callable<Integer> calculateMetaLength) {
+    this.type = Objects.requireNonNull(type, "type is required");
+    this.contentType = contentType;
+    this.length = length;
+    this.fileName = fileName;
+    this.getLength = getLength;
+    this.attachmentType = attachmentType;
+    this.platform = platform;
+    this.itemCount = itemCount;
+    this.calculateMetaLength = calculateMetaLength;
+  }
+
+  /** Eager constructor used internally by {@link Deserializer#deserialize}. */
+  @ApiStatus.Internal
+  private IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      int length,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType,
+      final @Nullable String platform,
+      final @Nullable Integer itemCount,
+      final @Nullable Integer metaLength) {
+    this(
+        type,
+        length,
+        null,
+        contentType,
+        fileName,
+        attachmentType,
+        platform,
+        itemCount,
+        metaLength != null ? () -> metaLength : null);
+  }
+
+  @ApiStatus.Internal
+  public IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      int length,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType,
+      final @Nullable String platform,
+      final @Nullable Integer itemCount) {
+    this(type, length, contentType, fileName, attachmentType, platform, itemCount, null);
+  }
+
+  /**
+   * Lazy constructor. Both length and metaLength are computed lazily as these depend on the Item
+   * having been evaluated.
+   */
+  IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      final @Nullable Callable<Integer> getLength,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType,
+      final @Nullable String platform,
+      final @Nullable Integer itemCount,
+      final @Nullable Callable<Integer> calculateMetaLength) {
+    this(
+        type,
+        -1,
+        getLength,
+        contentType,
+        fileName,
+        attachmentType,
+        platform,
+        itemCount,
+        calculateMetaLength);
+  }
+
+  IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      final @Nullable Callable<Integer> getLength,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType,
+      final @Nullable String platform,
+      final @Nullable Integer itemCount) {
+    this(type, getLength, contentType, fileName, attachmentType, platform, itemCount, null);
+  }
+
+  IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      final @Nullable Callable<Integer> getLength,
+      final @Nullable String contentType,
+      final @Nullable String fileName,
+      final @Nullable String attachmentType) {
+    this(type, getLength, contentType, fileName, attachmentType, null, null);
+  }
+
+  IchnoisCoreEnvelopeItemHeader(
+      final @NotNull IchnoisCoreItemType type,
+      final @Nullable Callable<Integer> getLength,
+      final @Nullable String contentType,
+      final @Nullable String fileName) {
+    this(type, getLength, contentType, fileName, null);
+  }
+
+  /**
+   * Returns the attachmentType type
+   *
+   * @return the attachmentType
+   */
+  public @Nullable String getAttachmentType() {
+    return attachmentType;
+  }
+
+  // JsonSerializable
+
+  public static final class JsonKeys {
+    public static final String CONTENT_TYPE = "content_type";
+    public static final String FILENAME = "filename";
+    public static final String TYPE = "type";
+    public static final String ATTACHMENT_TYPE = "attachment_type";
+    public static final String LENGTH = "length";
+    public static final String PLATFORM = "platform";
+    public static final String ITEM_COUNT = "item_count";
+    public static final String META_LENGTH = "meta_length";
+  }
+
+  @Override
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
+      throws IOException {
+    writer.beginObject();
+    if (contentType != null) {
+      writer.name(JsonKeys.CONTENT_TYPE).value(contentType);
+    }
+    if (fileName != null) {
+      writer.name(JsonKeys.FILENAME).value(fileName);
+    }
+    writer.name(JsonKeys.TYPE).value(logger, type);
+    if (attachmentType != null) {
+      writer.name(JsonKeys.ATTACHMENT_TYPE).value(attachmentType);
+    }
+    if (platform != null) {
+      writer.name(JsonKeys.PLATFORM).value(platform);
+    }
+    if (itemCount != null) {
+      writer.name(JsonKeys.ITEM_COUNT).value(itemCount);
+    }
+    writer.name(JsonKeys.LENGTH).value(getLength());
+    final @Nullable Integer resolvedMetaLength = getMetaLength();
+    if (resolvedMetaLength != null) {
+      writer.name(JsonKeys.META_LENGTH).value(resolvedMetaLength);
+    }
+    if (unknown != null) {
+      for (String key : unknown.keySet()) {
+        Object value = unknown.get(key);
+        writer.name(key);
+        writer.value(logger, value);
+      }
+    }
+    writer.endObject();
+  }
+
+  public static final class Deserializer implements JsonDeserializer<IchnoisCoreEnvelopeItemHeader> {
+    @Override
+    public @NotNull IchnoisCoreEnvelopeItemHeader deserialize(
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
+      reader.beginObject();
+
+      String contentType = null;
+      String fileName = null;
+      IchnoisCoreItemType type = null;
+      int length = 0;
+      String attachmentType = null;
+      String platform = null;
+      Integer itemCount = null;
+      Integer metaLength = null;
+      Map<String, Object> unknown = null;
+
+      while (reader.peek() == JsonToken.NAME) {
+        final String nextName = reader.nextName();
+        switch (nextName) {
+          case JsonKeys.CONTENT_TYPE:
+            contentType = reader.nextStringOrNull();
+            break;
+          case JsonKeys.FILENAME:
+            fileName = reader.nextStringOrNull();
+            break;
+          case JsonKeys.TYPE:
+            type = reader.nextOrNull(logger, new IchnoisCoreItemType.Deserializer());
+            break;
+          case JsonKeys.LENGTH:
+            length = reader.nextInt();
+            break;
+          case JsonKeys.ATTACHMENT_TYPE:
+            attachmentType = reader.nextStringOrNull();
+            break;
+          case JsonKeys.PLATFORM:
+            platform = reader.nextStringOrNull();
+            break;
+          case JsonKeys.ITEM_COUNT:
+            itemCount = reader.nextIntegerOrNull();
+            break;
+          case JsonKeys.META_LENGTH:
+            metaLength = reader.nextIntegerOrNull();
+            break;
+          default:
+            if (unknown == null) {
+              unknown = new HashMap<>();
+            }
+            reader.nextUnknown(logger, unknown, nextName);
+            break;
+        }
+      }
+      if (type == null) {
+        throw missingRequiredFieldException(JsonKeys.TYPE, logger);
+      }
+      IchnoisCoreEnvelopeItemHeader ichnoisEnvelopeItemHeader =
+          new IchnoisCoreEnvelopeItemHeader(
+              type, length, contentType, fileName, attachmentType, platform, itemCount, metaLength);
+      ichnoisEnvelopeItemHeader.setUnknown(unknown);
+      reader.endObject();
+      return ichnoisEnvelopeItemHeader;
+    }
+
+    @SuppressWarnings("SameParameterValue")
+    private Exception missingRequiredFieldException(String field, ILogger logger) {
+      String message = "Missing required field \"" + field + "\"";
+      Exception exception = new IllegalStateException(message);
+      logger.log(IchnoisCoreLevel.ERROR, message, exception);
+      return exception;
+    }
+  }
+
+  // JsonUnknown
+
+  @Nullable
+  @Override
+  public Map<String, Object> getUnknown() {
+    return unknown;
+  }
+
+  @Override
+  public void setUnknown(@Nullable Map<String, Object> unknown) {
+    this.unknown = unknown;
+  }
+}

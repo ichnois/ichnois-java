@@ -1,0 +1,6 @@
+appId: io.ichnois.uitest.android.critical
+---
+- launchApp
+- tapOn: "Crash"
+- launchApp
+- assertVisible: "Welcome!"

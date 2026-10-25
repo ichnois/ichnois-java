@@ -1,0 +1,921 @@
+@file:Suppress("MaxLineLength")
+
+package io.ichnois.okhttp
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.BaggageHeader
+import io.ichnois.Breadcrumb
+import io.ichnois.DataCategory
+import io.ichnois.Hint
+import io.ichnois.HttpStatusCodeRange
+import io.ichnois.ILogger
+import io.ichnois.IScope
+import io.ichnois.IScopes
+import io.ichnois.KeyValueCollectionBehavior
+import io.ichnois.Scope
+import io.ichnois.ScopeCallback
+import io.ichnois.IchnoisCore
+import io.ichnois.IchnoisCoreLevel
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreTraceHeader
+import io.ichnois.IchnoisCoreTracer
+import io.ichnois.Span
+import io.ichnois.SpanDataConvention
+import io.ichnois.SpanStatus
+import io.ichnois.TransactionContext
+import io.ichnois.TypeCheckHint
+import io.ichnois.W3CTraceparentHeader
+import io.ichnois.clientreport.DiscardReason
+import io.ichnois.exception.IchnoisCoreHttpClientException
+import io.ichnois.mockServerRequestTimeoutMillis
+import io.ichnois.util.network.NetworkRequestData
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.fail
+import okhttp3.CacheControl
+import okhttp3.EventListener
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.check
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyNoMoreInteractions
+import org.mockito.kotlin.whenever
+
+@Suppress("LargeClass")
+class IchnoisCoreOkHttpInterceptorTest {
+  class Fixture {
+    val scopes = mock<IScopes>()
+    val server = MockWebServer()
+    lateinit var ichnoisTracer: IchnoisCoreTracer
+    lateinit var options: IchnoisCoreOptions
+    lateinit var scope: IScope
+
+    @SuppressWarnings("LongParameterList")
+    fun getSut(
+      isSpanActive: Boolean = true,
+      httpStatusCode: Int = 201,
+      responseBody: String = "success",
+      socketPolicy: SocketPolicy = SocketPolicy.KEEP_OPEN,
+      beforeSpan: IchnoisCoreOkHttpInterceptor.BeforeSpanCallback? = null,
+      includeMockServerInTracePropagationTargets: Boolean = true,
+      keepDefaultTracePropagationTargets: Boolean = false,
+      captureFailedRequests: Boolean? = false,
+      failedRequestTargets: List<String> = listOf(".*"),
+      failedRequestStatusCodes: List<HttpStatusCodeRange> =
+        listOf(
+          HttpStatusCodeRange(HttpStatusCodeRange.DEFAULT_MIN, HttpStatusCodeRange.DEFAULT_MAX)
+        ),
+      sendDefaultPii: Boolean = false,
+      eventListener: EventListener? = null,
+      additionalInterceptors: List<Interceptor> = emptyList(),
+      optionsConfiguration: IchnoisCore.OptionsConfiguration<IchnoisCoreOptions>? = null,
+    ): OkHttpClient {
+      options =
+        IchnoisCoreOptions().also {
+          optionsConfiguration?.configure(it)
+          it.dsn = "https://key@ichnois-h2jw.onrender.com/proj"
+          if (includeMockServerInTracePropagationTargets) {
+            it.setTracePropagationTargets(listOf(server.hostName))
+          } else if (!keepDefaultTracePropagationTargets) {
+            it.setTracePropagationTargets(listOf("other-api"))
+          }
+          it.isSendDefaultPii = sendDefaultPii
+        }
+      scope = Scope(options)
+      whenever(scopes.options).thenReturn(options)
+      doAnswer { (it.arguments[0] as ScopeCallback).run(scope) }
+        .whenever(scopes)
+        .configureScope(any())
+
+      ichnoisTracer = IchnoisCoreTracer(TransactionContext("name", "op"), scopes)
+
+      if (isSpanActive) {
+        whenever(scopes.span).thenReturn(ichnoisTracer)
+      }
+      server.enqueue(
+        MockResponse()
+          .setBody(responseBody)
+          .addHeader("myResponseHeader", "myValue")
+          .setSocketPolicy(socketPolicy)
+          .setResponseCode(httpStatusCode)
+      )
+
+      val interceptor =
+        when (captureFailedRequests) {
+          null ->
+            IchnoisCoreOkHttpInterceptor(
+              scopes,
+              beforeSpan,
+              failedRequestTargets = failedRequestTargets,
+              failedRequestStatusCodes = failedRequestStatusCodes,
+            )
+
+          else ->
+            IchnoisCoreOkHttpInterceptor(
+              scopes,
+              beforeSpan,
+              captureFailedRequests = captureFailedRequests,
+              failedRequestTargets = failedRequestTargets,
+              failedRequestStatusCodes = failedRequestStatusCodes,
+            )
+        }
+      return OkHttpClient.Builder()
+        .apply {
+          if (eventListener != null) {
+            eventListener(eventListener)
+          }
+          for (additionalInterceptor in additionalInterceptors) {
+            addInterceptor(additionalInterceptor)
+          }
+          addInterceptor(interceptor)
+        }
+        .build()
+    }
+  }
+
+  private val fixture = Fixture()
+
+  private fun getRequest(url: String = "/hello"): Request =
+    Request.Builder().addHeader("myHeader", "myValue").get().url(fixture.server.url(url)).build()
+
+  private val getRequestWithBaggageHeader = {
+    Request.Builder()
+      .addHeader("baggage", "thirdPartyBaggage=someValue")
+      .addHeader(
+        "baggage",
+        "secondThirdPartyBaggage=secondValue; " +
+          "property;propertyKey=propertyValue,anotherThirdPartyBaggage=anotherValue",
+      )
+      .get()
+      .url(fixture.server.url("/hello"))
+      .build()
+  }
+
+  private fun postRequest(
+    body: RequestBody = "request-body".toRequestBody("text/plain".toMediaType())
+  ): Request = Request.Builder().post(body).url(fixture.server.url("/hello")).build()
+
+  @SuppressWarnings("MaxLineLength")
+  @Test
+  fun `when there is an active span and server is listed in tracing origins, adds ichnois trace headers to the request`() {
+    val sut = fixture.getSut()
+    sut.newCall(getRequest()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @SuppressWarnings("MaxLineLength")
+  @Test
+  fun `when there is an active span and tracing origins contains default regex, adds ichnois trace headers to the request`() {
+    val sut = fixture.getSut(keepDefaultTracePropagationTargets = true)
+
+    sut.newCall(getRequest()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @SuppressWarnings("MaxLineLength")
+  @Test
+  fun `when there is an active span and server is not listed in tracing origins, does not add ichnois trace headers to the request`() {
+    val sut = fixture.getSut(includeMockServerInTracePropagationTargets = false)
+    sut.newCall(Request.Builder().get().url(fixture.server.url("/hello")).build()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @SuppressWarnings("MaxLineLength")
+  @Test
+  fun `when there is an active span and server tracing origins is empty, does not add ichnois trace headers to the request`() {
+    val sut = fixture.getSut()
+    fixture.options.setTracePropagationTargets(emptyList())
+    sut.newCall(Request.Builder().get().url(fixture.server.url("/hello")).build()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `when there is no active span, adds ichnois trace header to the request from scope`() {
+    val sut = fixture.getSut(isSpanActive = false)
+    sut.newCall(getRequest()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `does not add ichnois-trace header when span origin is ignored`() {
+    val sut =
+      fixture.getSut(isSpanActive = false) { options ->
+        options.setIgnoredSpanOrigins(listOf("auto.http.okhttp"))
+      }
+    sut.newCall(getRequest()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `when there is no active span and host if not allowed, does not add ichnois trace header to the request`() {
+    val sut = fixture.getSut(isSpanActive = false)
+    fixture.options.setTracePropagationTargets(listOf("some-host-that-does-not-exist"))
+    sut.newCall(getRequest()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+  }
+
+  @Test
+  fun `when there is an active span, existing baggage headers are merged with ichnois baggage into single header`() {
+    val sut = fixture.getSut()
+    sut.newCall(getRequestWithBaggageHeader()).execute()
+    val recorderRequest =
+      fixture.server.takeRequest(mockServerRequestTimeoutMillis, TimeUnit.MILLISECONDS)!!
+    assertNotNull(recorderRequest.headers[IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER])
+    assertNotNull(recorderRequest.headers[BaggageHeader.BAGGAGE_HEADER])
+
+    val baggageHeaderValues = recorderRequest.headers.values(BaggageHeader.BAGGAGE_HEADER)
+    assertEquals(baggageHeaderValues.size, 1)
+    assertTrue(
+      baggageHeaderValues[0].startsWith(
+        "thirdPartyBaggage=someValue," +
+          "secondThirdPartyBaggage=secondValue; " +
+          "property;propertyKey=propertyValue," +
+          "anotherThirdPartyBaggage=anotherValue"
+      )
+    )
+    assertTrue(baggageHeaderValues[0].contains("ichnois-public_key=key"))
+    assertTrue(baggageHeaderValues[0].contains("ichnois-transaction=name"))
+    assertTrue(baggageHeaderValues[0].contains("ichnois-trace_id"))
+  }
+
+  @Test
+  fun `does not overwrite response body`() {
+    val sut = fixture.getSut()
+    val response = sut.newCall(getRequest()).execute()
+    assertEquals("success", response.body?.string())
+  }
+
+  @Test
+  fun `creates a span around the request`() {
+    val sut = fixture.getSut()
+    val request = getRequest()
+    sut.newCall(request).execute()
+    assertEquals(1, fixture.ichnoisTracer.children.size)
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertEquals("http.client", httpClientSpan.operation)
+    assertEquals("GET ${request.url}", httpClientSpan.description)
+    assertEquals(201, httpClientSpan.data[SpanDataConvention.HTTP_STATUS_CODE_KEY])
+    assertEquals("auto.http.okhttp", httpClientSpan.spanContext.origin)
+    assertEquals(SpanStatus.OK, httpClientSpan.status)
+    assertTrue(httpClientSpan.isFinished)
+  }
+
+  @Test
+  fun `does not create a span when span origin is ignored`() {
+    val sut = fixture.getSut { options ->
+      options.setIgnoredSpanOrigins(listOf("auto.http.okhttp"))
+    }
+    sut.newCall(getRequest()).execute()
+    assertEquals(0, fixture.ichnoisTracer.children.size)
+  }
+
+  @Test
+  fun `maps http status code to SpanStatus`() {
+    val sut = fixture.getSut(httpStatusCode = 400)
+    sut.newCall(getRequest()).execute()
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertEquals(400, httpClientSpan.data[SpanDataConvention.HTTP_STATUS_CODE_KEY])
+    assertEquals(SpanStatus.INVALID_ARGUMENT, httpClientSpan.status)
+  }
+
+  @Test
+  fun `does not map unmapped http status code to SpanStatus`() {
+    val sut = fixture.getSut(httpStatusCode = 502)
+    sut.newCall(getRequest()).execute()
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertEquals(502, httpClientSpan.data[SpanDataConvention.HTTP_STATUS_CODE_KEY])
+    assertNull(httpClientSpan.status)
+  }
+
+  @Test
+  fun `adds breadcrumb when http calls succeeds`() {
+    val sut = fixture.getSut(responseBody = "response body")
+    sut.newCall(postRequest()).execute()
+    verify(fixture.scopes)
+      .addBreadcrumb(
+        check<Breadcrumb> {
+          assertEquals("http", it.type)
+          assertEquals(13L, it.data[SpanDataConvention.HTTP_RESPONSE_CONTENT_LENGTH_KEY])
+          assertEquals(12L, it.data["http.request_content_length"])
+        },
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `data collection settings do not affect Session Replay network details`() {
+    val sut =
+      fixture.getSut(
+        optionsConfiguration = {
+          it.dataCollection.httpBodies = emptySet()
+          it.dataCollection.httpHeaders.request = KeyValueCollectionBehavior.off()
+          it.dataCollection.httpHeaders.response = KeyValueCollectionBehavior.off()
+          it.sessionReplay.setNetworkDetailAllowUrls(listOf(".*"))
+        }
+      )
+
+    val request = postRequest().newBuilder().addHeader("Accept", "application/json").build()
+    sut.newCall(request).execute()
+
+    val hint = argumentCaptor<Hint>()
+    verify(fixture.scopes).addBreadcrumb(any(), hint.capture())
+    val networkDetails =
+      assertNotNull(
+        hint.firstValue.getAs(
+          TypeCheckHint.ICHNOIS_REPLAY_NETWORK_DETAILS,
+          NetworkRequestData::class.java,
+        )
+      )
+    assertEquals("request-body", networkDetails.request?.body?.body)
+    assertEquals("application/json", networkDetails.request?.headers?.get("Accept"))
+    assertNotNull(networkDetails.response)
+  }
+
+  @SuppressWarnings("SwallowedException")
+  @Test
+  fun `adds breadcrumb when http calls results in exception`() {
+    // to setup mocks
+    fixture.getSut()
+    val interceptor = IchnoisCoreOkHttpInterceptor(fixture.scopes)
+    val chain = mock<Interceptor.Chain>()
+    whenever(chain.call()).thenReturn(mock())
+    whenever(chain.proceed(any())).thenThrow(IOException())
+    whenever(chain.request()).thenReturn(getRequest())
+
+    try {
+      interceptor.intercept(chain)
+      fail()
+    } catch (e: IOException) {
+      // ignore me
+    }
+    verify(fixture.scopes)
+      .addBreadcrumb(check<Breadcrumb> { assertEquals("http", it.type) }, anyOrNull())
+  }
+
+  @SuppressWarnings("SwallowedException")
+  @Test
+  fun `sets status and throwable when call results in IOException`() {
+    val sut = fixture.getSut(socketPolicy = SocketPolicy.DISCONNECT_AT_START)
+    try {
+      sut.newCall(getRequest()).execute()
+      fail()
+    } catch (e: IOException) {
+      // ignore
+    }
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertNull(httpClientSpan.data[SpanDataConvention.HTTP_STATUS_CODE_KEY])
+    assertEquals(SpanStatus.INTERNAL_ERROR, httpClientSpan.status)
+    assertTrue(httpClientSpan.throwable is IOException)
+  }
+
+  @Test
+  fun `customizer modifies span`() {
+    val sut =
+      fixture.getSut(
+        beforeSpan = { span, _, _ ->
+          span.description = "overwritten description"
+          span
+        }
+      )
+    val request = getRequest()
+    sut.newCall(request).execute()
+    assertEquals(1, fixture.ichnoisTracer.children.size)
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertEquals("overwritten description", httpClientSpan.description)
+    assertTrue(httpClientSpan.isFinished)
+  }
+
+  @Test
+  fun `customizer receives request and response`() {
+    val sut =
+      fixture.getSut(
+        beforeSpan = { span, request, response ->
+          assertEquals(request.url, request.url)
+          assertEquals(request.method, request.method)
+          assertNotNull(response) { assertEquals(201, it.code) }
+          span
+        }
+      )
+    val request = getRequest()
+    sut.newCall(request).execute()
+  }
+
+  @Test
+  fun `customizer can drop the span`() {
+    val sut = fixture.getSut(beforeSpan = { _, _, _ -> null })
+    val onDiscard = mock<IchnoisCoreOptions.OnDiscardCallback>()
+    fixture.options.onDiscard = onDiscard
+    fixture.ichnoisTracer.spanContext.sampled = true
+    sut.newCall(getRequest()).execute()
+    verifyNoMoreInteractions(onDiscard)
+    val httpClientSpan = fixture.ichnoisTracer.children.first()
+    assertTrue(httpClientSpan.isFinished)
+    assertNotNull(httpClientSpan.spanContext.sampled) { assertFalse(it) }
+  }
+
+  @Test
+  fun `reports callback errors only for sampled spans`() {
+    for (sampled in listOf(true, false, null)) {
+      val fixture = Fixture()
+      val onDiscard = mock<IchnoisCoreOptions.OnDiscardCallback>()
+      val sut =
+        fixture.getSut(
+          beforeSpan = { span, _, _ ->
+            span.spanContext.sampled = false
+            error("callback failed")
+          }
+        )
+      fixture.ichnoisTracer.spanContext.sampled = sampled
+      fixture.options.onDiscard = onDiscard
+
+      sut.newCall(Request.Builder().url(fixture.server.url("/hello")).build()).execute().close()
+      fixture.ichnoisTracer.finish()
+
+      if (sampled == true) {
+        verify(onDiscard).execute(DiscardReason.CALLBACK_ERROR, DataCategory.Span, 1)
+      }
+      verifyNoMoreInteractions(onDiscard)
+    }
+  }
+
+  @Test
+  fun `when beforeSpan throws a nonfatal throwable, drops span and preserves response`() {
+    val failure = AssertionError("callback failed")
+    val logger = mock<ILogger>()
+    val sut =
+      fixture.getSut(
+        beforeSpan = { span, _, _ ->
+          span.description = "partially modified"
+          throw failure
+        }
+      )
+    fixture.options.isDebug = true
+    fixture.options.setLogger(logger)
+
+    sut.newCall(getRequest()).execute().use { response ->
+      assertThat(response.code).isEqualTo(201)
+      assertThat(response.body!!.string()).isEqualTo("success")
+    }
+    val span = fixture.ichnoisTracer.children.single()
+    assertThat(span.isSampled).isFalse()
+    assertThat(span.isFinished).isTrue()
+    verify(fixture.scopes).addBreadcrumb(any<Breadcrumb>(), anyOrNull())
+    verify(logger)
+      .log(
+        IchnoisCoreLevel.ERROR,
+        "The beforeSpan callback threw an exception in IchnoisCoreOkHttpInterceptor. Dropping span.",
+        failure,
+      )
+  }
+
+  @Test
+  fun `fatal error from beforeSpan is not swallowed`() {
+    val failure = OutOfMemoryError("callback failed")
+    val sut = fixture.getSut(beforeSpan = { _, _, _ -> throw failure })
+
+    val thrown = assertFailsWith<OutOfMemoryError> { sut.newCall(getRequest()).execute() }
+
+    assertThat(thrown).isSameInstanceAs(failure)
+  }
+
+  @Test
+  fun `when beforeSpan throws, event listener still finishes span`() {
+    val sut =
+      fixture.getSut(
+        beforeSpan = { _, _, _ -> throw IllegalStateException("callback failed") },
+        eventListener = IchnoisCoreOkHttpEventListener(fixture.scopes),
+      )
+    val call = sut.newCall(getRequest())
+    call.execute().use { response ->
+      assertThat(response.code).isEqualTo(201)
+      assertThat(IchnoisCoreOkHttpEventListener.eventMap[call]!!.isEventFinished.get()).isTrue()
+    }
+    val span = fixture.ichnoisTracer.children.first { it.operation == "http.client" }
+    assertThat(span.isSampled).isFalse()
+    assertThat(span.isFinished).isTrue()
+    assertThat(IchnoisCoreOkHttpEventListener.eventMap).doesNotContainKey(call)
+  }
+
+  @Test
+  fun `when beforeSpan throws, preserves original request exception`() {
+    val requestFailure = IOException("request failed")
+    val sut =
+      fixture
+        .getSut(
+          beforeSpan = { _, _, _ ->
+            throw IllegalStateException("callback failed")
+          }
+        )
+        .newBuilder()
+        .addInterceptor { throw requestFailure }
+        .build()
+
+    val thrown = assertFailsWith<IOException> { sut.newCall(getRequest()).execute() }
+    assertThat(thrown).isSameInstanceAs(requestFailure)
+    val span = fixture.ichnoisTracer.children.single()
+    assertThat(span.throwable).isSameInstanceAs(requestFailure)
+    assertThat(span.isSampled).isFalse()
+    assertThat(span.isFinished).isTrue()
+  }
+
+  @Test
+  fun `captures failed requests by default`() {
+    val sut = fixture.getSut(httpStatusCode = 500, captureFailedRequests = null)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `captures an event if captureFailedRequests is enabled and within the range`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 500)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `does not capture an event if captureFailedRequests is disabled`() {
+    val sut = fixture.getSut(httpStatusCode = 500)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `does not capture an event if captureFailedRequests is enabled and not within the range`() {
+    // default status code 201
+    val sut = fixture.getSut(captureFailedRequests = true)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `does not capture an event if captureFailedRequests is enabled and not within the targets`() {
+    val sut =
+      fixture.getSut(
+        captureFailedRequests = true,
+        httpStatusCode = 500,
+        failedRequestTargets = listOf("myapi.com"),
+      )
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `captures an error event with hints`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 500)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes)
+      .captureEvent(
+        any(),
+        check<Hint> {
+          assertNotNull(it.get(TypeCheckHint.OKHTTP_REQUEST))
+          assertNotNull(it.get(TypeCheckHint.OKHTTP_RESPONSE))
+        },
+      )
+  }
+
+  @Test
+  fun `captures an error event with request and response fields set`() {
+    val statusCode = 500
+    val sut =
+      fixture.getSut(
+        captureFailedRequests = true,
+        httpStatusCode = statusCode,
+        responseBody = "fail",
+        sendDefaultPii = true,
+      )
+
+    val request = getRequest(url = "/hello?myQuery=myValue#myFragment")
+    val response = sut.newCall(request).execute()
+
+    verify(fixture.scopes)
+      .captureEvent(
+        check {
+          val ichnoisRequest = it.request!!
+          assertEquals("http://localhost:${fixture.server.port}/hello", ichnoisRequest.url)
+          assertEquals("myQuery=myValue", ichnoisRequest.queryString)
+          assertEquals("myFragment", ichnoisRequest.fragment)
+          assertEquals("GET", ichnoisRequest.method)
+
+          // because of isSendDefaultPii
+          assertNotNull(ichnoisRequest.headers)
+          assertNull(ichnoisRequest.cookies)
+
+          val ichnoisResponse = it.contexts.response!!
+          assertEquals(statusCode, ichnoisResponse.statusCode)
+          assertEquals(response.body!!.contentLength(), ichnoisResponse.bodySize)
+
+          // because of isSendDefaultPii
+          assertNotNull(ichnoisResponse.headers)
+          assertNull(ichnoisResponse.cookies)
+
+          assertTrue(it.throwable is IchnoisCoreHttpClientException)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection filters failed request query parameters`() {
+    val sut =
+      fixture.getSut(
+        captureFailedRequests = true,
+        httpStatusCode = 500,
+        optionsConfiguration = { it.dataCollection.setUserInfo(false) },
+      )
+
+    sut.newCall(getRequest(url = "/hello?name=value&token=secret")).execute()
+
+    verify(fixture.scopes)
+      .captureEvent(
+        check {
+          assertEquals("name=value&token=[Filtered]", it.request!!.queryString)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `captures an error event with request body size`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 500)
+
+    val body = "fail".toRequestBody("text/plain".toMediaType())
+
+    sut.newCall(postRequest(body = body)).execute()
+
+    verify(fixture.scopes)
+      .captureEvent(
+        check {
+          val ichnoisRequest = it.request!!
+          assertEquals(body.contentLength(), ichnoisRequest.bodySize)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `captures an error event with headers`() {
+    val sut =
+      fixture.getSut(captureFailedRequests = true, httpStatusCode = 500, sendDefaultPii = true)
+
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes)
+      .captureEvent(
+        check {
+          val ichnoisRequest = it.request!!
+          assertEquals("myValue", ichnoisRequest.headers!!["myHeader"])
+
+          val ichnoisResponse = it.contexts.response!!
+          assertEquals("myValue", ichnoisResponse.headers!!["myResponseHeader"])
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `does not capture a synthetic 504 from OkHttp for a FORCE_CACHE cache miss`() {
+    // No cache is configured on the client, so FORCE_CACHE is guaranteed to miss and
+    // OkHttp's CacheInterceptor will synthesize a 504 "Unsatisfiable Request" response.
+    val sut = fixture.getSut(captureFailedRequests = true)
+    val request =
+      Request.Builder()
+        .url(fixture.server.url("/hello"))
+        .cacheControl(CacheControl.FORCE_CACHE)
+        .build()
+    val response = sut.newCall(request).execute()
+
+    assertEquals(504, response.code)
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `captures a real 504 when onlyIfCached is not set`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 504)
+    sut.newCall(getRequest()).execute()
+
+    verify(fixture.scopes).captureEvent(any(), any<Hint>())
+  }
+
+  @SuppressWarnings("SwallowedException")
+  @Test
+  fun `does not capture an error even if it throws`() {
+    // to setup mocks
+    fixture.getSut()
+    val interceptor = IchnoisCoreOkHttpInterceptor(fixture.scopes, captureFailedRequests = true)
+    val chain = mock<Interceptor.Chain>()
+    whenever(chain.call()).thenReturn(mock())
+    whenever(chain.proceed(any())).thenThrow(IOException())
+    whenever(chain.request()).thenReturn(getRequest())
+
+    try {
+      interceptor.intercept(chain)
+      fail()
+    } catch (e: IOException) {
+      // ignore me
+    }
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `when a call is captured by IchnoisCoreOkHttpEventListener no span nor breadcrumb is created`() {
+    val sut = fixture.getSut(responseBody = "response body")
+    val call = sut.newCall(postRequest())
+    IchnoisCoreOkHttpEventListener.eventMap[call] = mock()
+    call.execute()
+    val httpClientSpan = fixture.ichnoisTracer.children.firstOrNull()
+    assertNull(httpClientSpan)
+    verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>(), anyOrNull())
+  }
+
+  @Test
+  fun `when a call is not captured by IchnoisCoreOkHttpEventListener, client error is reported`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 500)
+    val call = sut.newCall(getRequest())
+    call.execute()
+    verify(fixture.scopes).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `when a call is captured by IchnoisCoreOkHttpEventListener no client error is reported`() {
+    val sut = fixture.getSut(captureFailedRequests = true, httpStatusCode = 500)
+    val call = sut.newCall(getRequest())
+    IchnoisCoreOkHttpEventListener.eventMap[call] = mock()
+    call.execute()
+    verify(fixture.scopes, never()).captureEvent(any(), any<Hint>())
+  }
+
+  @Test
+  fun `when a call is captured by IchnoisCoreOkHttpEventListener, interceptor finishes event`() {
+    val sut = fixture.getSut()
+    val call = sut.newCall(getRequest())
+    val event = mock<IchnoisCoreOkHttpEvent>()
+    val span = Span(mock(), fixture.ichnoisTracer, fixture.scopes, mock())
+    whenever(event.callSpan).thenReturn(span)
+    IchnoisCoreOkHttpEventListener.eventMap[call] = event
+    call.execute()
+    verify(event).finish()
+  }
+
+  @Test
+  fun `when an interceptor changes the request, the event is updated correctly`() {
+    val client =
+      fixture.getSut(
+        eventListener = IchnoisCoreOkHttpEventListener(fixture.scopes),
+        additionalInterceptors =
+          listOf(
+            object : Interceptor {
+              override fun intercept(chain: Interceptor.Chain): Response =
+                chain.proceed(
+                  chain
+                    .request()
+                    .newBuilder()
+                    .url(chain.request().url.newBuilder().addPathSegment("v1").build())
+                    .build()
+                )
+            }
+          ),
+      )
+
+    val request = getRequest("/hello/")
+    val call = client.newCall(request)
+    call.execute()
+
+    val okHttpEvent = IchnoisCoreOkHttpEventListener.eventMap[call]!!
+    assertEquals(
+      fixture.server.url("/hello/v1").toUrl().toString(),
+      okHttpEvent.callSpan!!.getData("url"),
+    )
+  }
+
+  @Test
+  fun `when no active http span still finalizes okHttpEvent`() {
+    val client =
+      fixture.getSut(
+        isSpanActive = false,
+        eventListener = IchnoisCoreOkHttpEventListener(fixture.scopes),
+      )
+    val request = getRequest("/hello/")
+    val call = client.newCall(request)
+    call.execute()
+
+    val okHttpEvent = IchnoisCoreOkHttpEventListener.eventMap[call]!!
+    assertTrue(okHttpEvent.isEventFinished.get())
+  }
+
+  @Test
+  fun `adds W3C traceparent header when propagateTraceparent is enabled`() {
+    val client =
+      fixture.getSut(
+        optionsConfiguration = IchnoisCore.OptionsConfiguration { it.isPropagateTraceparent = true }
+      )
+
+    fixture.server.enqueue(MockResponse().setResponseCode(200))
+
+    val request = getRequest("/test")
+    client.newCall(request).execute()
+
+    val recordedRequest = fixture.server.takeRequest()
+    assertNotNull(recordedRequest.getHeader(IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER))
+    assertNotNull(recordedRequest.getHeader(W3CTraceparentHeader.TRACEPARENT_HEADER))
+  }
+
+  @Test
+  fun `does not add W3C traceparent header when propagateTraceparent is disabled`() {
+    val client =
+      fixture.getSut(
+        optionsConfiguration = IchnoisCore.OptionsConfiguration { it.isPropagateTraceparent = false }
+      )
+
+    fixture.server.enqueue(MockResponse().setResponseCode(200))
+
+    val request = getRequest("/test")
+    client.newCall(request).execute()
+
+    val recordedRequest = fixture.server.takeRequest()
+    assertNotNull(recordedRequest.getHeader(IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER))
+    assertNull(recordedRequest.getHeader(W3CTraceparentHeader.TRACEPARENT_HEADER))
+  }
+
+  @Test
+  fun `toMap handles duplicate headers correctly`() {
+    // Create a response with duplicate headers
+    val mockResponse =
+      MockResponse()
+        .setResponseCode(200)
+        .setBody("test")
+        .addHeader("Set-Cookie", "sessionId=123")
+        .addHeader("Set-Cookie", "userId=456")
+        .addHeader("Set-Cookie", "theme=dark")
+        .addHeader("Accept", "text/html")
+        .addHeader("Accept", "application/json")
+        .addHeader("Single-Header", "value")
+
+    fixture.server.enqueue(mockResponse)
+
+    // Execute request to get response with headers
+    val sut = fixture.getSut()
+    val response = sut.newCall(getRequest()).execute()
+    val headers = response.headers
+
+    // Optional: verify OkHttp preserves duplicate headers
+    assertEquals(3, headers.values("Set-Cookie").size)
+    assertEquals(2, headers.values("Accept").size)
+    assertEquals(1, headers.values("Single-Header").size)
+
+    val interceptor = IchnoisCoreOkHttpInterceptor(fixture.scopes)
+    val headerMap = with(interceptor) { headers.toMap() }
+
+    // Duplicate headers will be collapsed into 1 concatenated entry with "; " separator
+    assertEquals("sessionId=123; userId=456; theme=dark", headerMap["Set-Cookie"])
+    assertEquals("text/html; application/json", headerMap["Accept"])
+    assertEquals("value", headerMap["Single-Header"])
+  }
+}

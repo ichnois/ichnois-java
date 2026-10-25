@@ -1,0 +1,43 @@
+package io.ichnois.android.core
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.ILogger
+import io.ichnois.PerformanceCollectionData
+import io.ichnois.test.getCtor
+import kotlin.test.Test
+import kotlin.test.assertFailsWith
+import org.mockito.kotlin.mock
+
+class AndroidCpuCollectorTest {
+  private val className = "io.ichnois.android.core.AndroidCpuCollector"
+  private val ctorTypes = arrayOf<Class<*>>(ILogger::class.java)
+  private val fixture = Fixture()
+
+  private class Fixture {
+    fun getSut() = AndroidCpuCollector(mock())
+  }
+
+  @Test
+  fun `when null param is provided, invalid argument is thrown`() {
+    val ctor = className.getCtor(ctorTypes)
+
+    assertFailsWith<IllegalArgumentException> { ctor.newInstance(arrayOf(mock<ILogger>())) }
+  }
+
+  @Test
+  fun `collect works only after setup`() {
+    val data = PerformanceCollectionData(10)
+    fixture.getSut().collect(data)
+    assertThat(data.hasCpuUsagePercentage()).isFalse()
+  }
+
+  @Test
+  fun `when collect cpu is collected`() {
+    val data = PerformanceCollectionData(10)
+    val collector = fixture.getSut()
+    collector.setup()
+    collector.collect(data)
+    assertThat(data.hasCpuUsagePercentage()).isTrue()
+    assertThat(data.cpuUsagePercentage).isNotEqualTo(0.0)
+  }
+}

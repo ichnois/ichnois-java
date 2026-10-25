@@ -1,0 +1,409 @@
+package io.ichnois.android.core;
+
+import static io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_COLD;
+import static io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_SCREEN_DATA;
+import static io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_TYPE_DATA;
+import static io.ichnois.android.core.ActivityLifecycleIntegration.APP_START_WARM;
+import static io.ichnois.android.core.ActivityLifecycleIntegration.STANDALONE_APP_START_OP;
+import static io.ichnois.android.core.ActivityLifecycleIntegration.UI_LOAD_OP;
+
+import io.ichnois.Hint;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.MeasurementUnit;
+import io.ichnois.IchnoisCoreDate;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.SpanContext;
+import io.ichnois.SpanDataConvention;
+import io.ichnois.SpanId;
+import io.ichnois.SpanStatus;
+import io.ichnois.android.core.internal.util.AndroidThreadChecker;
+import io.ichnois.android.core.performance.AppStartMetrics;
+import io.ichnois.android.core.performance.TimeSpan;
+import io.ichnois.internal.eventprocessor.IchnoisCoreEventProcessor;
+import io.ichnois.protocol.App;
+import io.ichnois.protocol.MeasurementValue;
+import io.ichnois.protocol.IchnoisCoreId;
+import io.ichnois.protocol.IchnoisCoreSpan;
+import io.ichnois.protocol.IchnoisCoreTransaction;
+import io.ichnois.util.AutoClosableReentrantLock;
+import io.ichnois.util.Objects;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+/** Event Processor responsible for adding Android metrics to transactions */
+final class PerformanceAndroidEventProcessor implements IchnoisCoreEventProcessor {
+
+  private static final String APP_METRICS_ORIGIN = "auto.ui";
+
+  private static final String APP_METRICS_CONTENT_PROVIDER_OP = "contentprovider.load";
+  private static final String APP_METRICS_ACTIVITIES_OP = "activity.load";
+  private static final String APP_METRICS_APPLICATION_OP = "application.load";
+  private static final String APP_METRICS_PROCESS_INIT_OP = "process.load";
+  private static final long MAX_PROCESS_INIT_APP_START_DIFF_MS = 10000;
+
+  private boolean sentStartMeasurement = false;
+
+  private final @NotNull ActivityFramesTracker activityFramesTracker;
+  private final @NotNull IchnoisCoreAndroidOptions options;
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  PerformanceAndroidEventProcessor(
+      final @NotNull IchnoisCoreAndroidOptions options,
+      final @NotNull ActivityFramesTracker activityFramesTracker) {
+    this.options = Objects.requireNonNull(options, "IchnoisCoreAndroidOptions is required");
+    this.activityFramesTracker =
+        Objects.requireNonNull(activityFramesTracker, "ActivityFramesTracker is required");
+  }
+
+  /**
+   * Returns the event itself
+   *
+   * @param event the IchnoisCoreEvent the IchnoisCoreEvent
+   * @param hint the Hint the Hint
+   * @return returns the event itself
+   */
+  @Override
+  @Nullable
+  public IchnoisCoreEvent process(@NotNull IchnoisCoreEvent event, @NotNull Hint hint) {
+    // that's only necessary because on newer versions of Unity, if not overriding this method, it's
+    // throwing 'java.lang.AbstractMethodError: abstract method' and the reason is probably
+    // compilation mismatch.
+    return event;
+  }
+
+  @SuppressWarnings("NullAway")
+  @Override
+  public @NotNull IchnoisCoreTransaction process(
+      @NotNull IchnoisCoreTransaction transaction, @NotNull Hint hint) {
+    try (final @NotNull IIchnoisCoreLifecycleToken ignored = lock.acquire()) {
+      if (!options.isTracingEnabled()) {
+        return transaction;
+      }
+
+      final @NotNull AppStartMetrics appStartMetrics = AppStartMetrics.getInstance();
+      // The app start type can flip (e.g. the last activity being destroyed marks the next start
+      // as warm) while this runs on the timer thread that finished the transaction. Read it once so
+      // the measurement key, contexts.app and the span attributes below cannot disagree.
+      final @NotNull AppStartMetrics.AppStartType appStartType = appStartMetrics.getAppStartType();
+      // the app start measurement is only sent once and only if the transaction has
+      // the app.start span, which is automatically created by the SDK.
+      if (hasAppStartSpan(transaction)) {
+        // For headless starts, appLaunchedInForeground is false, so only headless standalone app
+        // start transactions bypass the foreground check, not the duplicate-send guard.
+        final @Nullable SpanContext traceContext = transaction.getContexts().getTrace();
+        final boolean isStandaloneAppStartTxn =
+            traceContext != null && STANDALONE_APP_START_OP.equals(traceContext.getOperation());
+        final boolean isHeadlessStandaloneAppStartTxn =
+            traceContext != null
+                && isStandaloneAppStartTxn
+                && !traceContext.getData().containsKey(APP_START_SCREEN_DATA);
+
+        if (appStartMetrics.shouldSendStartMeasurements(isHeadlessStandaloneAppStartTxn)) {
+          final @NotNull TimeSpan appStartTimeSpan =
+              isHeadlessStandaloneAppStartTxn
+                  ? appStartMetrics.getAppStartTimeSpanForHeadless()
+                  : appStartMetrics.getAppStartTimeSpanWithFallback(options);
+          final long naturalDurationMs = appStartTimeSpan.getDurationMs();
+
+          final long appStartUpDurationMs;
+          final boolean shouldAttachAppStartSpans;
+          final boolean reportAppStartMeasurement;
+          final @NotNull AppStartExtension extension = appStartMetrics.getAppStartExtension();
+          if (extension.isExtended()) {
+            final @Nullable IchnoisCoreDate extendedEnd = extension.getExtendedEndTime();
+            if (extendedEnd != null && appStartTimeSpan.hasStarted()) {
+              // Measure to the extended end, but never shorter than the natural first-frame
+              // duration.
+              final long extendedDurationMs =
+                  TimeUnit.NANOSECONDS.toMillis(extendedEnd.nanoTimestamp())
+                      - appStartTimeSpan.getStartTimestampMs();
+              appStartUpDurationMs = Math.max(naturalDurationMs, extendedDurationMs);
+              shouldAttachAppStartSpans = appStartUpDurationMs != 0;
+              reportAppStartMeasurement = shouldAttachAppStartSpans;
+            } else {
+              // Deadline (null) or no valid start: attach the spans but suppress the measurement so
+              // it isn't inflated.
+              appStartUpDurationMs = 0;
+              shouldAttachAppStartSpans = appStartTimeSpan.hasStarted();
+              reportAppStartMeasurement = false;
+            }
+          } else {
+            appStartUpDurationMs = naturalDurationMs;
+            shouldAttachAppStartSpans = appStartUpDurationMs != 0;
+            reportAppStartMeasurement = shouldAttachAppStartSpans;
+          }
+
+          if (shouldAttachAppStartSpans) {
+            if (reportAppStartMeasurement) {
+              final MeasurementValue value =
+                  new MeasurementValue(
+                      (float) appStartUpDurationMs, MeasurementUnit.Duration.MILLISECOND.apiName());
+
+              final String appStartKey =
+                  appStartType == AppStartMetrics.AppStartType.COLD
+                      ? MeasurementValue.KEY_APP_START_COLD
+                      : MeasurementValue.KEY_APP_START_WARM;
+
+              transaction.getMeasurements().put(appStartKey, value);
+            }
+
+            attachAppStartSpans(appStartMetrics, appStartType, transaction);
+            appStartMetrics.onAppStartSpansSent();
+          }
+        }
+
+        @Nullable App appContext = transaction.getContexts().getApp();
+        if (appContext == null) {
+          appContext = new App();
+          transaction.getContexts().setApp(appContext);
+        }
+        final String appStartTypeName =
+            appStartType == AppStartMetrics.AppStartType.COLD ? "cold" : "warm";
+        appContext.setStartType(appStartTypeName);
+
+        if (isStandaloneAppStartTxn) {
+          setAppStartVitals(transaction, appStartTypeName);
+        }
+      }
+
+      setContributingFlags(transaction);
+
+      final IchnoisCoreId eventId = transaction.getEventId();
+      final SpanContext spanContext = transaction.getContexts().getTrace();
+
+      // only add slow/frozen frames to transactions created by ActivityLifecycleIntegration
+      // which have the operation UI_LOAD_OP. If a user-defined (or hybrid SDK) transaction
+      // users it, we'll also add the metrics if available
+      if (eventId != null
+          && spanContext != null
+          && spanContext.getOperation().contentEquals(UI_LOAD_OP)) {
+        final Map<String, @NotNull MeasurementValue> framesMetrics =
+            activityFramesTracker.takeMetrics(eventId);
+        if (framesMetrics != null) {
+          transaction.getMeasurements().putAll(framesMetrics);
+        }
+      }
+
+      return transaction;
+    }
+  }
+
+  private static void setAppStartVitals(
+      final @NotNull IchnoisCoreTransaction transaction, final @NotNull String appStartType) {
+    final @Nullable SpanContext traceContext = transaction.getContexts().getTrace();
+    if (traceContext == null) {
+      return;
+    }
+
+    traceContext.setData(APP_START_TYPE_DATA, appStartType);
+    final @Nullable Object screen = traceContext.getData().get(APP_START_SCREEN_DATA);
+
+    for (final @NotNull IchnoisCoreSpan span : transaction.getSpans()) {
+      @Nullable Map<String, Object> data = span.getData();
+      if (data == null) {
+        data = new ConcurrentHashMap<>();
+        span.setData(data);
+      }
+      data.put(APP_START_TYPE_DATA, appStartType);
+      if (screen != null) {
+        data.put(APP_START_SCREEN_DATA, screen);
+      }
+    }
+  }
+
+  private void setContributingFlags(IchnoisCoreTransaction transaction) {
+
+    @Nullable IchnoisCoreSpan ttidSpan = null;
+    @Nullable IchnoisCoreSpan ttfdSpan = null;
+    for (final @NotNull IchnoisCoreSpan span : transaction.getSpans()) {
+      if (ActivityLifecycleIntegration.TTID_OP.equals(span.getOp())) {
+        ttidSpan = span;
+      } else if (ActivityLifecycleIntegration.TTFD_OP.equals(span.getOp())) {
+        ttfdSpan = span;
+      }
+      // once both are found we can early exit
+      if (ttidSpan != null && ttfdSpan != null) {
+        break;
+      }
+    }
+
+    if (ttidSpan == null && ttfdSpan == null) {
+      return;
+    }
+
+    for (final @NotNull IchnoisCoreSpan span : transaction.getSpans()) {
+      // as ttid and ttfd spans are artificially created, we don't want to set the flags on them
+      if (span == ttidSpan || span == ttfdSpan) {
+        continue;
+      }
+
+      // let's assume main thread, unless it's set differently
+      boolean spanOnMainThread = true;
+      final @Nullable Map<String, Object> spanData = span.getData();
+      if (spanData != null) {
+        final @Nullable Object threadName = spanData.get(SpanDataConvention.THREAD_NAME);
+        spanOnMainThread = threadName == null || "main".equals(threadName);
+      }
+
+      // for ttid, only main thread spans are relevant
+      final boolean withinTtid =
+          (ttidSpan != null)
+              && isTimestampWithinSpan(span.getStartTimestamp(), ttidSpan)
+              && spanOnMainThread;
+
+      final boolean withinTtfd =
+          (ttfdSpan != null) && isTimestampWithinSpan(span.getStartTimestamp(), ttfdSpan);
+
+      if (withinTtid || withinTtfd) {
+        @Nullable Map<String, Object> data = span.getData();
+        if (data == null) {
+          data = new ConcurrentHashMap<>();
+          span.setData(data);
+        }
+        if (withinTtid) {
+          data.put(SpanDataConvention.CONTRIBUTES_TTID, true);
+        }
+        if (withinTtfd) {
+          data.put(SpanDataConvention.CONTRIBUTES_TTFD, true);
+        }
+      }
+    }
+  }
+
+  private static boolean isTimestampWithinSpan(
+      final double timestamp, final @NotNull IchnoisCoreSpan target) {
+    return timestamp >= target.getStartTimestamp()
+        && (target.getTimestamp() == null || timestamp <= target.getTimestamp());
+  }
+
+  private boolean hasAppStartSpan(final @NotNull IchnoisCoreTransaction txn) {
+    final @NotNull List<IchnoisCoreSpan> spans = txn.getSpans();
+    for (final @NotNull IchnoisCoreSpan span : spans) {
+      if (span.getOp().contentEquals(APP_START_COLD)
+          || span.getOp().contentEquals(APP_START_WARM)) {
+        return true;
+      }
+    }
+
+    final @Nullable SpanContext context = txn.getContexts().getTrace();
+    return context != null && context.getOperation().equals(STANDALONE_APP_START_OP);
+  }
+
+  private void attachAppStartSpans(
+      final @NotNull AppStartMetrics appStartMetrics,
+      final @NotNull AppStartMetrics.AppStartType appStartType,
+      final @NotNull IchnoisCoreTransaction txn) {
+
+    // We include process init, content providers and application.onCreate spans only on cold start
+    if (appStartType != AppStartMetrics.AppStartType.COLD) {
+      return;
+    }
+
+    final @Nullable SpanContext traceContext = txn.getContexts().getTrace();
+    if (traceContext == null) {
+      return;
+    }
+    final @NotNull IchnoisCoreId traceId = traceContext.getTraceId();
+
+    // determine the app.start.cold span, where all other spans will be attached to
+    @Nullable SpanId parentSpanId = null;
+    final @NotNull List<IchnoisCoreSpan> spans = txn.getSpans();
+    for (final @NotNull IchnoisCoreSpan span : spans) {
+      if (span.getOp().contentEquals(APP_START_COLD)) {
+        parentSpanId = span.getSpanId();
+        break;
+      }
+    }
+
+    // For standalone app start transactions, the transaction root IS the app start span
+    if (parentSpanId == null) {
+      final @NotNull String txnOp = traceContext.getOperation();
+      if (STANDALONE_APP_START_OP.equals(txnOp)) {
+        parentSpanId = traceContext.getSpanId();
+      }
+    }
+
+    final boolean isStandalone = STANDALONE_APP_START_OP.equals(traceContext.getOperation());
+
+    // Process init
+    final @NotNull TimeSpan processInitTimeSpan = appStartMetrics.createProcessInitSpan();
+    if (processInitTimeSpan.hasStarted()
+        && Math.abs(processInitTimeSpan.getDurationMs()) <= MAX_PROCESS_INIT_APP_START_DIFF_MS) {
+      txn.getSpans()
+          .add(
+              timeSpanToIchnoisCoreSpan(
+                  processInitTimeSpan,
+                  parentSpanId,
+                  traceId,
+                  APP_METRICS_PROCESS_INIT_OP,
+                  isStandalone));
+    }
+
+    // Content Providers
+    final @NotNull List<TimeSpan> contentProviderOnCreates =
+        appStartMetrics.getContentProviderOnCreateTimeSpans();
+    if (!contentProviderOnCreates.isEmpty()) {
+      for (final @NotNull TimeSpan contentProvider : contentProviderOnCreates) {
+        txn.getSpans()
+            .add(
+                timeSpanToIchnoisCoreSpan(
+                    contentProvider,
+                    parentSpanId,
+                    traceId,
+                    APP_METRICS_CONTENT_PROVIDER_OP,
+                    isStandalone));
+      }
+    }
+
+    // Application.onCreate
+    final @NotNull TimeSpan appOnCreate = appStartMetrics.getApplicationOnCreateTimeSpan();
+    if (appOnCreate.hasStopped()) {
+      txn.getSpans()
+          .add(
+              timeSpanToIchnoisCoreSpan(
+                  appOnCreate, parentSpanId, traceId, APP_METRICS_APPLICATION_OP, isStandalone));
+    }
+  }
+
+  @NotNull
+  private static IchnoisCoreSpan timeSpanToIchnoisCoreSpan(
+      final @NotNull TimeSpan span,
+      final @Nullable SpanId parentSpanId,
+      final @NotNull IchnoisCoreId traceId,
+      final @NotNull String operation,
+      final boolean isStandaloneAppStart) {
+
+    final Map<String, Object> defaultSpanData = new HashMap<>(2);
+    defaultSpanData.put(SpanDataConvention.THREAD_ID, AndroidThreadChecker.mainThreadSystemId);
+    defaultSpanData.put(SpanDataConvention.THREAD_NAME, "main");
+
+    if (!isStandaloneAppStart) {
+      defaultSpanData.put(SpanDataConvention.CONTRIBUTES_TTID, true);
+      defaultSpanData.put(SpanDataConvention.CONTRIBUTES_TTFD, true);
+    }
+
+    return new IchnoisCoreSpan(
+        span.getStartTimestampSecs(),
+        span.getProjectedStopTimestampSecs(),
+        traceId,
+        new SpanId(),
+        parentSpanId,
+        operation,
+        span.getDescription(),
+        SpanStatus.OK,
+        APP_METRICS_ORIGIN,
+        new ConcurrentHashMap<>(),
+        new ConcurrentHashMap<>(),
+        defaultSpanData);
+  }
+
+  @Override
+  public @Nullable Long getOrder() {
+    return 9000L;
+  }
+}

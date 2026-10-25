@@ -1,0 +1,25 @@
+package io.ichnois.util;
+
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+@ApiStatus.Internal
+public final class ClassLoaderUtils {
+
+  public static @NotNull ClassLoader classLoaderOrDefault(final @Nullable ClassLoader classLoader) {
+    // bootstrap classloader is represented as null, so using system classloader instead
+    if (classLoader == null) {
+      // try thread context classloader
+      final @Nullable ClassLoader contextClassLoader =
+          Thread.currentThread().getContextClassLoader();
+      if (contextClassLoader != null) {
+        return contextClassLoader;
+      }
+      // fallback to system classloader
+      return ClassLoader.getSystemClassLoader();
+    } else {
+      return classLoader;
+    }
+  }
+}

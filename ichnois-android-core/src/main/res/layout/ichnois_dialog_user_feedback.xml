@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The form is wrapped in a ScrollView, so the buttons stay reachable when the dialog does not
+     fit on screen, e.g. in landscape or with a large font scale. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:filterTouchesWhenObscured="true"
+    tools:ignore="HardcodedText,RtlHardcoded">
+
+<RelativeLayout
+    android:id="@+id/ichnois_dialog_user_feedback_layout"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:theme="?android:attr/dialogTheme"
+    android:padding="24dp">
+
+
+    <TextView
+        android:id="@+id/ichnois_dialog_user_feedback_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Report a Bug"
+        style="?android:attr/windowTitleStyle"
+        android:textStyle="bold"
+        android:layout_marginBottom="16dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignRight="@+id/ichnois_dialog_user_feedback_logo" />
+
+    <ImageView
+        android:id="@+id/ichnois_dialog_user_feedback_logo"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_alignTop="@+id/ichnois_dialog_user_feedback_title"
+        android:layout_alignBottom="@+id/ichnois_dialog_user_feedback_title"
+        android:layout_alignParentRight="true"
+        android:contentDescription="Logo of the brand"
+        android:tint="?android:attr/colorForeground"
+        android:src="@drawable/ichnois_logo_dark" />
+
+    <TextView
+        android:id="@+id/ichnois_dialog_user_feedback_txt_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Name"
+        android:layout_marginTop="4dp"
+        android:textStyle="bold"
+        android:layout_below="@id/ichnois_dialog_user_feedback_title" />
+
+    <EditText
+        android:id="@+id/ichnois_dialog_user_feedback_edt_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Your Name"
+        android:inputType="textPersonName"
+        android:autofillHints="name"
+        android:background="@drawable/ichnois_edit_text_border"
+        android:paddingHorizontal="8dp"
+        android:layout_below="@id/ichnois_dialog_user_feedback_txt_name" />
+
+    <TextView
+        android:id="@+id/ichnois_dialog_user_feedback_txt_email"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Email"
+        android:layout_marginTop="8dp"
+        android:textStyle="bold"
+        android:layout_below="@id/ichnois_dialog_user_feedback_edt_name" />
+
+    <EditText
+        android:id="@+id/ichnois_dialog_user_feedback_edt_email"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="your.email@example.org"
+        android:inputType="textEmailAddress"
+        android:autofillHints="emailAddress"
+        android:background="@drawable/ichnois_edit_text_border"
+        android:paddingHorizontal="8dp"
+        android:layout_below="@id/ichnois_dialog_user_feedback_txt_email" />
+
+    <TextView
+        android:id="@+id/ichnois_dialog_user_feedback_txt_description"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Description (Required)"
+        android:layout_marginTop="8dp"
+        android:textStyle="bold"
+        android:layout_below="@id/ichnois_dialog_user_feedback_edt_email" />
+
+    <EditText
+        android:id="@+id/ichnois_dialog_user_feedback_edt_description"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:lines="6"
+        android:inputType="textMultiLine"
+        android:importantForAutofill="no"
+        android:gravity="top|left"
+        android:hint="What's the bug? What did you expect?"
+        android:background="@drawable/ichnois_edit_text_border"
+        android:paddingHorizontal="8dp"
+        android:layout_below="@id/ichnois_dialog_user_feedback_txt_description" />
+
+    <Button
+        android:id="@+id/ichnois_dialog_user_feedback_btn_add_screenshot"
+        style="?android:attr/borderlessButtonStyle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Add a screenshot"
+        android:visibility="gone"
+        android:layout_below="@id/ichnois_dialog_user_feedback_edt_description" />
+
+    <LinearLayout
+        android:id="@+id/ichnois_dialog_user_feedback_button_bar"
+        style="?android:attr/buttonBarStyle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="right"
+        android:layout_marginTop="24dp"
+        android:layout_below="@id/ichnois_dialog_user_feedback_btn_add_screenshot">
+
+        <Button
+            android:id="@+id/ichnois_dialog_user_feedback_btn_cancel"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Cancel" />
+
+        <Button
+            android:id="@+id/ichnois_dialog_user_feedback_btn_send"
+            style="?android:attr/buttonBarPositiveButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Send Bug Report" />
+
+    </LinearLayout>
+
+</RelativeLayout>
+
+</ScrollView>

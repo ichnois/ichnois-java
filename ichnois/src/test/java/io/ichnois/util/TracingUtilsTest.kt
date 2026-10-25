@@ -1,0 +1,593 @@
+package io.ichnois.util
+
+import io.ichnois.Baggage
+import io.ichnois.IScopes
+import io.ichnois.NoOpLogger
+import io.ichnois.NoOpSpan
+import io.ichnois.PropagationContext
+import io.ichnois.Scope
+import io.ichnois.ScopeCallback
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.IchnoisCoreTracer
+import io.ichnois.Span
+import io.ichnois.SpanId
+import io.ichnois.SpanOptions
+import io.ichnois.TracesSamplingDecision
+import io.ichnois.TransactionContext
+import io.ichnois.W3CTraceparentHeader
+import io.ichnois.protocol.IchnoisCoreId
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import org.junit.Test
+import org.mockito.kotlin.any
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
+
+class TracingUtilsTest {
+  class Fixture {
+    val options = IchnoisCoreOptions().apply { dsn = "https://key@ichnois-h2jw.onrender.com/proj" }
+    val scopes = mock<IScopes>()
+    val scope = Scope(options)
+    lateinit var span: Span
+    val preExistingBaggage = listOf("some-baggage-key=some-baggage-value")
+
+    fun setup() {
+      whenever(scopes.options).thenReturn(options)
+      doAnswer { (it.arguments[0] as ScopeCallback).run(scope) }
+        .whenever(scopes)
+        .configureScope(any())
+      span =
+        Span(
+          TransactionContext("name", "op", TracesSamplingDecision(true)),
+          IchnoisCoreTracer(TransactionContext("name", "op", TracesSamplingDecision(true)), scopes),
+          scopes,
+          SpanOptions(),
+        )
+    }
+  }
+
+  val fixture = Fixture()
+
+  @Test
+  fun `returns headers if allowed from scope without span`() {
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        null,
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertEquals(fixture.scope.propagationContext.isSampled, headers.ichnoisTraceHeader.isSampled)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertTrue(
+      headers.baggageHeader!!
+        .value
+        .contains("ichnois-trace_id=${fixture.scope.propagationContext.traceId}")
+    )
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns headers if allowed from scope if span is noop`() {
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        NoOpSpan.getInstance(),
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertEquals(fixture.scope.propagationContext.isSampled, headers.ichnoisTraceHeader.isSampled)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns headers if allowed from scope if span is noop sampled=null`() {
+    fixture.setup()
+    fixture.scope.propagationContext.isSampled = null
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        NoOpSpan.getInstance(),
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertEquals(fixture.scope.propagationContext.isSampled, headers.ichnoisTraceHeader.isSampled)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns headers if allowed from scope if span is noop sampled=true`() {
+    fixture.setup()
+    fixture.scope.propagationContext.isSampled = true
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        NoOpSpan.getInstance(),
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertEquals(fixture.scope.propagationContext.isSampled, headers.ichnoisTraceHeader.isSampled)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns headers if allowed from scope if span is noop sampled=false`() {
+    fixture.setup()
+    fixture.scope.propagationContext.isSampled = false
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        NoOpSpan.getInstance(),
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertEquals(fixture.scope.propagationContext.isSampled, headers.ichnoisTraceHeader.isSampled)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns headers if allowed from scope without span leaving frozen baggage alone`() {
+    fixture.scope.propagationContext =
+      PropagationContext(
+        IchnoisCoreId(),
+        SpanId(),
+        null,
+        Baggage.fromHeader(
+            "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=2722d9f6ec019ade60c776169d9a8904,ichnois-transaction=HTTP%20GET"
+          )
+          .also { it.freeze() },
+        true,
+      )
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        null,
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.scope.propagationContext.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.scope.propagationContext.traceId, headers.ichnoisTraceHeader.traceId)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+    assertTrue(
+      headers.baggageHeader!!.value.contains("ichnois-trace_id=2722d9f6ec019ade60c776169d9a8904")
+    )
+    assertFalse(
+      headers.baggageHeader!!
+        .value
+        .contains("ichnois-trace_id=${fixture.scope.propagationContext.traceId}")
+    )
+  }
+
+  @Test
+  fun `returns headers if allowed from span`() {
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        fixture.span,
+      )
+
+    assertNotNull(headers)
+    assertNotNull(headers.baggageHeader)
+    assertEquals(fixture.span.spanId, headers.ichnoisTraceHeader.spanId)
+    assertEquals(fixture.span.traceId, headers.ichnoisTraceHeader.traceId)
+    assertTrue(headers.baggageHeader!!.value.contains("some-baggage-key=some-baggage-value"))
+  }
+
+  @Test
+  fun `does not return headers if not trace sampling without span`() {
+    fixture.options.isTraceSampling = false
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        null,
+      )
+
+    assertNull(headers)
+  }
+
+  @Test
+  fun `does not return headers if not trace sampling from span`() {
+    fixture.options.isTraceSampling = false
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        fixture.span,
+      )
+
+    assertNull(headers)
+  }
+
+  @Test
+  fun `does not return headers if host is disallowed without span`() {
+    fixture.options.setTracePropagationTargets(listOf("some-host-that-does-not-exist"))
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        null,
+      )
+
+    assertNull(headers)
+  }
+
+  @Test
+  fun `does not return headers if host is disallowed from span`() {
+    fixture.options.setTracePropagationTargets(listOf("some-host-that-does-not-exist"))
+    fixture.setup()
+
+    val headers =
+      TracingUtils.traceIfAllowed(
+        fixture.scopes,
+        "https://example.com/hello",
+        fixture.preExistingBaggage,
+        fixture.span,
+      )
+
+    assertNull(headers)
+  }
+
+  @Test
+  fun `start new trace sets propagation context on scope`() {
+    fixture.setup()
+
+    val propagationContextBefore = fixture.scope.propagationContext
+
+    TracingUtils.startNewTrace(fixture.scopes)
+
+    assertNotEquals(propagationContextBefore.traceId, fixture.scope.propagationContext.traceId)
+    assertNotEquals(propagationContextBefore.spanId, fixture.scope.propagationContext.spanId)
+  }
+
+  @Test
+  fun `updates mutable baggage`() {
+    fixture.setup()
+    // not frozen because it doesn't contain ichnois-* keys
+    fixture.scope.propagationContext =
+      PropagationContext(
+        IchnoisCoreId(),
+        SpanId(),
+        null,
+        Baggage.fromHeader(fixture.preExistingBaggage),
+        true,
+      )
+
+    TracingUtils.maybeUpdateBaggage(fixture.scope, fixture.options)
+
+    assertEquals(
+      fixture.scope.propagationContext.traceId.toString(),
+      fixture.scope.propagationContext.baggage!!.traceId,
+    )
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `does not change frozen baggage`() {
+    fixture.setup()
+    // frozen automatically because it contains ichnois-* keys
+    fixture.scope.propagationContext =
+      PropagationContext(
+        IchnoisCoreId(),
+        SpanId(),
+        null,
+        Baggage.fromHeader(
+          "ichnois-public_key=test-public-key,ichnois-sample_rate=1,ichnois-trace_id=2722d9f6ec019ade60c776169d9a8904,ichnois-transaction=HTTP%20GET"
+        ),
+        true,
+      )
+
+    TracingUtils.maybeUpdateBaggage(fixture.scope, fixture.options)
+
+    assertEquals(
+      "2722d9f6ec019ade60c776169d9a8904",
+      fixture.scope.propagationContext.baggage!!.traceId,
+    )
+    assertFalse(fixture.scope.propagationContext.baggage!!.isMutable)
+  }
+
+  @Test
+  fun `returns baggage if passed in`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+  }
+
+  @Test
+  fun `crates new baggage if null passed in that has sampleRand set and is mutable`() {
+    val baggage = TracingUtils.ensureBaggage(null, null as? TracesSamplingDecision?)
+    assertNotNull(baggage)
+    assertNotNull(baggage.sampleRand)
+    assertTrue(baggage.isMutable)
+    assertFalse(baggage.isShouldFreeze)
+  }
+
+  @Test
+  fun `backfills sampleRand on passed in baggage if missing`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+    assertNotNull(baggage.sampleRand)
+    assertTrue(baggage.isMutable)
+  }
+
+  @Test
+  fun `keeps sampleRand on passed in baggage if present`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    incomingBaggage.sampleRand = 0.3
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+    assertEquals(0.3, baggage.sampleRand!!, 0.0001)
+    assertTrue(baggage.isMutable)
+  }
+
+  @Test
+  fun `does not backfill sampleRand on passed in baggage if frozen`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    incomingBaggage.freeze()
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+    assertNull(baggage.sampleRand)
+    assertFalse(baggage.isMutable)
+  }
+
+  @Test
+  fun `freezes passed in baggage if should be frozen`() {
+    // markes as shouldFreeze=true due to ichnois values being present in header
+    val incomingBaggage =
+      Baggage.fromHeader("ichnois-trace_id=a,ichnois-transaction=ichnoisTransaction")
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+    assertNotNull(baggage.sampleRand)
+    assertFalse(baggage.isMutable)
+  }
+
+  @Test
+  fun `does not freeze passed in baggage if should not be frozen`() {
+    // markes as shouldFreeze=false due to no ichnois values being present in header
+    val incomingBaggage = Baggage.fromHeader("a=b,c=d")
+    val baggage = TracingUtils.ensureBaggage(incomingBaggage, null as? TracesSamplingDecision?)
+    assertSame(incomingBaggage, baggage)
+    assertNotNull(baggage.sampleRand)
+    assertTrue(baggage.isMutable)
+  }
+
+  @Test
+  fun `uses sample rand if passed in`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    val baggage =
+      TracingUtils.ensureBaggage(incomingBaggage, TracesSamplingDecision(true, null, 0.123))
+    assertSame(incomingBaggage, baggage)
+    assertEquals(0.123, baggage.sampleRand!!, 0.0001)
+  }
+
+  @Test
+  fun `uses sample rate and sampled flag true if passed in`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    val baggage =
+      TracingUtils.ensureBaggage(incomingBaggage, TracesSamplingDecision(true, 0.0001, null))
+    assertSame(incomingBaggage, baggage)
+    val sampleRand = baggage.sampleRand
+    assertNotNull(sampleRand)
+    assertTrue(sampleRand < 0.0001)
+    assertTrue(sampleRand >= 0.0)
+  }
+
+  @Test
+  fun `uses sample rate and sampled flag false if passed in`() {
+    val incomingBaggage = Baggage(NoOpLogger.getInstance())
+    val baggage =
+      TracingUtils.ensureBaggage(incomingBaggage, TracesSamplingDecision(false, 0.9999, null))
+    assertSame(incomingBaggage, baggage)
+    val sampleRand = baggage.sampleRand
+    assertNotNull(sampleRand)
+    assertTrue(sampleRand < 1.0)
+    assertTrue(sampleRand >= 0.9999)
+  }
+
+  @Test
+  fun `trace does not return w3c traceparent header when propagateTraceparent is disabled`() {
+    val fixture = Fixture()
+    fixture.setup()
+    fixture.options.isPropagateTraceparent = false
+
+    val tracingHeaders = TracingUtils.trace(fixture.scopes, null, fixture.span)
+
+    assertNotNull(tracingHeaders)
+    assertNotNull(tracingHeaders.ichnoisTraceHeader)
+    assertNull(tracingHeaders.w3cTraceparentHeader)
+  }
+
+  @Test
+  fun `trace returns w3c traceparent header when propagateTraceparent is enabled`() {
+    val fixture = Fixture()
+    fixture.setup()
+    fixture.options.isPropagateTraceparent = true
+
+    val tracingHeaders = TracingUtils.trace(fixture.scopes, null, fixture.span)
+
+    assertNotNull(tracingHeaders)
+    assertNotNull(tracingHeaders.ichnoisTraceHeader)
+    assertNotNull(tracingHeaders.w3cTraceparentHeader)
+    assertEquals(
+      W3CTraceparentHeader.TRACEPARENT_HEADER,
+      tracingHeaders.w3cTraceparentHeader!!.name,
+    )
+
+    val headerValue = tracingHeaders.w3cTraceparentHeader!!.value
+    assertTrue(headerValue.startsWith("00-"))
+
+    val parts = headerValue.split("-")
+    assertEquals(4, parts.size)
+    assertEquals("00", parts[0])
+    assertEquals(fixture.span.spanContext.traceId.toString(), parts[1])
+    assertEquals(fixture.span.spanContext.spanId.toString(), parts[2])
+    assertEquals("01", parts[3])
+  }
+
+  @Test
+  fun `trace returns w3c traceparent header when no span provided and propagateTraceparent is enabled`() {
+    val fixture = Fixture()
+    fixture.options.isPropagateTraceparent = true
+    fixture.setup()
+
+    val tracingHeaders = TracingUtils.trace(fixture.scopes, null, null)
+
+    assertNotNull(tracingHeaders)
+    assertNotNull(tracingHeaders.ichnoisTraceHeader)
+    assertNotNull(tracingHeaders.w3cTraceparentHeader)
+
+    val w3cTrace = tracingHeaders.w3cTraceparentHeader!!
+    assertEquals(W3CTraceparentHeader.TRACEPARENT_HEADER, w3cTrace.name)
+
+    val headerValue = w3cTrace.value
+    assertTrue(headerValue.startsWith("00-"))
+
+    val parts = headerValue.split("-")
+    assertEquals(4, parts.size)
+    assertEquals("00", parts[0])
+    assertEquals(fixture.scope.propagationContext.traceId.toString(), parts[1])
+    assertEquals(fixture.scope.propagationContext.spanId.toString(), parts[2])
+    assertEquals("00", parts[3])
+  }
+
+  private fun makeOptions(
+    dsnOrgId: String?,
+    explicitOrgId: String? = null,
+    strict: Boolean = false,
+  ): IchnoisCoreOptions {
+    val options = IchnoisCoreOptions()
+    if (dsnOrgId != null) {
+      options.dsn = "https://key@o$dsnOrgId.ingest.ichnois.io/123"
+    } else {
+      options.dsn = "https://key@ichnois.io/123"
+    }
+    options.orgId = explicitOrgId
+    options.isStrictTraceContinuation = strict
+    return options
+  }
+
+  private fun makeBaggage(orgId: String?): Baggage {
+    val raw =
+      if (orgId != null) {
+        "ichnois-trace_id=bc6d53f15eb88f4320054569b8c553d4,ichnois-org_id=$orgId"
+      } else {
+        "ichnois-trace_id=bc6d53f15eb88f4320054569b8c553d4"
+      }
+    return Baggage.fromHeader(raw, NoOpLogger.getInstance())
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=false matching org ids returns true`() {
+    val options = makeOptions(dsnOrgId = "1", strict = false)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage("1")))
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=false mismatched org ids returns false`() {
+    val options = makeOptions(dsnOrgId = "2", strict = false)
+    assertFalse(TracingUtils.shouldContinueTrace(options, makeBaggage("1")))
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=true matching org ids returns true`() {
+    val options = makeOptions(dsnOrgId = "1", strict = true)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage("1")))
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=true missing baggage org id returns false`() {
+    val options = makeOptions(dsnOrgId = "1", strict = true)
+    assertFalse(TracingUtils.shouldContinueTrace(options, makeBaggage(null)))
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=true both missing org ids returns true`() {
+    val options = makeOptions(dsnOrgId = null, strict = true)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage(null)))
+  }
+
+  @Test
+  fun `shouldContinueTrace uses DSN fallback when explicit orgId is empty`() {
+    val options = makeOptions(dsnOrgId = "123", explicitOrgId = "", strict = true)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage("123")))
+  }
+
+  @Test
+  fun `shouldContinueTrace uses DSN fallback when explicit orgId is whitespace`() {
+    val options = makeOptions(dsnOrgId = "123", explicitOrgId = "   ", strict = true)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage("123")))
+  }
+
+  @Test
+  fun `shouldContinueTrace rejects mismatch after empty explicit orgId falls back to DSN`() {
+    val options = makeOptions(dsnOrgId = "123", explicitOrgId = "", strict = true)
+    assertFalse(TracingUtils.shouldContinueTrace(options, makeBaggage("999")))
+  }
+
+  @Test
+  fun `shouldContinueTrace strict=false with empty explicit orgId uses DSN fallback`() {
+    val options = makeOptions(dsnOrgId = "123", explicitOrgId = "", strict = false)
+    assertTrue(TracingUtils.shouldContinueTrace(options, makeBaggage("123")))
+  }
+}

@@ -1,0 +1,484 @@
+package io.ichnois.okhttp
+
+import io.ichnois.IScopes
+import io.ichnois.ScopesAdapter
+import io.ichnois.SpanDataConvention
+import io.ichnois.SpanStatus
+import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.util.concurrent.ConcurrentHashMap
+import okhttp3.Call
+import okhttp3.Connection
+import okhttp3.EventListener
+import okhttp3.Handshake
+import okhttp3.HttpUrl
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+
+/**
+ * Logs network performance event metrics to IchnoisCore
+ *
+ * Usage - add instance of [IchnoisCoreOkHttpEventListener] in
+ * [okhttp3.OkHttpClient.Builder.eventListener]
+ *
+ * ```
+ * val client = OkHttpClient.Builder()
+ *     .eventListener(IchnoisCoreOkHttpEventListener())
+ *     .addInterceptor(IchnoisCoreOkHttpInterceptor())
+ *     .build()
+ * ```
+ *
+ * If you already use a [okhttp3.EventListener], you can pass it in the constructor.
+ *
+ * ```
+ * val client = OkHttpClient.Builder()
+ *     .eventListener(IchnoisCoreOkHttpEventListener(myEventListener))
+ *     .addInterceptor(IchnoisCoreOkHttpInterceptor())
+ *     .build()
+ * ```
+ *
+ * ## Delivery of [canceled]
+ *
+ * A wrapped [okhttp3.EventListener] is not guaranteed to receive every [canceled] callback.
+ *
+ * OkHttp creates its listener in the [okhttp3.Call] constructor and keeps it for the whole lifetime
+ * of that call, so it may report [canceled] before [callStart] and after [callEnd]/[callFailed]. A
+ * single [IchnoisCoreOkHttpEventListener] instead serves every call of the client, so it can only bind a
+ * wrapped listener to a call between [callStart] and the terminal [callEnd]/[callFailed] event.
+ *
+ * What that means for the wrapped listener:
+ * - A listener passed as a single [okhttp3.EventListener] instance receives every [canceled]
+ *   callback. Such a listener is shared by all calls anyway, the same as OkHttp's own
+ *   `EventListener.asFactory()`, so it exists independently of that window.
+ * - A listener created by an [okhttp3.EventListener.Factory] receives only the [canceled] callbacks
+ *   that fall between [callStart] and the terminal event. A cancellation reported outside that
+ *   window is not forwarded, because no listener is bound to the call, and creating one would give
+ *   that call a second listener and break the [okhttp3.EventListener.Factory] contract of one
+ *   listener per call.
+ *
+ * Cancellation is still observable in the common case: a call that is canceled before it runs fails
+ * with `IOException("Canceled")`, which is reported through [callFailed]. A call canceled after it
+ * has completed reports nothing, which matches [okhttp3.Call.cancel] being documented as a no-op
+ * for a request that is already complete.
+ *
+ * Use `OkHttpClient.Builder.eventListenerFactory` with your own listener if you need every
+ * cancellation, including the ones outside that window.
+ */
+@Suppress("TooManyFunctions")
+public open class IchnoisCoreOkHttpEventListener(
+  private val scopes: IScopes = ScopesAdapter.getInstance(),
+  private val originalEventListenerCreator: ((call: Call) -> EventListener)? = null,
+) : EventListener() {
+  private val originalEventListenerMap: MutableMap<Call, EventListener> = ConcurrentHashMap()
+
+  // Set only by the constructors that wrap a single EventListener instance. Such a listener is
+  // shared by every Call anyway, exactly like OkHttp's own EventListener.asFactory(), so it
+  // exists independently of the callStart()..callEnd() window and can always be delegated to.
+  private var fixedOriginalEventListener: EventListener? = null
+
+  public companion object {
+    internal const val PROXY_SELECT_EVENT = "http.client.proxy_select_ms"
+    internal const val DNS_EVENT = "http.client.resolve_dns_ms"
+    internal const val CONNECT_EVENT = "http.connect_ms"
+    internal const val SECURE_CONNECT_EVENT = "http.connect.secure_connect_ms"
+    internal const val CONNECTION_EVENT = "http.connection_ms"
+    internal const val REQUEST_HEADERS_EVENT = "http.connection.request_headers_ms"
+    internal const val REQUEST_BODY_EVENT = "http.connection.request_body_ms"
+    internal const val RESPONSE_HEADERS_EVENT = "http.connection.response_headers_ms"
+    internal const val RESPONSE_BODY_EVENT = "http.connection.response_body_ms"
+
+    internal val eventMap: MutableMap<Call, IchnoisCoreOkHttpEvent> = ConcurrentHashMap()
+  }
+
+  public constructor() : this(ScopesAdapter.getInstance(), originalEventListenerCreator = null)
+
+  public constructor(
+    originalEventListener: EventListener
+  ) : this(ScopesAdapter.getInstance(), originalEventListenerCreator = { originalEventListener }) {
+    fixedOriginalEventListener = originalEventListener
+  }
+
+  public constructor(
+    originalEventListenerFactory: Factory
+  ) : this(
+    ScopesAdapter.getInstance(),
+    originalEventListenerCreator = { originalEventListenerFactory.create(it) },
+  )
+
+  public constructor(
+    scopes: IScopes = ScopesAdapter.getInstance(),
+    originalEventListener: EventListener,
+  ) : this(scopes, originalEventListenerCreator = { originalEventListener }) {
+    fixedOriginalEventListener = originalEventListener
+  }
+
+  public constructor(
+    scopes: IScopes = ScopesAdapter.getInstance(),
+    originalEventListenerFactory: Factory,
+  ) : this(scopes, originalEventListenerCreator = { originalEventListenerFactory.create(it) })
+
+  override fun callStart(call: Call) {
+    // The EventListener.Factory contract binds a listener to a single call, so the wrapped
+    // listener is kept per call instead of in a field shared by all concurrent calls. callStart()
+    // is invoked only once per Call, so this creates exactly one listener per Call.
+    val originalEventListener = originalEventListenerCreator?.invoke(call)
+    if (originalEventListener != null) {
+      originalEventListenerMap[call] = originalEventListener
+    }
+    originalEventListener?.callStart(call)
+    // If the wrapped EventListener is ours, we can just delegate the calls,
+    // without creating other events that would create duplicates
+    if (canCreateEventSpan(originalEventListener)) {
+      eventMap[call] = IchnoisCoreOkHttpEvent(scopes, call.request())
+    }
+  }
+
+  override fun proxySelectStart(call: Call, url: HttpUrl) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.proxySelectStart(call, url)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(PROXY_SELECT_EVENT)
+  }
+
+  override fun proxySelectEnd(call: Call, url: HttpUrl, proxies: List<Proxy>) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.proxySelectEnd(call, url, proxies)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(PROXY_SELECT_EVENT) {
+      if (proxies.isNotEmpty()) {
+        it.setData("proxies", proxies.joinToString { proxy -> proxy.toString() })
+      }
+    }
+  }
+
+  override fun dnsStart(call: Call, domainName: String) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.dnsStart(call, domainName)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(DNS_EVENT)
+  }
+
+  override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.dnsEnd(call, domainName, inetAddressList)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(DNS_EVENT) {
+      it.setData("domain_name", domainName)
+      if (inetAddressList.isNotEmpty()) {
+        it.setData("dns_addresses", inetAddressList.joinToString { address -> address.toString() })
+      }
+    }
+  }
+
+  override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.connectStart(call, inetSocketAddress, proxy)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(CONNECT_EVENT)
+  }
+
+  override fun secureConnectStart(call: Call) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.secureConnectStart(call)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(SECURE_CONNECT_EVENT)
+  }
+
+  override fun secureConnectEnd(call: Call, handshake: Handshake?) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.secureConnectEnd(call, handshake)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(SECURE_CONNECT_EVENT)
+  }
+
+  override fun connectEnd(
+    call: Call,
+    inetSocketAddress: InetSocketAddress,
+    proxy: Proxy,
+    protocol: Protocol?,
+  ) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.connectEnd(call, inetSocketAddress, proxy, protocol)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setProtocol(protocol?.name)
+    okHttpEvent.onEventFinish(CONNECT_EVENT)
+  }
+
+  override fun connectFailed(
+    call: Call,
+    inetSocketAddress: InetSocketAddress,
+    proxy: Proxy,
+    protocol: Protocol?,
+    ioe: IOException,
+  ) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.connectFailed(call, inetSocketAddress, proxy, protocol, ioe)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setProtocol(protocol?.name)
+    okHttpEvent.setError(ioe.message)
+    okHttpEvent.onEventFinish(CONNECT_EVENT) {
+      it.throwable = ioe
+      it.status = SpanStatus.INTERNAL_ERROR
+    }
+  }
+
+  override fun connectionAcquired(call: Call, connection: Connection) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.connectionAcquired(call, connection)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(CONNECTION_EVENT)
+  }
+
+  override fun connectionReleased(call: Call, connection: Connection) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.connectionReleased(call, connection)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(CONNECTION_EVENT)
+  }
+
+  override fun requestHeadersStart(call: Call) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.requestHeadersStart(call)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(REQUEST_HEADERS_EVENT)
+  }
+
+  override fun requestHeadersEnd(call: Call, request: Request) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.requestHeadersEnd(call, request)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(REQUEST_HEADERS_EVENT)
+  }
+
+  override fun requestBodyStart(call: Call) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.requestBodyStart(call)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(REQUEST_BODY_EVENT)
+  }
+
+  override fun requestBodyEnd(call: Call, byteCount: Long) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.requestBodyEnd(call, byteCount)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventFinish(REQUEST_BODY_EVENT) {
+      if (byteCount > 0) {
+        it.setData("http.request_content_length", byteCount)
+      }
+    }
+    okHttpEvent.setRequestBodySize(byteCount)
+  }
+
+  override fun requestFailed(call: Call, ioe: IOException) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.requestFailed(call, ioe)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setError(ioe.message)
+    // requestFailed can happen after requestHeaders or requestBody.
+    // If requestHeaders already finished, we don't change its status.
+    okHttpEvent.onEventFinish(REQUEST_HEADERS_EVENT) {
+      if (!it.isFinished) {
+        it.status = SpanStatus.INTERNAL_ERROR
+        it.throwable = ioe
+      }
+    }
+    okHttpEvent.onEventFinish(REQUEST_BODY_EVENT) {
+      it.status = SpanStatus.INTERNAL_ERROR
+      it.throwable = ioe
+    }
+  }
+
+  override fun responseHeadersStart(call: Call) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.responseHeadersStart(call)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(RESPONSE_HEADERS_EVENT)
+  }
+
+  override fun responseHeadersEnd(call: Call, response: Response) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.responseHeadersEnd(call, response)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setResponse(response)
+    okHttpEvent.onEventFinish(RESPONSE_HEADERS_EVENT) {
+      it.setData(SpanDataConvention.HTTP_STATUS_CODE_KEY, response.code)
+      // Let's not override the status of a span that was set
+      if (it.status == null) {
+        it.status = SpanStatus.fromHttpStatusCode(response.code)
+      }
+    }
+  }
+
+  override fun responseBodyStart(call: Call) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.responseBodyStart(call)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.onEventStart(RESPONSE_BODY_EVENT)
+  }
+
+  override fun responseBodyEnd(call: Call, byteCount: Long) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.responseBodyEnd(call, byteCount)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setResponseBodySize(byteCount)
+    okHttpEvent.onEventFinish(RESPONSE_BODY_EVENT) {
+      if (byteCount > 0) {
+        it.setData(SpanDataConvention.HTTP_RESPONSE_CONTENT_LENGTH_KEY, byteCount)
+      }
+    }
+  }
+
+  override fun responseFailed(call: Call, ioe: IOException) {
+    val originalEventListener = originalEventListenerMap[call]
+    originalEventListener?.responseFailed(call, ioe)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap[call] ?: return
+    okHttpEvent.setError(ioe.message)
+    // responseFailed can happen after responseHeaders or responseBody.
+    // If responseHeaders already finished, we don't change its status.
+    okHttpEvent.onEventFinish(RESPONSE_HEADERS_EVENT) {
+      if (!it.isFinished) {
+        it.status = SpanStatus.INTERNAL_ERROR
+        it.throwable = ioe
+      }
+    }
+    okHttpEvent.onEventFinish(RESPONSE_BODY_EVENT) {
+      it.status = SpanStatus.INTERNAL_ERROR
+      it.throwable = ioe
+    }
+  }
+
+  override fun callEnd(call: Call) {
+    originalEventListenerMap.remove(call)?.callEnd(call)
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap.remove(call) ?: return
+    okHttpEvent.finish()
+  }
+
+  override fun callFailed(call: Call, ioe: IOException) {
+    val originalEventListener = originalEventListenerMap.remove(call)
+    originalEventListener?.callFailed(call, ioe)
+    if (!canCreateEventSpan(originalEventListener)) {
+      return
+    }
+    val okHttpEvent: IchnoisCoreOkHttpEvent = eventMap.remove(call) ?: return
+    okHttpEvent.setError(ioe.message)
+    okHttpEvent.finish {
+      it.status = SpanStatus.INTERNAL_ERROR
+      it.throwable = ioe
+    }
+  }
+
+  override fun canceled(call: Call) {
+    // canceled() is the only callback that is not part of the call window. OkHttp creates the
+    // listener in the Call constructor and keeps it for the whole lifetime of the Call, so it may
+    // deliver canceled() before callStart() and after callEnd()/callFailed(). We only keep the
+    // listener between callStart() and the terminal event, so out of that window there is nothing
+    // in originalEventListenerMap.
+    //
+    // We deliberately do not create a listener for such a cancel:
+    // - After the terminal event the call is over. Call.cancel() is documented as a no-op for a
+    //   request that is already complete, so there is nothing to report.
+    // - Before callStart() there may never be a call at all. A Call that is canceled and then
+    //   never executed gets no callEnd()/callFailed(), so an entry added here could never be
+    //   removed again and would leak the Call. If the Call is executed after all, OkHttp fails it
+    //   with IOException("Canceled") and the listener still learns about it through callFailed().
+    //
+    // Creating one would also hand the EventListener.Factory contract a second listener for a
+    // single Call. A listener kept in a field instead is shared by all calls by definition, the
+    // same as OkHttp's own EventListener.asFactory(), so it exists outside the window and always
+    // gets the event.
+    val originalEventListener = originalEventListenerMap[call] ?: fixedOriginalEventListener
+    originalEventListener?.canceled(call)
+  }
+
+  override fun satisfactionFailure(call: Call, response: Response) {
+    originalEventListenerMap[call]?.satisfactionFailure(call, response)
+  }
+
+  override fun cacheHit(call: Call, response: Response) {
+    originalEventListenerMap[call]?.cacheHit(call, response)
+  }
+
+  override fun cacheMiss(call: Call) {
+    originalEventListenerMap[call]?.cacheMiss(call)
+  }
+
+  override fun cacheConditionalHit(call: Call, cachedResponse: Response) {
+    originalEventListenerMap[call]?.cacheConditionalHit(call, cachedResponse)
+  }
+
+  private fun canCreateEventSpan(originalEventListener: EventListener?): Boolean {
+    // If the wrapped EventListener is ours, we shouldn't create spans, as the originalEventListener
+    // already did it
+    // In case IchnoisCoreOkHttpEventListener from ichnois-android-okhttp is used, the is check won't work
+    // so we check
+    // for the class name as well.
+    return originalEventListener !is IchnoisCoreOkHttpEventListener &&
+      "io.ichnois.android.okhttp.IchnoisCoreOkHttpEventListener" != originalEventListener?.javaClass?.name
+  }
+}

@@ -1,0 +1,120 @@
+import org.jetbrains.kotlin.config.KotlinCompilerVersion
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.springframework.boot.gradle.tasks.run.BootRun
+
+plugins {
+  alias(libs.plugins.springboot4)
+  alias(libs.plugins.spring.dependency.management)
+  alias(libs.plugins.kotlin.jvm)
+  alias(libs.plugins.kotlin.spring)
+  id("io.ichnois.systemtest")
+}
+
+group = "io.ichnois.sample.spring-boot-4"
+
+version = "0.0.1-SNAPSHOT"
+
+tasks.withType<KotlinCompile>().configureEach {
+  kotlin {
+    explicitApi()
+    // skip metadata version check, as Spring 7 / Spring Boot 4 is
+    // compiled against a newer version of Kotlin
+    compilerOptions.freeCompilerArgs = listOf("-Xjsr305=strict", "-Xskip-metadata-version-check")
+    compilerOptions.languageVersion = org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9
+    compilerOptions.apiVersion = org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9
+  }
+}
+
+dependencies {
+  implementation(libs.springboot4.starter)
+  implementation(libs.springboot4.starter.actuator)
+  implementation(libs.springboot4.starter.aspectj)
+  implementation(libs.springboot4.starter.graphql)
+  implementation(libs.springboot4.starter.jdbc)
+  implementation(libs.springboot4.starter.quartz)
+  implementation(libs.springboot4.starter.security)
+  implementation(libs.springboot4.starter.web)
+  implementation(libs.springboot4.starter.webflux)
+  implementation(libs.springboot4.starter.websocket)
+  implementation(libs.springboot4.starter.webclient)
+  implementation(libs.springboot4.starter.restclient)
+  implementation(Config.Libs.aspectj)
+  implementation(Config.Libs.kotlinReflect)
+  implementation(kotlin(Config.kotlinStdLib, KotlinCompilerVersion.VERSION))
+  implementation(projects.ichnoisSpringBoot4Starter)
+  implementation(projects.ichnoisLogback)
+  implementation(projects.ichnoisGraphql22)
+  implementation(projects.ichnoisQuartz)
+  implementation(projects.ichnoisAsyncProfiler)
+  implementation(libs.otel)
+
+  // kafka
+  implementation(libs.springboot4.starter.kafka)
+  implementation(projects.ichnoisKafka)
+
+  // cache tracing
+  implementation(libs.springboot4.starter.cache)
+  implementation(libs.caffeine)
+
+  // database query tracing
+  implementation(projects.ichnoisJdbc)
+  runtimeOnly(libs.hsqldb)
+
+  testImplementation(kotlin(Config.kotlinStdLib))
+  testImplementation(projects.ichnoisSystemTestSupport)
+  testImplementation(libs.apollo3.kotlin)
+  testImplementation(libs.kotlin.test.junit)
+  testImplementation(libs.slf4j2.api)
+  testImplementation(libs.springboot4.starter.test) {
+    exclude(group = "org.junit.vintage", module = "junit-vintage-engine")
+  }
+  testImplementation("ch.qos.logback:logback-classic:1.5.16")
+  testImplementation("ch.qos.logback:logback-core:1.5.16")
+}
+
+tasks.register<BootRun>("bootRunWithAgent").configure {
+  group = "application"
+
+  val mainBootRunTask = tasks.getByName<BootRun>("bootRun")
+  mainClass = mainBootRunTask.mainClass
+  classpath = mainBootRunTask.classpath
+
+  val versionName = project.properties["versionName"] as String
+  val agentJarPath =
+    "$rootDir/ichnois-opentelemetry/ichnois-opentelemetry-agent/build/libs/ichnois-opentelemetry-agent-$versionName.jar"
+
+  val dsn =
+    System.getenv("ICHNOIS_DSN")
+      ?: "https://test-public-key@ichnois-h2jw.onrender.com/5428563"
+  val tracesSampleRate = System.getenv("ICHNOIS_TRACES_SAMPLE_RATE") ?: "1"
+
+  environment("ICHNOIS_DSN", dsn)
+  environment("ICHNOIS_TRACES_SAMPLE_RATE", tracesSampleRate)
+  environment("OTEL_TRACES_EXPORTER", "none")
+  environment("OTEL_METRICS_EXPORTER", "none")
+  environment("OTEL_LOGS_EXPORTER", "none")
+
+  jvmArgs = listOf("-Dotel.javaagent.debug=true", "-javaagent:$agentJarPath")
+}
+
+// The runner launches this sample with -javaagent, so track the agent jar as a systemTest input.
+ichnoisSystemTest { usesOpenTelemetryAgent = true }
+
+tasks.register<Test>("systemTest").configure {
+  group = "verification"
+  description = "Runs the System tests"
+
+  val test = project.extensions.getByType<SourceSetContainer>()["test"]
+  testClassesDirs = test.output.classesDirs
+  classpath = test.runtimeClasspath
+
+  maxParallelForks = 1
+
+  filter { includeTestsMatching("io.ichnois.systemtest*") }
+}
+
+tasks.named("test").configure {
+  require(this is Test)
+
+  filter { excludeTestsMatching("io.ichnois.systemtest.*") }
+}

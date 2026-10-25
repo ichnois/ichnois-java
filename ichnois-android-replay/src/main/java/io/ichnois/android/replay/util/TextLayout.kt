@@ -1,0 +1,23 @@
+package io.ichnois.android.replay.util
+
+/**
+ * An abstraction over [android.text.Layout] with different implementations for Views and Compose.
+ */
+internal interface TextLayout {
+  val lineCount: Int
+
+  /**
+   * Returns the dominant text color of the layout by looking at the [ForegroundColorSpan] spans if
+   * this text is a [Spanned] text. If the text is not a [Spanned] text or there are no spans, it
+   * returns null.
+   */
+  val dominantTextColor: Int?
+
+  fun getLineLeft(line: Int): Float
+
+  fun getLineRight(line: Int): Float
+
+  fun getLineTop(line: Int): Int
+
+  fun getLineBottom(line: Int): Int
+}

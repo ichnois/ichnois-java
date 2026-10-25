@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.INTERNET"/>
+
+  <application>
+    <!-- 'android:authorities' must be unique in the device, across all apps -->
+    <provider
+      android:name=".IchnoisCoreInitProvider"
+      android:authorities="${applicationId}.IchnoisCoreInitProvider"
+      android:exported="false"/>
+
+    <provider
+        android:name=".IchnoisCorePerformanceProvider"
+        android:authorities="${applicationId}.IchnoisCorePerformanceProvider"
+        android:initOrder="200"
+        android:exported="false"/>
+  </application>
+</manifest>

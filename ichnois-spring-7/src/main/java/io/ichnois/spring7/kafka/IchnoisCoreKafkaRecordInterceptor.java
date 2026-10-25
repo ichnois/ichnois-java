@@ -1,0 +1,294 @@
+package io.ichnois.spring7.kafka;
+
+import io.ichnois.BaggageHeader;
+import io.ichnois.DateUtils;
+import io.ichnois.IScopes;
+import io.ichnois.IIchnoisCoreLifecycleToken;
+import io.ichnois.ITransaction;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.IchnoisCoreTraceHeader;
+import io.ichnois.SpanDataConvention;
+import io.ichnois.SpanStatus;
+import io.ichnois.TransactionContext;
+import io.ichnois.TransactionOptions;
+import io.ichnois.kafka.IchnoisCoreKafkaProducer;
+import io.ichnois.util.SpanUtils;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.header.Header;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.springframework.kafka.listener.RecordInterceptor;
+import org.springframework.kafka.support.KafkaHeaders;
+
+/**
+ * A {@link RecordInterceptor} that creates {@code queue.process} transactions for incoming Kafka
+ * records with distributed tracing support.
+ */
+@ApiStatus.Internal
+public final class IchnoisCoreKafkaRecordInterceptor<K, V> implements RecordInterceptor<K, V> {
+
+  static final String TRACE_ORIGIN = "auto.queue.spring7.kafka.consumer";
+
+  private final @NotNull IScopes scopes;
+  private final @Nullable RecordInterceptor<K, V> delegate;
+
+  private static final @NotNull ThreadLocal<IchnoisCoreRecordContext> currentContext =
+      new ThreadLocal<>();
+
+  public IchnoisCoreKafkaRecordInterceptor(final @NotNull IScopes scopes) {
+    this(scopes, null);
+  }
+
+  public IchnoisCoreKafkaRecordInterceptor(
+      final @NotNull IScopes scopes, final @Nullable RecordInterceptor<K, V> delegate) {
+    this.scopes = scopes;
+    this.delegate = delegate;
+  }
+
+  @Override
+  public @Nullable ConsumerRecord<K, V> intercept(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull Consumer<K, V> consumer) {
+    if (!scopes.getOptions().isEnableQueueTracing() || isIgnored()) {
+      return delegateIntercept(record, consumer);
+    }
+
+    try {
+      finishStaleContext();
+
+      final @NotNull IScopes forkedScopes = scopes.forkedRootScopes("IchnoisCoreKafkaRecordInterceptor");
+      final @NotNull IIchnoisCoreLifecycleToken lifecycleToken = forkedScopes.makeCurrent();
+      currentContext.set(new IchnoisCoreRecordContext(lifecycleToken, null));
+
+      final @Nullable TransactionContext transactionContext = continueTrace(forkedScopes, record);
+
+      final @Nullable ITransaction transaction =
+          startTransaction(forkedScopes, record, transactionContext);
+      currentContext.set(new IchnoisCoreRecordContext(lifecycleToken, transaction));
+    } catch (Throwable t) {
+      scopes.getOptions().getLogger().log(IchnoisCoreLevel.ERROR, "Unable to wrap Kafka consumer.", t);
+    }
+    return delegateIntercept(record, consumer);
+  }
+
+  @Override
+  public void success(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull Consumer<K, V> consumer) {
+    try {
+      if (delegate != null) {
+        delegate.success(record, consumer);
+      }
+    } finally {
+      finishSpan(SpanStatus.OK, null);
+    }
+  }
+
+  @Override
+  public void failure(
+      final @NotNull ConsumerRecord<K, V> record,
+      final @NotNull Exception exception,
+      final @NotNull Consumer<K, V> consumer) {
+    try {
+      if (delegate != null) {
+        delegate.failure(record, exception, consumer);
+      }
+    } finally {
+      finishSpan(SpanStatus.INTERNAL_ERROR, exception);
+    }
+  }
+
+  @Override
+  public void afterRecord(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull Consumer<K, V> consumer) {
+    if (delegate != null) {
+      delegate.afterRecord(record, consumer);
+    }
+  }
+
+  @Override
+  public void setupThreadState(final @NotNull Consumer<?, ?> consumer) {
+    if (delegate != null) {
+      delegate.setupThreadState(consumer);
+    }
+  }
+
+  @Override
+  public void clearThreadState(final @NotNull Consumer<?, ?> consumer) {
+    try {
+      finishStaleContext();
+    } finally {
+      if (delegate != null) {
+        delegate.clearThreadState(consumer);
+      }
+    }
+  }
+
+  private boolean isIgnored() {
+    return SpanUtils.isIgnored(scopes.getOptions().getIgnoredSpanOrigins(), TRACE_ORIGIN);
+  }
+
+  private @Nullable ConsumerRecord<K, V> delegateIntercept(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull Consumer<K, V> consumer) {
+    if (delegate != null) {
+      return delegate.intercept(record, consumer);
+    }
+    return record;
+  }
+
+  private @Nullable TransactionContext continueTrace(
+      final @NotNull IScopes forkedScopes, final @NotNull ConsumerRecord<K, V> record) {
+    final @Nullable String ichnoisTrace = headerValue(record, IchnoisCoreTraceHeader.ICHNOIS_TRACE_HEADER);
+    final @Nullable List<String> baggageHeaders =
+        headerValues(record, BaggageHeader.BAGGAGE_HEADER);
+    return forkedScopes.continueTrace(ichnoisTrace, baggageHeaders);
+  }
+
+  private @Nullable ITransaction startTransaction(
+      final @NotNull IScopes forkedScopes,
+      final @NotNull ConsumerRecord<K, V> record,
+      final @Nullable TransactionContext transactionContext) {
+    if (!forkedScopes.getOptions().isTracingEnabled()) {
+      return null;
+    }
+
+    final @NotNull TransactionContext txContext =
+        transactionContext != null
+            ? transactionContext
+            : new TransactionContext(record.topic(), "queue.process");
+    txContext.setName(record.topic());
+    txContext.setOperation("queue.process");
+
+    final @NotNull TransactionOptions txOptions = new TransactionOptions();
+    txOptions.setOrigin(TRACE_ORIGIN);
+    txOptions.setBindToScope(true);
+
+    final @NotNull ITransaction transaction = forkedScopes.startTransaction(txContext, txOptions);
+
+    if (transaction.isNoOp()) {
+      return null;
+    }
+
+    transaction.setData(SpanDataConvention.MESSAGING_SYSTEM, "kafka");
+    transaction.setData(SpanDataConvention.MESSAGING_DESTINATION_NAME, record.topic());
+
+    final @Nullable String messageId = headerValue(record, "messaging.message.id");
+    if (messageId != null) {
+      transaction.setData(SpanDataConvention.MESSAGING_MESSAGE_ID, messageId);
+    }
+
+    final int bodySize = record.serializedValueSize();
+    if (bodySize >= 0) {
+      transaction.setData(SpanDataConvention.MESSAGING_MESSAGE_BODY_SIZE, bodySize);
+    }
+
+    final @Nullable Integer retryCount = retryCount(record);
+    if (retryCount != null) {
+      transaction.setData(SpanDataConvention.MESSAGING_MESSAGE_RETRY_COUNT, retryCount);
+    }
+
+    final @Nullable String enqueuedTimeStr =
+        headerValue(record, IchnoisCoreKafkaProducer.ICHNOIS_ENQUEUED_TIME_HEADER);
+    if (enqueuedTimeStr != null) {
+      try {
+        final double enqueuedTimeSeconds = Double.parseDouble(enqueuedTimeStr);
+        // millisToSeconds takes a double; the cast is explicit for Error Prone's
+        // LongDoubleConversion check.
+        final double nowSeconds = DateUtils.millisToSeconds((double) System.currentTimeMillis());
+        final long latencyMs = (long) ((nowSeconds - enqueuedTimeSeconds) * 1000);
+        if (latencyMs >= 0) {
+          transaction.setData(SpanDataConvention.MESSAGING_MESSAGE_RECEIVE_LATENCY, latencyMs);
+        }
+      } catch (NumberFormatException ignored) {
+        // ignore malformed header
+      }
+    }
+
+    return transaction;
+  }
+
+  private @Nullable Integer retryCount(final @NotNull ConsumerRecord<K, V> record) {
+    final @Nullable Header header = record.headers().lastHeader(KafkaHeaders.DELIVERY_ATTEMPT);
+    if (header == null) {
+      return null;
+    }
+
+    final byte[] value = header.value();
+    if (value == null || value.length != Integer.BYTES) {
+      return null;
+    }
+
+    final int attempt = ByteBuffer.wrap(value).getInt();
+    if (attempt <= 0) {
+      return null;
+    }
+
+    return attempt - 1;
+  }
+
+  private void finishStaleContext() {
+    if (currentContext.get() != null) {
+      finishSpan(SpanStatus.UNKNOWN, null);
+    }
+  }
+
+  private void finishSpan(final @NotNull SpanStatus status, final @Nullable Throwable throwable) {
+    final @Nullable IchnoisCoreRecordContext ctx = currentContext.get();
+    if (ctx == null) {
+      return;
+    }
+    currentContext.remove();
+
+    try {
+      final @Nullable ITransaction transaction = ctx.transaction;
+      if (transaction != null) {
+        transaction.setStatus(status);
+        if (throwable != null) {
+          transaction.setThrowable(throwable);
+        }
+        transaction.finish();
+      }
+    } finally {
+      ctx.lifecycleToken.close();
+    }
+  }
+
+  private @Nullable String headerValue(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull String headerName) {
+    final @Nullable Header header = record.headers().lastHeader(headerName);
+    if (header == null || header.value() == null) {
+      return null;
+    }
+    return new String(header.value(), StandardCharsets.UTF_8);
+  }
+
+  private @Nullable List<String> headerValues(
+      final @NotNull ConsumerRecord<K, V> record, final @NotNull String headerName) {
+    @Nullable List<String> values = null;
+    for (final @NotNull Header header : record.headers().headers(headerName)) {
+      if (header.value() != null) {
+        if (values == null) {
+          values = new ArrayList<>();
+        }
+        values.add(new String(header.value(), StandardCharsets.UTF_8));
+      }
+    }
+    return values;
+  }
+
+  private static final class IchnoisCoreRecordContext {
+    final @NotNull IIchnoisCoreLifecycleToken lifecycleToken;
+    final @Nullable ITransaction transaction;
+
+    IchnoisCoreRecordContext(
+        final @NotNull IIchnoisCoreLifecycleToken lifecycleToken,
+        final @Nullable ITransaction transaction) {
+      this.lifecycleToken = lifecycleToken;
+      this.transaction = transaction;
+    }
+  }
+}

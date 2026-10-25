@@ -1,0 +1,95 @@
+package io.ichnois.spring7;
+
+import static io.ichnois.TypeCheckHint.SPRING_RESOLVER_REQUEST;
+import static io.ichnois.TypeCheckHint.SPRING_RESOLVER_RESPONSE;
+
+import com.jakewharton.nopen.annotation.Open;
+import io.ichnois.Hint;
+import io.ichnois.IScopes;
+import io.ichnois.IchnoisCoreEvent;
+import io.ichnois.IchnoisCoreLevel;
+import io.ichnois.exception.ExceptionMechanismException;
+import io.ichnois.protocol.Mechanism;
+import io.ichnois.spring7.tracing.TransactionNameProvider;
+import io.ichnois.util.Objects;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.springframework.core.Ordered;
+import org.springframework.web.servlet.HandlerExceptionResolver;
+import org.springframework.web.servlet.ModelAndView;
+
+/**
+ * {@link HandlerExceptionResolver} implementation that will record any exception that a Spring
+ * {@link org.springframework.web.servlet.mvc.Controller} throws to IchnoisCore. It then returns null,
+ * which will let the other (default or custom) exception resolvers handle the actual error.
+ */
+@Open
+public class IchnoisCoreExceptionResolver implements HandlerExceptionResolver, Ordered {
+  public static final String MECHANISM_TYPE = "Spring7ExceptionResolver";
+
+  private final @NotNull IScopes scopes;
+  private final @NotNull TransactionNameProvider transactionNameProvider;
+  private final int order;
+
+  public IchnoisCoreExceptionResolver(
+      final @NotNull IScopes scopes,
+      final @NotNull TransactionNameProvider transactionNameProvider,
+      final int order) {
+    this.scopes = Objects.requireNonNull(scopes, "scopes are required");
+    this.transactionNameProvider =
+        Objects.requireNonNull(transactionNameProvider, "transactionNameProvider is required");
+    this.order = order;
+  }
+
+  @Override
+  public @Nullable ModelAndView resolveException(
+      final @NotNull HttpServletRequest request,
+      final @NotNull HttpServletResponse response,
+      final @Nullable Object handler,
+      final @NotNull Exception ex) {
+
+    final IchnoisCoreEvent event = createEvent(request, ex);
+    final Hint hint = createHint(request, response);
+
+    scopes.captureEvent(event, hint);
+
+    // null = run other HandlerExceptionResolvers to actually handle the exception
+    return null;
+  }
+
+  @Override
+  public int getOrder() {
+    return order;
+  }
+
+  @NotNull
+  protected IchnoisCoreEvent createEvent(
+      final @NotNull HttpServletRequest request, final @NotNull Exception ex) {
+
+    final Mechanism mechanism = new Mechanism();
+    mechanism.setHandled(false);
+    mechanism.setType(MECHANISM_TYPE);
+    final Throwable throwable =
+        new ExceptionMechanismException(mechanism, ex, Thread.currentThread());
+    final IchnoisCoreEvent event = new IchnoisCoreEvent(throwable);
+    event.setLevel(IchnoisCoreLevel.FATAL);
+    event.setTransaction(
+        TransactionNameProviderUtils.provideTransactionName(
+            transactionNameProvider, request, scopes.getOptions().getLogger()));
+
+    return event;
+  }
+
+  @Nullable
+  protected Hint createHint(
+      final @NotNull HttpServletRequest request, final @NotNull HttpServletResponse response) {
+
+    final Hint hint = new Hint();
+    hint.set(SPRING_RESOLVER_REQUEST, request);
+    hint.set(SPRING_RESOLVER_RESPONSE, response);
+
+    return hint;
+  }
+}

@@ -1,0 +1,15 @@
+public final class io/ichnois/launchdarkly/android/BuildConfig {
+	public static final field BUILD_TYPE Ljava/lang/String;
+	public static final field DEBUG Z
+	public static final field LIBRARY_PACKAGE_NAME Ljava/lang/String;
+	public static final field ICHNOIS_LAUNCHDARKLY_ANDROID_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+	public fun <init> ()V
+}
+
+public final class io/ichnois/launchdarkly/android/IchnoisCoreLaunchDarklyAndroidHook : com/launchdarkly/sdk/android/integrations/Hook {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun afterEvaluation (Lcom/launchdarkly/sdk/android/integrations/EvaluationSeriesContext;Ljava/util/Map;Lcom/launchdarkly/sdk/EvaluationDetail;)Ljava/util/Map;
+}
+

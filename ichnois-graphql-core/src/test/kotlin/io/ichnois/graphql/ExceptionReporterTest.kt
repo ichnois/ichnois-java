@@ -1,0 +1,546 @@
+package io.ichnois.graphql
+
+import graphql.ErrorType
+import graphql.ExecutionInput
+import graphql.ExecutionResult
+import graphql.ExecutionResultImpl
+import graphql.GraphqlErrorException
+import graphql.execution.instrumentation.parameters.InstrumentationExecutionParameters
+import graphql.scalar.GraphqlStringCoercing
+import graphql.schema.GraphQLFieldDefinition
+import graphql.schema.GraphQLObjectType
+import graphql.schema.GraphQLScalarType
+import graphql.schema.GraphQLSchema
+import io.ichnois.Hint
+import io.ichnois.HttpBodyType
+import io.ichnois.IScope
+import io.ichnois.IScopes
+import io.ichnois.KeyValueCollectionBehavior
+import io.ichnois.Scope
+import io.ichnois.ScopeCallback
+import io.ichnois.IchnoisCoreOptions
+import io.ichnois.exception.ExceptionMechanismException
+import io.ichnois.protocol.Request
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import org.mockito.kotlin.any
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+
+class ExceptionReporterTest {
+  class Fixture {
+    val defaultOptions =
+      IchnoisCoreOptions().also {
+        it.isSendDefaultPii = true
+        it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.ALWAYS
+      }
+    val exception = IllegalStateException("some exception")
+    val scopes = mock<IScopes>()
+    lateinit var instrumentationExecutionParameters: InstrumentationExecutionParameters
+    lateinit var executionResult: ExecutionResult
+    lateinit var scope: IScope
+    val query = """query greeting(name: "somename")"""
+    val variables = mapOf("variableA" to "value a")
+
+    fun getSut(
+      options: IchnoisCoreOptions = defaultOptions,
+      captureRequestBodyForNonSubscriptions: Boolean = true,
+    ): ExceptionReporter {
+      whenever(scopes.options).thenReturn(options)
+      scope = Scope(options)
+      val exceptionReporter = ExceptionReporter(captureRequestBodyForNonSubscriptions)
+      executionResult =
+        ExecutionResultImpl.newExecutionResult()
+          .data("raw result")
+          .addError(
+            GraphqlErrorException.newErrorException()
+              .message("exception message")
+              .errorClassification(ErrorType.ValidationError)
+              .build()
+          )
+          .build()
+      val executionInput =
+        ExecutionInput.newExecutionInput()
+          .query(query)
+          .graphQLContext(emptyMap<Any?, Any?>())
+          .variables(variables)
+          .build()
+      val scalarType =
+        GraphQLScalarType.newScalar()
+          .name("MyResponseType")
+          .coercing(GraphqlStringCoercing())
+          .build()
+      val field =
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("myQueryFieldName")
+          .type(scalarType)
+          .build()
+      val schema =
+        GraphQLSchema.newSchema()
+          .query(GraphQLObjectType.newObject().name("QueryType").field(field).build())
+          .build()
+      val instrumentationState = IchnoisCoreGraphqlInstrumentation.TracingState()
+      instrumentationExecutionParameters =
+        InstrumentationExecutionParameters(executionInput, schema, instrumentationState)
+      doAnswer { (it.arguments[0] as ScopeCallback).run(scope) }
+        .whenever(scopes)
+        .configureScope(any())
+
+      return exceptionReporter
+    }
+  }
+
+  private val fixture = Fixture()
+
+  @Test
+  fun `captures throwable`() {
+    val exceptionReporter = fixture.getSut()
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertNotNull(it.request)
+          val request = it.request!!
+          val data = request.data as Map<Any, Any>
+          assertEquals(fixture.variables, data["variables"])
+          assertEquals(fixture.query, data["query"])
+          assertEquals("graphql", request.apiTarget)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `uses requests on scope as base`() {
+    val exceptionReporter = fixture.getSut()
+    val headers = mapOf("some-header" to "some-header-value")
+    fixture.scope.request = Request().also { it.headers = headers }
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertSame(fixture.scope.request, it.request)
+          assertEquals("graphql", it.request!!.apiTarget)
+        },
+        any<Hint>(),
+      )
+
+    assertNotNull(fixture.scope.request)
+    val request = fixture.scope.request!!
+    val data = request.data as Map<Any, Any>
+    assertEquals(fixture.variables, data["variables"])
+    assertEquals(headers, request.headers)
+  }
+
+  @Test
+  fun `does not attach query or variables if spring`() {
+    val exceptionReporter = fixture.getSut(captureRequestBodyForNonSubscriptions = false)
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertNotNull(it.request)
+          val request = it.request!!
+          assertNull(request.data)
+          assertEquals("graphql", request.apiTarget)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `does not attach query or variables if no max body size is set`() {
+    val exceptionReporter =
+      fixture.getSut(IchnoisCoreOptions().also { it.isSendDefaultPii = true }, false)
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertNotNull(it.request)
+          val request = it.request!!
+          assertNull(request.data)
+          assertEquals("graphql", request.apiTarget)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection ignores the legacy max request body size option`() {
+    val options =
+      IchnoisCoreOptions().also {
+        it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.NONE
+        it.dataCollection.graphql.setDocument(true)
+        it.dataCollection.graphql.setVariables(true)
+      }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val data = it.request!!.data as Map<Any, Any>
+          assertEquals(fixture.query, data["query"])
+          assertEquals(fixture.variables, data["variables"])
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `legacy options can disable outgoing response data`() {
+    val options = IchnoisCoreOptions().also { it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.ALWAYS }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNull(it.contexts.response) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `legacy request body size can disable outgoing response data`() {
+    val options = IchnoisCoreOptions().also { it.isSendDefaultPii = true }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNull(it.contexts.response) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection response ignores legacy request body options`() {
+    val options =
+      IchnoisCoreOptions().also {
+        it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.NONE
+        it.dataCollection.httpBodies = setOf(HttpBodyType.OUTGOING_RESPONSE)
+      }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNotNull(it.contexts.response?.data) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection can disable outgoing response data`() {
+    val options = fixture.defaultOptions.also { it.dataCollection.httpBodies = emptySet() }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNull(it.contexts.response) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection namespace default enables outgoing response data`() {
+    val options =
+      IchnoisCoreOptions().also {
+        it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.NONE
+        it.dataCollection.cookies = KeyValueCollectionBehavior.off()
+      }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNotNull(it.contexts.response?.data) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `does not attach query or variables if sendDefaultPii is false`() {
+    val exceptionReporter =
+      fixture.getSut(
+        IchnoisCoreOptions().also { it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.ALWAYS },
+        false,
+      )
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertNotNull(it.request)
+          val request = it.request!!
+          assertNull(request.data)
+          assertEquals("graphql", request.apiTarget)
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection can disable the query independently`() {
+    val options = fixture.defaultOptions
+    options.dataCollection.graphql.setDocument(false)
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val data = it.request!!.data as Map<Any, Any>
+          assertNull(data["query"])
+          assertEquals(fixture.variables, data["variables"])
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection can disable variables independently`() {
+    val options = fixture.defaultOptions
+    options.dataCollection.graphql.setVariables(false)
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val data = it.request!!.data as Map<Any, Any>
+          assertEquals(fixture.query, data["query"])
+          assertNull(data["variables"])
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection can disable both query and variables`() {
+    val options = fixture.defaultOptions
+    options.dataCollection.graphql.setDocument(false)
+    options.dataCollection.graphql.setVariables(false)
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check { assertNull(it.request!!.data) },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `data collection namespace defaults enable query and variables`() {
+    val options =
+      IchnoisCoreOptions().also {
+        it.maxRequestBodySize = IchnoisCoreOptions.RequestSize.ALWAYS
+        it.dataCollection.cookies = KeyValueCollectionBehavior.off()
+      }
+    val exceptionReporter = fixture.getSut(options)
+
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        false,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val data = it.request!!.data as Map<Any, Any>
+          assertEquals(fixture.query, data["query"])
+          assertEquals(fixture.variables, data["variables"])
+        },
+        any<Hint>(),
+      )
+  }
+
+  @Test
+  fun `attaches query and variables if spring and subscription`() {
+    val exceptionReporter = fixture.getSut(captureRequestBodyForNonSubscriptions = false)
+    exceptionReporter.captureThrowable(
+      fixture.exception,
+      ExceptionReporter.ExceptionDetails(
+        fixture.scopes,
+        fixture.instrumentationExecutionParameters,
+        true,
+      ),
+      fixture.executionResult,
+    )
+
+    verify(fixture.scopes)
+      .captureEvent(
+        org.mockito.kotlin.check {
+          val ex = it.throwableMechanism as ExceptionMechanismException
+          assertFalse(ex.exceptionMechanism.isHandled!!)
+          assertSame(fixture.exception, ex.throwable)
+          assertEquals("GraphqlInstrumentation", ex.exceptionMechanism.type)
+          assertNotNull(it.request)
+          val request = it.request!!
+          val data = request.data as Map<Any, Any>
+          assertEquals(fixture.variables, data["variables"])
+          assertEquals(fixture.query, data["query"])
+          assertEquals("graphql", request.apiTarget)
+        },
+        any<Hint>(),
+      )
+  }
+}

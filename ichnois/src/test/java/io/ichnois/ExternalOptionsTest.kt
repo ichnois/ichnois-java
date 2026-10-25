@@ -1,0 +1,635 @@
+package io.ichnois
+
+import com.google.common.truth.Truth.assertThat
+import io.ichnois.config.PropertiesProviderFactory
+import java.lang.RuntimeException
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.junit.rules.TemporaryFolder
+import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
+
+class ExternalOptionsTest {
+  @Test
+  fun `does not create data collection when external properties are absent`() {
+    withPropertiesFile { assertThat(it.dataCollection).isNull() }
+  }
+
+  @Test
+  fun `creates data collection using external properties`() {
+    withPropertiesFile(
+      listOf(
+        "data-collection.user-info=false",
+        "data-collection.http-bodies=incoming_request,outgoing_response",
+        "data-collection.cookies.mode=deny_list",
+        "data-collection.cookies.terms=authorization,session",
+        "data-collection.http-headers.request.mode=allow_list",
+        "data-collection.http-headers.request.terms=x-request-id,content-type",
+        "data-collection.http-headers.response.mode=off",
+        "data-collection.url-query-params.terms=search",
+        "data-collection.graphql.document=false",
+        "data-collection.graphql.variables=true",
+        "data-collection.database-query-data=false",
+        "data-collection.file-paths=false",
+      )
+    ) { options ->
+      val dataCollection = options.dataCollection
+
+      assertThat(dataCollection).isNotNull()
+      assertThat(dataCollection!!.userInfo).isFalse()
+      assertThat(dataCollection.httpBodies)
+        .containsExactly(HttpBodyType.INCOMING_REQUEST, HttpBodyType.OUTGOING_RESPONSE)
+      assertThat(dataCollection.cookies)
+        .isEqualTo(KeyValueCollectionBehavior.denyList("authorization", "session"))
+      assertThat(dataCollection.httpHeaders.request)
+        .isEqualTo(KeyValueCollectionBehavior.allowList("x-request-id", "content-type"))
+      assertThat(dataCollection.httpHeaders.response).isEqualTo(KeyValueCollectionBehavior.off())
+      assertThat(dataCollection.urlQueryParams)
+        .isEqualTo(KeyValueCollectionBehavior.denyList("search"))
+      assertThat(dataCollection.graphql.document).isFalse()
+      assertThat(dataCollection.graphql.variables).isTrue()
+      assertThat(dataCollection.databaseQueryData).isFalse()
+      assertThat(dataCollection.filePaths).isFalse()
+    }
+  }
+
+  @Test
+  fun `empty HTTP bodies externally disables body collection`() {
+    withPropertiesFile("data-collection.http-bodies=") { options ->
+      assertThat(options.dataCollection).isNotNull()
+      assertThat(options.dataCollection!!.httpBodies).isEmpty()
+    }
+  }
+
+  @Test
+  fun `invalid HTTP body type fails external parsing`() {
+    assertFailsWith<IllegalArgumentException> {
+      withPropertiesFile("data-collection.http-bodies=invalid") {}
+    }
+  }
+
+  @Test
+  fun `invalid collection mode fails external parsing`() {
+    assertFailsWith<IllegalArgumentException> {
+      withPropertiesFile("data-collection.cookies.mode=invalid") {}
+    }
+  }
+
+  @Test
+  fun `data collection booleans use default external parsing`() {
+    withPropertiesFile(
+      listOf(
+        "data-collection.user-info=invalid",
+        "data-collection.graphql.document=invalid",
+        "data-collection.graphql.variables=invalid",
+        "data-collection.database-query-data=invalid",
+        "data-collection.file-paths=invalid",
+      )
+    ) { options ->
+      assertThat(options.dataCollection!!.userInfo).isFalse()
+      assertThat(options.dataCollection!!.graphql.document).isFalse()
+      assertThat(options.dataCollection!!.graphql.variables).isFalse()
+      assertThat(options.dataCollection!!.databaseQueryData).isFalse()
+      assertThat(options.dataCollection!!.filePaths).isFalse()
+    }
+  }
+
+  @Test
+  fun `external data collection takes precedence over external send default PII`() {
+    withPropertiesFile(listOf("send-default-pii=false", "data-collection.cookies.mode=off")) {
+      externalOptions ->
+      val options = IchnoisCoreOptions().apply { merge(externalOptions) }
+
+      assertThat(options.isSendDefaultPii).isFalse()
+      assertThat(options.dataCollectionResolver.isUserInfo).isTrue()
+      assertThat(options.dataCollectionResolver.cookies).isEqualTo(KeyValueCollectionBehavior.off())
+    }
+  }
+
+  @Test
+  fun `creates options with proxy using external properties`() {
+    withPropertiesFile(
+      listOf(
+        "proxy.host=proxy.example.com",
+        "proxy.port=9090",
+        "proxy.user=some-user",
+        "proxy.pass=some-pass",
+      )
+    ) {
+      assertNotNull(it.proxy) { proxy ->
+        assertEquals("proxy.example.com", proxy.host)
+        assertEquals("9090", proxy.port)
+        assertEquals("some-user", proxy.user)
+        assertEquals("some-pass", proxy.pass)
+      }
+    }
+  }
+
+  @Test
+  fun `when proxy port is not set default proxy port is used`() {
+    withPropertiesFile("proxy.host=proxy.example.com") {
+      assertNotNull(it.proxy)
+      assertEquals("proxy.example.com", it.proxy!!.host)
+      assertEquals("80", it.proxy!!.port)
+    }
+  }
+
+  @Test
+  fun `creates options with tags using external properties`() {
+    withPropertiesFile(listOf("tags.tag1=value1", "tags.tag2=value2")) {
+      assertEquals(mapOf("tag1" to "value1", "tag2" to "value2"), it.tags)
+    }
+  }
+
+  @Test
+  fun `creates options with uncaught handler set to true enabled using external properties`() {
+    withPropertiesFile("uncaught.handler.enabled=true") { options ->
+      assertNotNull(options.enableUncaughtExceptionHandler) { assertTrue(it) }
+    }
+  }
+
+  @Test
+  fun `creates options with uncaught handler set to false enabled using external properties`() {
+    withPropertiesFile("uncaught.handler.enabled=false") { options ->
+      assertNotNull(options.enableUncaughtExceptionHandler) { assertFalse(it) }
+    }
+  }
+
+  @Test
+  fun `creates options with uncaught handler set to null enabled using external properties`() {
+    withPropertiesFile { assertNull(it.enableUncaughtExceptionHandler) }
+  }
+
+  @Test
+  fun `creates options with debug set to true enabled using external properties`() {
+    withPropertiesFile("debug=true") { assertNotNull(it.debug) { assertTrue(it) } }
+  }
+
+  @Test
+  fun `creates options with debug set to false enabled using external properties`() {
+    withPropertiesFile("debug=false") { assertNotNull(it.debug) { assertFalse(it) } }
+  }
+
+  @Test
+  fun `creates options with debug set to null enabled using external properties`() {
+    withPropertiesFile {
+      val mergeResult = IchnoisCoreOptions().apply { setDebug(true) }
+      mergeResult.merge(it)
+      assertTrue(mergeResult.isDebug)
+    }
+  }
+
+  @Test
+  fun `creates options with inAppInclude and inAppExclude using external properties`() {
+    withPropertiesFile(
+      listOf(
+        "in-app-includes=org.springframework,com.myapp",
+        "in-app-excludes=org.jboss,com.microsoft",
+      )
+    ) {
+      assertEquals(listOf("org.springframework", "com.myapp"), it.inAppIncludes)
+      assertEquals(listOf("org.jboss", "com.microsoft"), it.inAppExcludes)
+    }
+  }
+
+  @Test
+  fun `creates options with sampleRate using external properties`() {
+    withPropertiesFile("sample-rate=0.2") { assertEquals(0.2, it.sampleRate) }
+  }
+
+  @Test
+  fun `creates options with tracesSampleRate using external properties`() {
+    withPropertiesFile("traces-sample-rate=0.2") { assertEquals(0.2, it.tracesSampleRate) }
+  }
+
+  @Test
+  fun `creates options with profilesSampleRate using external properties`() {
+    withPropertiesFile("profiles-sample-rate=0.2") { assertEquals(0.2, it.profilesSampleRate) }
+  }
+
+  @Test
+  fun `creates options with enableDeduplication using external properties`() {
+    withPropertiesFile("enable-deduplication=true") {
+      assertNotNull(it.enableDeduplication) { assertTrue(it) }
+    }
+  }
+
+  @Test
+  fun `creates options with sendClientReports using external properties`() {
+    withPropertiesFile("send-client-reports=false") {
+      assertNotNull(it.sendClientReports) { assertFalse(it) }
+    }
+  }
+
+  @Test
+  fun `creates options with maxRequestBodySize using external properties`() {
+    withPropertiesFile("max-request-body-size=small") {
+      assertEquals(IchnoisCoreOptions.RequestSize.SMALL, it.maxRequestBodySize)
+    }
+  }
+
+  @Test
+  fun `creates options with trace propagation targets using external properties`() {
+    withPropertiesFile("""trace-propagation-targets=localhost,^(http|https)://api\\..*$""") {
+      assertEquals(listOf("localhost", """^(http|https)://api\..*$"""), it.tracePropagationTargets)
+    }
+  }
+
+  @Test
+  fun `creates options without trace propagation targets results in default tracePropagationTargets being null`() {
+    withPropertiesFile("""""") { assertEquals(null, it.tracePropagationTargets) }
+  }
+
+  @Test
+  fun `creates options with empty trace propagation targets, results in empty list`() {
+    withPropertiesFile("""trace-propagation-targets=""") {
+      assertTrue(it.tracePropagationTargets?.isEmpty() == true)
+    }
+  }
+
+  @Test
+  fun `creates options with tracingOrigins using external properties`() {
+    withPropertiesFile("""tracing-origins=localhost,^(http|https)://api\\..*$""") {
+      assertEquals(listOf("localhost", """^(http|https)://api\..*$"""), it.tracePropagationTargets)
+    }
+  }
+
+  @Test
+  fun `creates options with context tags using external properties`() {
+    withPropertiesFile("context-tags=userId,xxx") {
+      assertEquals(listOf("userId", "xxx"), it.contextTags)
+    }
+  }
+
+  @Test
+  fun `creates options with proguardUuid using external properties`() {
+    withPropertiesFile("proguard-uuid=id") { assertEquals("id", it.proguardUuid) }
+  }
+
+  @Test
+  fun `creates options with idleTimeout using external properties`() {
+    withPropertiesFile("idle-timeout=2000") { assertEquals(2000L, it.idleTimeout) }
+  }
+
+  @Test
+  fun `creates options with shutdownTimeoutMillis using external properties`() {
+    withPropertiesFile("shutdown-timeout-millis=2000") {
+      assertEquals(2000L, it.shutdownTimeoutMillis)
+    }
+  }
+
+  @Test
+  fun `creates options with sessionFlushTimeoutMillis using external properties`() {
+    withPropertiesFile("session-flush-timeout-millis=2000") {
+      assertEquals(2000L, it.sessionFlushTimeoutMillis)
+    }
+  }
+
+  @Test
+  fun `creates options with ignored exception types using external properties`() {
+    val logger = mock<ILogger>()
+    // Setting few types of classes:
+    // - RuntimeException and IllegalStateException - valid exception classes
+    // - NonExistingClass - class that does not exist - should not trigger a failure to create
+    // options
+    // - io.ichnois.IchnoisCore - class that does not extend Throwable - should not trigger a failure
+    withPropertiesFile(
+      "ignored-exceptions-for-type=java.lang.RuntimeException,java.lang.IllegalStateException,com.xx.NonExistingClass,io.ichnois.IchnoisCore",
+      logger,
+    ) { options ->
+      assertTrue(options.ignoredExceptionsForType.contains(RuntimeException::class.java))
+      assertTrue(options.ignoredExceptionsForType.contains(IllegalStateException::class.java))
+      verify(logger)
+        .log(
+          eq(IchnoisCoreLevel.WARNING),
+          any<String>(),
+          eq("com.xx.NonExistingClass"),
+          eq("com.xx.NonExistingClass"),
+        )
+      verify(logger)
+        .log(eq(IchnoisCoreLevel.WARNING), any<String>(), eq("io.ichnois.IchnoisCore"), eq("io.ichnois.IchnoisCore"))
+    }
+  }
+
+  @Test
+  fun `creates options with ignored error patterns using external properties`() {
+    val logger = mock<ILogger>()
+    withPropertiesFile("ignored-errors=Some error,Another .*", logger) { options ->
+      assertTrue(options.ignoredErrors!!.contains("Some error"))
+      assertTrue(options.ignoredErrors!!.contains("Another .*"))
+    }
+  }
+
+  @Test
+  fun `creates options with null ignored errors if missing`() {
+    val logger = mock<ILogger>()
+    withPropertiesFile("Another .*", logger) { options -> assertNull(options.ignoredErrors) }
+  }
+
+  @Test
+  fun `creates options with single bundle ID using external properties`() {
+    withPropertiesFile("bundle-ids=12ea7a02-46ac-44c0-a5bb-6d1fd9586411") { options ->
+      assertTrue(options.bundleIds.containsAll(listOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411")))
+    }
+  }
+
+  @Test
+  fun `creates options with multiple bundle IDs using external properties`() {
+    withPropertiesFile(
+      "bundle-ids=12ea7a02-46ac-44c0-a5bb-6d1fd9586411,faa3ab42-b1bd-4659-af8e-1682324aa744"
+    ) { options ->
+      assertTrue(
+        options.bundleIds.containsAll(
+          listOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411", "faa3ab42-b1bd-4659-af8e-1682324aa744")
+        )
+      )
+    }
+  }
+
+  @Test
+  fun `creates options with empty bundle IDs using external properties`() {
+    withPropertiesFile("bundle-ids=") { options ->
+      assertTrue(options.bundleIds.size == 1)
+      // trimming is tested in IchnoisCoreOptionsTest so even though there's an empty string here
+      // it will be filtered when being merged with IchnoisCoreOptions
+      assertTrue(options.bundleIds.containsAll(listOf("")))
+    }
+  }
+
+  @Test
+  fun `creates options with missing bundle IDs using external properties`() {
+    withPropertiesFile("") { options -> assertTrue(options.bundleIds.isEmpty()) }
+  }
+
+  @Test
+  fun `creates options with enabled set to true`() {
+    withPropertiesFile("enabled=true") { options -> assertTrue(options.isEnabled() == true) }
+  }
+
+  @Test
+  fun `creates options with sendModules set to false`() {
+    withPropertiesFile("send-modules=false") { options ->
+      assertTrue(options.isSendModules == false)
+    }
+  }
+
+  @Test
+  fun `creates options with ignoredCheckIns`() {
+    withPropertiesFile("ignored-checkins=slugA,slug2") { options ->
+      assertTrue(options.ignoredCheckIns!!.containsAll(listOf("slugA", "slug2")))
+    }
+  }
+
+  @Test
+  fun `creates options with null ignoredCheckIns if missing`() {
+    val logger = mock<ILogger>()
+    withPropertiesFile("Another .*", logger) { options -> assertNull(options.ignoredCheckIns) }
+  }
+
+  @Test
+  fun `creates options with ignoredTransactions`() {
+    withPropertiesFile("ignored-transactions=transactionName1,transactionName2") { options ->
+      assertTrue(
+        options.ignoredTransactions!!.containsAll(listOf("transactionName1", "transactionName2"))
+      )
+    }
+  }
+
+  @Test
+  fun `creates options with null ignoredTransactions if missing`() {
+    val logger = mock<ILogger>()
+    withPropertiesFile("Another .*", logger) { options -> assertNull(options.ignoredTransactions) }
+  }
+
+  @Test
+  fun `creates options with enableBackpressureHandling set to false`() {
+    withPropertiesFile("enable-backpressure-handling=false") { options ->
+      assertTrue(options.isEnableBackpressureHandling == false)
+    }
+  }
+
+  @Test
+  fun `creates options with enableDatabaseTransactionTracing set to true`() {
+    withPropertiesFile("enable-database-transaction-tracing=true") { options ->
+      assertTrue(options.isEnableDatabaseTransactionTracing == true)
+    }
+  }
+
+  @Test
+  fun `creates options with enableDatabaseTransactionTracing set to false`() {
+    withPropertiesFile("enable-database-transaction-tracing=false") { options ->
+      assertTrue(options.isEnableDatabaseTransactionTracing == false)
+    }
+  }
+
+  @Test
+  fun `creates options with enableCacheTracing set to true`() {
+    withPropertiesFile("enable-cache-tracing=true") { options ->
+      assertTrue(options.isEnableCacheTracing == true)
+    }
+  }
+
+  @Test
+  fun `creates options with enableCacheTracing set to false`() {
+    withPropertiesFile("enable-cache-tracing=false") { options ->
+      assertTrue(options.isEnableCacheTracing == false)
+    }
+  }
+
+  @Test
+  fun `creates options with enableQueueTracing set to true`() {
+    withPropertiesFile("enable-queue-tracing=true") { options ->
+      assertTrue(options.isEnableQueueTracing == true)
+    }
+  }
+
+  @Test
+  fun `creates options with enableQueueTracing set to false`() {
+    withPropertiesFile("enable-queue-tracing=false") { options ->
+      assertTrue(options.isEnableQueueTracing == false)
+    }
+  }
+
+  @Test
+  fun `creates options with cron defaults`() {
+    withPropertiesFile(
+      listOf(
+        "cron.default-checkin-margin=1",
+        "cron.default-max-runtime=30",
+        "cron.default-timezone=America/New_York",
+        "cron.default-failure-issue-threshold=40",
+        "cron.default-recovery-threshold=50",
+      )
+    ) { options ->
+      assertEquals(1L, options.cron?.defaultCheckinMargin)
+      assertEquals(30L, options.cron?.defaultMaxRuntime)
+      assertEquals("America/New_York", options.cron?.defaultTimezone)
+      assertEquals(40L, options.cron?.defaultFailureIssueThreshold)
+      assertEquals(50L, options.cron?.defaultRecoveryThreshold)
+    }
+  }
+
+  @Test
+  fun `creates options with sendDefaultPii set to true`() {
+    withPropertiesFile("send-default-pii=true") { options ->
+      assertTrue(options.isSendDefaultPii == true)
+    }
+  }
+
+  @Test
+  fun `creates options with forceInit set to true`() {
+    withPropertiesFile("force-init=true") { options -> assertTrue(options.isForceInit == true) }
+  }
+
+  @Test
+  fun `creates options with enableSpotlight set to true`() {
+    withPropertiesFile("enable-spotlight=true") { options ->
+      assertTrue(options.isEnableSpotlight == true)
+    }
+  }
+
+  @Test
+  fun `creates options with spotlightConnectionUrl set`() {
+    withPropertiesFile("spotlight-connection-url=http://local.ichnois.io:1234") { options ->
+      assertEquals("http://local.ichnois.io:1234", options.spotlightConnectionUrl)
+    }
+  }
+
+  @Test
+  fun `creates options with globalHubMode set to true`() {
+    withPropertiesFile("global-hub-mode=true") { options ->
+      assertTrue(options.isGlobalHubMode == true)
+    }
+  }
+
+  @Test
+  fun `creates options with globalHubMode set to false`() {
+    withPropertiesFile("global-hub-mode=false") { options ->
+      assertTrue(options.isGlobalHubMode == false)
+    }
+  }
+
+  @Test
+  fun `creates options with captureOpenTelemetryEvents set to false`() {
+    withPropertiesFile("capture-open-telemetry-events=false") { options ->
+      assertTrue(options.isCaptureOpenTelemetryEvents == false)
+    }
+  }
+
+  @Test
+  fun `creates options with captureOpenTelemetryEvents set to true`() {
+    withPropertiesFile("capture-open-telemetry-events=true") { options ->
+      assertTrue(options.isCaptureOpenTelemetryEvents == true)
+    }
+  }
+
+  @Test
+  fun `creates options with enableLogs set to true`() {
+    withPropertiesFile("logs.enabled=true") { options -> assertTrue(options.isEnableLogs == true) }
+  }
+
+  @Test
+  fun `creates options with enableMetrics set to true`() {
+    withPropertiesFile("metrics.enabled=true") { options ->
+      assertTrue(options.isEnableMetrics == true)
+    }
+  }
+
+  @Test
+  fun `creates options with enableMetrics set to false`() {
+    withPropertiesFile("metrics.enabled=false") { options ->
+      assertTrue(options.isEnableMetrics == false)
+    }
+  }
+
+  @Test
+  fun `creates options with enableMetrics set to null when not set`() {
+    withPropertiesFile { assertNull(it.isEnableMetrics) }
+  }
+
+  @Test
+  fun `creates options with profileSessionSampleRate set to 0_8`() {
+    withPropertiesFile("profile-session-sample-rate=0.8") { options ->
+      assertTrue(options.profileSessionSampleRate == 0.8)
+    }
+  }
+
+  @Test
+  fun `creates options with profilingTracesDirPath set to profile_traces`() {
+    withPropertiesFile("profiling-traces-dir-path=profile_traces") { options ->
+      assertTrue(options.profilingTracesDirPath == "profile_traces")
+    }
+  }
+
+  @Test
+  fun `creates options with profilingLifecycle set to TRACE`() {
+    withPropertiesFile("profile-lifecycle=TRACE") { options ->
+      assertTrue(options.profileLifecycle == ProfileLifecycle.TRACE)
+    }
+  }
+
+  @Test
+  fun `creates options with strictTraceContinuation set to true`() {
+    withPropertiesFile("enable-strict-trace-continuation=true") { options ->
+      assertTrue(options.isStrictTraceContinuation == true)
+    }
+  }
+
+  @Test
+  fun `creates options with strictTraceContinuation set to false`() {
+    withPropertiesFile("enable-strict-trace-continuation=false") { options ->
+      assertTrue(options.isStrictTraceContinuation == false)
+    }
+  }
+
+  @Test
+  fun `creates options with strictTraceContinuation set to null when not set`() {
+    withPropertiesFile { assertNull(it.isStrictTraceContinuation) }
+  }
+
+  @Test
+  fun `creates options with orgId using external properties`() {
+    withPropertiesFile("org-id=12345") { options -> assertEquals("12345", options.orgId) }
+  }
+
+  @Test
+  fun `creates options with orgId set to null when not set`() {
+    withPropertiesFile { assertNull(it.orgId) }
+  }
+
+  private fun withPropertiesFile(
+    textLines: List<String> = emptyList(),
+    logger: ILogger = mock(),
+    fn: (ExternalOptions) -> Unit,
+  ) {
+    // create a ichnois.properties file in temporary folder
+    val temporaryFolder = TemporaryFolder()
+    temporaryFolder.create()
+    val file = temporaryFolder.newFile("ichnois.properties")
+    textLines.forEach { file.appendText("$it\n") }
+    // set location of the ichnois.properties file
+    System.setProperty("ichnois.properties.file", file.absolutePath)
+
+    try {
+      val options = ExternalOptions.from(PropertiesProviderFactory.create(), logger)
+      fn.invoke(options)
+    } finally {
+      temporaryFolder.delete()
+    }
+  }
+
+  private fun withPropertiesFile(
+    text: String,
+    logger: ILogger = mock(),
+    fn: (ExternalOptions) -> Unit,
+  ) {
+    withPropertiesFile(listOf(text), logger, fn)
+  }
+}

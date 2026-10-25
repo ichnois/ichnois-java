@@ -1,0 +1,46 @@
+public final class io/ichnois/android/timber/BuildConfig {
+	public static final field BUILD_TYPE Ljava/lang/String;
+	public static final field DEBUG Z
+	public static final field LIBRARY_PACKAGE_NAME Ljava/lang/String;
+	public static final field ICHNOIS_TIMBER_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+	public fun <init> ()V
+}
+
+public final class io/ichnois/android/timber/IchnoisCoreTimberIntegration : io/ichnois/Integration, java/io/Closeable {
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLogLevel;)V
+	public synthetic fun <init> (Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLogLevel;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun close ()V
+	public final fun getMinBreadcrumbLevel ()Lio/ichnois/IchnoisCoreLevel;
+	public final fun getMinEventLevel ()Lio/ichnois/IchnoisCoreLevel;
+	public final fun getMinLogsLevel ()Lio/ichnois/IchnoisCoreLogLevel;
+	public fun register (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreOptions;)V
+}
+
+public final class io/ichnois/android/timber/IchnoisCoreTimberTree : timber/log/Timber$Tree {
+	public fun <init> (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLogLevel;)V
+	public synthetic fun <init> (Lio/ichnois/IScopes;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLevel;Lio/ichnois/IchnoisCoreLogLevel;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun d (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun d (Ljava/lang/Throwable;)V
+	public fun d (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun e (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun e (Ljava/lang/Throwable;)V
+	public fun e (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun i (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun i (Ljava/lang/Throwable;)V
+	public fun i (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun log (ILjava/lang/String;[Ljava/lang/Object;)V
+	public fun log (ILjava/lang/Throwable;)V
+	public fun log (ILjava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun v (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun v (Ljava/lang/Throwable;)V
+	public fun v (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun w (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun w (Ljava/lang/Throwable;)V
+	public fun w (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun wtf (Ljava/lang/String;[Ljava/lang/Object;)V
+	public fun wtf (Ljava/lang/Throwable;)V
+	public fun wtf (Ljava/lang/Throwable;Ljava/lang/String;[Ljava/lang/Object;)V
+}
+

@@ -1,0 +1,2650 @@
+package io.ichnois.android.core
+
+import android.app.Activity
+import android.app.ActivityManager
+import android.app.ActivityManager.RunningAppProcessInfo
+import android.app.Application
+import android.app.ApplicationStartInfo
+import android.content.Context
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.View
+import android.view.ViewTreeObserver
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.DateUtils
+import io.ichnois.FullyDisplayedReporter
+import io.ichnois.IScope
+import io.ichnois.Scope
+import io.ichnois.ScopeCallback
+import io.ichnois.Scopes
+import io.ichnois.IchnoisCore
+import io.ichnois.IchnoisCoreDate
+import io.ichnois.IchnoisCoreDateProvider
+import io.ichnois.IchnoisCoreExecutorService
+import io.ichnois.IchnoisCoreNanotimeDate
+import io.ichnois.IchnoisCoreTraceHeader
+import io.ichnois.IchnoisCoreTracer
+import io.ichnois.Span
+import io.ichnois.SpanId
+import io.ichnois.SpanStatus
+import io.ichnois.SpanStatus.OK
+import io.ichnois.TraceContext
+import io.ichnois.TracesSamplingDecision
+import io.ichnois.TransactionContext
+import io.ichnois.TransactionFinishedCallback
+import io.ichnois.TransactionOptions
+import io.ichnois.android.core.performance.AppStartMetrics
+import io.ichnois.android.core.performance.AppStartMetrics.AppStartType
+import io.ichnois.protocol.MeasurementValue
+import io.ichnois.protocol.IchnoisCoreId
+import io.ichnois.protocol.TransactionNameSource
+import io.ichnois.test.DeferredExecutorService
+import io.ichnois.test.getProperty
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import org.junit.runner.RunWith
+import org.mockito.ArgumentCaptor
+import org.mockito.Mockito.mockStatic
+import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.check
+import org.mockito.kotlin.clearInvocations
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowActivityManager
+
+@RunWith(AndroidJUnit4::class)
+class ActivityLifecycleIntegrationTest {
+
+  private class Fixture {
+    val application = mock<Application>()
+    val scopes = mock<Scopes>()
+    val options = IchnoisCoreAndroidOptions().apply { dsn = "https://key@ichnois-h2jw.onrender.com/proj" }
+    val bundle = mock<Bundle>()
+    val activityFramesTracker = mock<ActivityFramesTracker>()
+    val transactionFinishedCallback = mock<TransactionFinishedCallback>()
+    lateinit var shadowActivityManager: ShadowActivityManager
+
+    // we init the transaction with a mock to avoid errors when finishing it after tests that don't
+    // start it
+    var transaction: IchnoisCoreTracer = mock()
+    val buildInfo = mock<BuildInfoProvider>()
+    val createdTransactions = mutableListOf<IchnoisCoreTracer>()
+    val capturedContexts = mutableListOf<TransactionContext>()
+    val capturedOptions = mutableListOf<TransactionOptions>()
+
+    fun getSut(
+      apiVersion: Int = Build.VERSION_CODES.Q,
+      importance: Int = RunningAppProcessInfo.IMPORTANCE_FOREGROUND,
+      initializer: IchnoisCore.OptionsConfiguration<IchnoisCoreAndroidOptions>? = null,
+    ): ActivityLifecycleIntegration {
+      initializer?.configure(options)
+
+      whenever(scopes.options).thenReturn(options)
+
+      val metrics = AppStartMetrics.getInstance()
+      metrics.isAppLaunchedInForeground = true
+      metrics.appStartTimeSpan.setStartedAt(SystemClock.uptimeMillis())
+
+      // We let the ActivityLifecycleIntegration create the proper transaction here
+      val optionCaptor = argumentCaptor<TransactionOptions>()
+      val contextCaptor = argumentCaptor<TransactionContext>()
+      whenever(scopes.startTransaction(contextCaptor.capture(), optionCaptor.capture()))
+        .thenAnswer {
+          val context = contextCaptor.lastValue
+          val options = optionCaptor.lastValue
+          val t = IchnoisCoreTracer(context, scopes, options)
+          transaction = t
+          createdTransactions.add(t)
+          capturedContexts.add(context)
+          capturedOptions.add(options)
+          return@thenAnswer t
+        }
+      whenever(buildInfo.sdkInfoVersion).thenReturn(apiVersion)
+
+      val process = RunningAppProcessInfo().apply { this.importance = importance }
+      val processes = mutableListOf(process)
+      shadowActivityManager.setProcesses(processes)
+
+      return ActivityLifecycleIntegration(application, buildInfo, activityFramesTracker)
+    }
+
+    fun createView(): View {
+      val view = View(ApplicationProvider.getApplicationContext())
+
+      // Adding a listener forces ViewTreeObserver.mOnDrawListeners to be initialized and non-null.
+      val dummyListener = ViewTreeObserver.OnDrawListener {}
+      view.viewTreeObserver.addOnDrawListener(dummyListener)
+      view.viewTreeObserver.removeOnDrawListener(dummyListener)
+
+      return view
+    }
+  }
+
+  private val fixture = Fixture()
+  private lateinit var context: Context
+
+  @BeforeTest
+  fun `reset instance`() {
+    AppStartMetrics.getInstance().clear()
+    ContextUtils.resetInstance()
+
+    context = ApplicationProvider.getApplicationContext()
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager?
+    fixture.shadowActivityManager = Shadow.extract(activityManager)
+  }
+
+  @AfterTest
+  fun `clear instance`() {
+    fixture.transaction.finish()
+  }
+
+  @Test
+  fun `When ActivityLifecycleIntegration is registered, it registers activity callback`() {
+    val sut = fixture.getSut()
+    sut.register(fixture.scopes, fixture.options)
+
+    verify(fixture.application).registerActivityLifecycleCallbacks(any())
+  }
+
+  @Test
+  fun `When ActivityLifecycleIntegration is closed, it should unregister the callback`() {
+    val sut = fixture.getSut()
+    sut.register(fixture.scopes, fixture.options)
+
+    sut.close()
+
+    verify(fixture.application).unregisterActivityLifecycleCallbacks(any())
+  }
+
+  @Test
+  fun `When ActivityLifecycleIntegration is closed, it should close the ActivityFramesTracker`() {
+    val sut = fixture.getSut()
+    sut.register(fixture.scopes, fixture.options)
+
+    sut.close()
+
+    verify(fixture.activityFramesTracker).stop()
+  }
+
+  @Test
+  fun `When tracing is disabled, do not start tracing`() {
+    val sut = fixture.getSut()
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `When tracing is enabled but activity is running, do not start tracing again`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `Transaction op is ui_load and idle+deadline timeouts are set`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        check<TransactionContext> {
+          assertEquals("ui.load", it.operation)
+          assertEquals(TransactionNameSource.COMPONENT, it.transactionNameSource)
+        },
+        check<TransactionOptions> { transactionOptions ->
+          assertEquals(fixture.options.idleTimeout, transactionOptions.idleTimeout)
+          assertEquals(
+            TransactionOptions.DEFAULT_DEADLINE_TIMEOUT_AUTO_TRANSACTION,
+            transactionOptions.deadlineTimeout,
+          )
+          assertEquals("auto.ui.activity", transactionOptions.origin)
+        },
+      )
+  }
+
+  @Test
+  fun `Standalone app start transaction op is app start`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes, times(2)).startTransaction(any(), any<TransactionOptions>())
+
+    val contexts = fixture.capturedContexts
+    val appStartContext = contexts.single {
+      it.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+    }
+    assertEquals("App Start", appStartContext.name)
+    assertEquals(TransactionNameSource.COMPONENT, appStartContext.transactionNameSource)
+    val appStartTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertEquals("Activity", appStartTransaction.getData("app.vitals.start.screen"))
+    assertTrue(contexts.any { it.operation == ActivityLifecycleIntegration.UI_LOAD_OP })
+    assertFalse(
+      contexts.any {
+        it.operation == ActivityLifecycleIntegration.APP_START_COLD ||
+          it.operation == ActivityLifecycleIntegration.APP_START_WARM
+      }
+    )
+  }
+
+  @Test
+  @Config(sdk = [Build.VERSION_CODES.VANILLA_ICE_CREAM])
+  fun `Standalone app start transaction carries app start reason when available`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    val startInfo =
+      mock<ApplicationStartInfo>().apply {
+        whenever(reason).thenReturn(ApplicationStartInfo.START_REASON_LAUNCHER)
+      }
+    AppStartMetrics.getInstance().setCachedStartInfo(startInfo)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val appStartTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertEquals("launcher", appStartTransaction.getData("app.vitals.start.reason"))
+  }
+
+  @Test
+  fun `Standalone app start transaction has no app start reason when unavailable`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val appStartTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertNull(appStartTransaction.getData("app.vitals.start.reason"))
+  }
+
+  @Test
+  fun `extendAppStart eagerly creates a standalone app start transaction with the extended span`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val appStartTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertTrue(
+      appStartTransaction.children.any {
+        it.operation == ActivityLifecycleIntegration.APP_START_EXTENDED_OP
+      }
+    )
+    assertTrue(AppStartMetrics.getInstance().appStartExtension.isActive)
+    assertNotNull(AppStartMetrics.getInstance().appStartExtension.extendedAppStartSpan)
+  }
+
+  @Test
+  fun `extended app start continues the trace into ui load without a second app start transaction`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val appStartTransactions =
+      fixture.createdTransactions.filter {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertEquals(1, appStartTransactions.size)
+    assertEquals("Activity", appStartTransactions.single().getData("app.vitals.start.screen"))
+    val uiLoadTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.UI_LOAD_OP
+      }
+    assertEquals(
+      appStartTransactions.single().spanContext.traceId,
+      uiLoadTransaction.spanContext.traceId,
+    )
+  }
+
+  @Test
+  fun `extended app start trace is not reused by a later activity`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val firstActivity = mock<Activity>()
+    sut.onActivityCreated(firstActivity, fixture.bundle)
+    val appStartTraceId =
+      fixture.createdTransactions
+        .single { it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP }
+        .spanContext
+        .traceId
+
+    AppStartMetrics.getInstance().appStartExtension.finishExtendedAppStart()
+    AppStartMetrics.getInstance().onAppStartSpansSent()
+
+    val secondActivity = mock<Activity>()
+    sut.onActivityPaused(firstActivity)
+    sut.onActivityCreated(secondActivity, fixture.bundle)
+
+    assertNotEquals(appStartTraceId, fixture.createdTransactions.last().spanContext.traceId)
+  }
+
+  @Test
+  fun `extended app start screen is not overwritten by a later activity`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val firstActivity = mock<Activity>()
+    sut.onActivityCreated(firstActivity, fixture.bundle)
+
+    sut.onActivityPaused(firstActivity)
+    sut.onActivityCreated(mock<SecondAppStartActivity>(), fixture.bundle)
+
+    val appStart =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    assertEquals("Activity", appStart.getData("app.vitals.start.screen"))
+  }
+
+  @Test
+  fun `extended standalone app start transaction stays open until finishExtendedAppStart`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val appStartTransaction =
+      fixture.createdTransactions.single {
+        it.spanContext.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+
+    appStartTransaction.finish(SpanStatus.OK)
+    assertFalse(appStartTransaction.isFinished)
+
+    AppStartMetrics.getInstance().appStartExtension.finishExtendedAppStart()
+    assertTrue(appStartTransaction.isFinished)
+  }
+
+  @Test
+  fun `extended headless app start transaction stays open until finishExtendedAppStart`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    driveHeadlessAppStart()
+
+    val transaction = fixture.createdTransactions.single()
+    assertTrue(
+      transaction.children.any {
+        it.operation == ActivityLifecycleIntegration.APP_START_EXTENDED_OP
+      }
+    )
+    assertFalse(transaction.isFinished)
+
+    AppStartMetrics.getInstance().appStartExtension.finishExtendedAppStart()
+    assertTrue(transaction.isFinished)
+  }
+
+  @Test
+  fun `extended headless app start persists the app start end time`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    driveHeadlessAppStart()
+
+    assertNotNull(AppStartMetrics.getInstance().getAppStartEndTime())
+  }
+
+  @Test
+  fun `finished eager extended app start persists the app start end time`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+    assertNull(AppStartMetrics.getInstance().getAppStartEndTime())
+
+    AppStartMetrics.getInstance().appStartExtension.finishTransaction(IchnoisCoreNanotimeDate())
+    AppStartMetrics.getInstance().appStartExtension.finishExtendedAppStart()
+
+    assertNotNull(AppStartMetrics.getInstance().getAppStartEndTime())
+  }
+
+  @Test
+  fun `activity long after the eager extended app start finished starts a fresh trace`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    // the eager extension starts at launch and finishes before any activity exists
+    setAppStartTime(date = IchnoisCoreNanotimeDate(1, 0))
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+    val appStartTraceId = fixture.capturedContexts.single().traceId
+    AppStartMetrics.getInstance()
+      .appStartExtension
+      .extendedAppStartSpan!!
+      .finish(SpanStatus.OK, IchnoisCoreNanotimeDate(2, 0))
+    AppStartMetrics.getInstance().appStartExtension.finishTransaction(IchnoisCoreNanotimeDate(2, 0))
+
+    // the first activity opens more than a minute after the extension finished
+    setAppStartTime(date = IchnoisCoreNanotimeDate(TimeUnit.MINUTES.toMillis(2), 0))
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val uiLoadContext =
+      fixture.capturedContexts.last { it.operation == ActivityLifecycleIntegration.UI_LOAD_OP }
+    // too far apart: the ui.load gets its own fresh trace, not the finished app.start one
+    assertNotEquals(appStartTraceId, uiLoadContext.traceId)
+    // stored continuation state is still consumed so nothing reuses it
+    assertNull(AppStartMetrics.getInstance().getAppStartTraceId())
+  }
+
+  @Test
+  fun `extended headless app start does not create a duplicate when the extension already finished`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+    AppStartMetrics.getInstance().appStartExtension.finishExtendedAppStart()
+    AppStartMetrics.getInstance().onAppStartSpansSent()
+    val transactionsBefore = fixture.createdTransactions.size
+
+    driveHeadlessAppStart()
+
+    assertEquals(transactionsBefore, fixture.createdTransactions.size)
+  }
+
+  @Test
+  fun `extendAppStart is a no-op when standalone tracing is disabled`() {
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    assertFalse(AppStartMetrics.getInstance().appStartExtension.isActive)
+    assertNull(AppStartMetrics.getInstance().appStartExtension.extendedAppStartSpan)
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `extended app start transaction is owned by the extension and survives activity destroy`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+    AppStartMetrics.getInstance().appStartExtension.extendAppStart()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    assertTrue(AppStartMetrics.getInstance().appStartExtension.isActive)
+
+    sut.onActivityDestroyed(activity)
+    assertTrue(AppStartMetrics.getInstance().appStartExtension.isActive)
+  }
+
+  @Test
+  @Config(sdk = [Build.VERSION_CODES.VANILLA_ICE_CREAM])
+  fun `Headless standalone app start transaction carries app start reason when available`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+    val startInfo =
+      mock<ApplicationStartInfo>().apply {
+        whenever(reason).thenReturn(ApplicationStartInfo.START_REASON_BROADCAST)
+      }
+    AppStartMetrics.getInstance().setCachedStartInfo(startInfo)
+
+    driveHeadlessAppStart()
+
+    val transaction = fixture.createdTransactions.single()
+    assertEquals("broadcast", transaction.getData("app.vitals.start.reason"))
+  }
+
+  @Test
+  fun `HeadlessAppStartListener is registered when standalone flag is on and performance enabled`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart(appStartType = AppStartType.UNKNOWN)
+
+    driveHeadlessAppStart()
+
+    assertEquals(1, fixture.capturedContexts.size)
+    assertEquals(
+      ActivityLifecycleIntegration.STANDALONE_APP_START_OP,
+      fixture.capturedContexts.single().operation,
+    )
+    assertEquals("App Start", fixture.capturedContexts.single().name)
+  }
+
+  @Test
+  fun `HeadlessAppStartListener is not registered when standalone flag is off`() {
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart()
+
+    driveHeadlessAppStart()
+
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `HeadlessAppStartListener is not registered when performance is disabled`() {
+    val sut = fixture.getSut { it.isEnableStandaloneAppStartTracing = true }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart()
+
+    driveHeadlessAppStart()
+
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `close clears HeadlessAppStartListener`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    sut.close()
+    prepareHeadlessAppStart()
+
+    driveHeadlessAppStart()
+
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `onHeadlessAppStart creates standalone App Start transaction and stashes trace id`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+
+    driveHeadlessAppStart()
+
+    assertEquals(1, fixture.capturedContexts.size)
+    val context = fixture.capturedContexts.single()
+    val options = fixture.capturedOptions.single()
+    val transaction = fixture.createdTransactions.single()
+    assertEquals(ActivityLifecycleIntegration.STANDALONE_APP_START_OP, context.operation)
+    assertEquals("App Start", context.name)
+    assertEquals(TransactionNameSource.COMPONENT, context.transactionNameSource)
+    assertEquals("auto.app.start", options.origin)
+    assertFalse(options.isBindToScope)
+    assertEquals(DateUtils.millisToNanos(100), options.startTimestamp!!.nanoTimestamp())
+    assertEquals(
+      transaction.spanContext.traceId,
+      AppStartMetrics.getInstance().getAppStartTraceId(),
+    )
+    assertTrue(transaction.isFinished)
+    assertEquals(SpanStatus.OK, transaction.status)
+  }
+
+  @Test
+  @Config(sdk = [Build.VERSION_CODES.M])
+  fun `onHeadlessAppStart creates standalone App Start transaction on API 23`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessSdkInitAppStart()
+
+    driveHeadlessAppStart()
+
+    assertEquals(1, fixture.capturedContexts.size)
+    val context = fixture.capturedContexts.single()
+    val options = fixture.capturedOptions.single()
+    val transaction = fixture.createdTransactions.single()
+    assertEquals(ActivityLifecycleIntegration.STANDALONE_APP_START_OP, context.operation)
+    assertEquals("App Start", context.name)
+    assertEquals(DateUtils.millisToNanos(100), options.startTimestamp!!.nanoTimestamp())
+    assertEquals(
+      transaction.spanContext.traceId,
+      AppStartMetrics.getInstance().getAppStartTraceId(),
+    )
+    assertTrue(transaction.isFinished)
+    assertEquals(SpanStatus.OK, transaction.status)
+  }
+
+  @Test
+  fun `onHeadlessAppStart creates standalone App Start transaction when appStartType is WARM`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart(appStartType = AppStartType.WARM)
+
+    driveHeadlessAppStart()
+
+    assertEquals(1, fixture.capturedContexts.size)
+    val context = fixture.capturedContexts.single()
+    assertEquals(ActivityLifecycleIntegration.STANDALONE_APP_START_OP, context.operation)
+    assertEquals("App Start", context.name)
+    assertEquals(TransactionNameSource.COMPONENT, context.transactionNameSource)
+  }
+
+  @Test
+  fun `onHeadlessAppStart does nothing when appStartTimeSpan is incomplete`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    AppStartMetrics.getInstance().appStartTimeSpan.reset()
+    AppStartMetrics.getInstance().sdkInitTimeSpan.reset()
+
+    driveHeadlessAppStart()
+
+    verify(fixture.scopes, never()).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `Activity transaction uses custom deadline timeout when autoTransactionDeadlineTimeoutMillis is set to positive value`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.deadlineTimeout = 60000L // 60 seconds
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(mock(), fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any<TransactionContext>(),
+        check<TransactionOptions> { transactionOptions ->
+          assertEquals(60000L, transactionOptions.deadlineTimeout)
+        },
+      )
+  }
+
+  @Test
+  fun `Activity transaction uses no deadline timeout when autoTransactionDeadlineTimeoutMillis is set to zero`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.deadlineTimeout = 0L // No deadline
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(mock(), fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any<TransactionContext>(),
+        check<TransactionOptions> { transactionOptions ->
+          assertNull(transactionOptions.deadlineTimeout)
+        },
+      )
+  }
+
+  @Test
+  fun `Activity transaction uses no deadline timeout when autoTransactionDeadlineTimeoutMillis is set to negative value`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.deadlineTimeout = -1L // No deadline
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(mock(), fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any<TransactionContext>(),
+        check<TransactionOptions> { transactionOptions ->
+          assertNull(transactionOptions.deadlineTimeout)
+        },
+      )
+  }
+
+  @Test
+  fun `Activity transaction uses default deadline timeout when autoTransactionDeadlineTimeoutMillis is default`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(mock(), fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any<TransactionContext>(),
+        check<TransactionOptions> { transactionOptions ->
+          assertEquals(
+            TransactionOptions.DEFAULT_DEADLINE_TIMEOUT_AUTO_TRANSACTION,
+            transactionOptions.deadlineTimeout,
+          )
+        },
+      )
+  }
+
+  @Test
+  fun `Activity gets added to ActivityFramesTracker during transaction creation`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityStarted(activity)
+
+    verify(fixture.activityFramesTracker).addActivity(eq(activity))
+  }
+
+  @Test
+  fun `Transaction name is the Activity's name`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        check {
+          assertEquals("Activity", it.name)
+          assertEquals(TransactionNameSource.COMPONENT, it.transactionNameSource)
+        },
+        any<TransactionOptions>(),
+      )
+  }
+
+  @Test
+  fun `When transaction is created, set transaction to the bound Scope`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+
+    sut.register(fixture.scopes, fixture.options)
+
+    whenever(fixture.scopes.configureScope(any())).thenAnswer {
+      val scope = Scope(fixture.options)
+
+      sut.applyScope(scope, fixture.transaction)
+
+      assertNotNull(scope.transaction)
+    }
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+  }
+
+  @Test
+  fun `When transaction is created, do not overwrite transaction already bound to the Scope`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+
+    sut.register(fixture.scopes, fixture.options)
+
+    whenever(fixture.scopes.configureScope(any())).thenAnswer {
+      val scope = Scope(fixture.options)
+      val previousTransaction = IchnoisCoreTracer(TransactionContext("name", "op"), fixture.scopes)
+      scope.transaction = previousTransaction
+
+      sut.applyScope(scope, fixture.transaction)
+
+      assertEquals(previousTransaction, scope.transaction)
+    }
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+  }
+
+  @Test
+  fun `When tracing auto finish is enabled and ttid and ttfd spans are finished, it schedules the transaction finish`() {
+    val activity = mock<Activity>()
+    val sut =
+      fixture.getSut(
+        initializer = {
+          it.tracesSampleRate = 1.0
+          it.isEnableTimeToFullDisplayTracing = true
+          it.idleTimeout = 100
+        }
+      )
+    // the transaction idle timeout is scheduled on the dedicated timer executor
+    fixture.options.timerExecutorService = IchnoisCoreExecutorService()
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    sut.ttidSpanMap.values.first().finish()
+    sut.ttfdSpanMap.values.first().finish()
+
+    // then transaction should not be immediately finished
+    verify(fixture.scopes, never())
+      .captureTransaction(anyOrNull(), anyOrNull(), anyOrNull(), anyOrNull())
+
+    // but when idle timeout has passed
+    Thread.sleep(200)
+
+    // then the transaction should be finished
+    verify(fixture.scopes)
+      .captureTransaction(
+        check { assertEquals(SpanStatus.OK, it.status) },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `When tracing auto finish is enabled, it doesn't stop the transaction on onActivityPostResumed`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityPostResumed(activity)
+
+    verify(fixture.scopes, never())
+      .captureTransaction(any(), anyOrNull<TraceContext>(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `When tracing has status, do not overwrite it`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    fixture.transaction.status = SpanStatus.UNKNOWN_ERROR
+
+    sut.onActivityPostResumed(activity)
+    sut.onActivityDestroyed(activity)
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check { assertEquals(SpanStatus.UNKNOWN_ERROR, it.status) },
+        anyOrNull<TraceContext>(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `When tracing auto finish is disabled, do not finish transaction`() {
+    val sut =
+      fixture.getSut(
+        initializer = {
+          it.tracesSampleRate = 1.0
+          it.isEnableActivityLifecycleTracingAutoFinish = false
+        }
+      )
+    sut.register(fixture.scopes, fixture.options)
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    // We don't schedule the transaction to finish
+    assertFalse(fixture.transaction.isFinishing())
+    assertFalse(fixture.transaction.isFinished)
+  }
+
+  @Test
+  fun `When tracing is disabled, do not finish transaction`() {
+    val sut = fixture.getSut()
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityPostResumed(activity)
+
+    verify(fixture.scopes, never())
+      .captureTransaction(any(), anyOrNull<TraceContext>(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `When Activity is destroyed but transaction is running, finish it`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityDestroyed(activity)
+
+    verify(fixture.scopes)
+      .captureTransaction(any(), anyOrNull<TraceContext>(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `When transaction is started, adds to WeakWef`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    assertFalse(sut.activitiesWithOngoingTransactions.isEmpty())
+  }
+
+  @Test
+  fun `When Activity is destroyed removes WeakRef`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityDestroyed(activity)
+
+    assertTrue(sut.activitiesWithOngoingTransactions.isEmpty())
+  }
+
+  @Test
+  fun `When Activity is destroyed, sets appStartSpan status to cancelled and finish it`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityDestroyed(activity)
+
+    val span = fixture.transaction.children.first()
+    assertEquals(SpanStatus.CANCELLED, span.status)
+    assertTrue(span.isFinished)
+  }
+
+  @Test
+  fun `When Activity is destroyed, sets standalone appStartTransaction status to cancelled and finish it`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityDestroyed(activity)
+
+    val appStartTransaction =
+      fixture.createdTransactions[
+          transactionIndexForOperation(ActivityLifecycleIntegration.STANDALONE_APP_START_OP)]
+    assertEquals(SpanStatus.CANCELLED, appStartTransaction.status)
+    assertTrue(appStartTransaction.isFinished)
+  }
+
+  @Test
+  fun `When Activity is destroyed, sets appStartSpan to null`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityDestroyed(activity)
+
+    assertNull(sut.appStartSpan)
+  }
+
+  @Test
+  fun `When Activity is destroyed, finish ttidSpan with deadline_exceeded and remove from map`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    assertNotNull(sut.ttidSpanMap[activity])
+    sut.onActivityDestroyed(activity)
+
+    val span =
+      fixture.transaction.children.first { it.operation == ActivityLifecycleIntegration.TTID_OP }
+    assertEquals(SpanStatus.DEADLINE_EXCEEDED, span.status)
+    assertTrue(span.isFinished)
+  }
+
+  @Test
+  fun `When Activity is destroyed, sets ttidSpan to null`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    assertNotNull(sut.ttidSpanMap[activity])
+
+    sut.onActivityDestroyed(activity)
+    assertNull(sut.ttidSpanMap[activity])
+  }
+
+  @Test
+  fun `When Activity is destroyed, finish ttfdSpan with deadline_exceeded and remove from map`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    assertNotNull(sut.ttfdSpanMap[activity])
+    sut.onActivityDestroyed(activity)
+
+    val span =
+      fixture.transaction.children.first { it.operation == ActivityLifecycleIntegration.TTFD_OP }
+    assertEquals(SpanStatus.DEADLINE_EXCEEDED, span.status)
+    assertTrue(span.isFinished)
+  }
+
+  @Test
+  fun `When Activity is destroyed, sets ttfdSpan to null`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    assertNotNull(sut.ttfdSpanMap[activity])
+
+    sut.onActivityDestroyed(activity)
+    assertNull(sut.ttfdSpanMap[activity])
+  }
+
+  @Test
+  fun `When new Activity and transaction is created, finish previous ones`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    sut.onActivityCreated(mock(), mock())
+
+    sut.onActivityCreated(mock(), fixture.bundle)
+    verify(fixture.scopes)
+      .captureTransaction(any(), anyOrNull<TraceContext>(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `do not stop transaction on resumed`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, mock())
+    sut.onActivityResumed(activity)
+
+    verify(fixture.scopes, never()).captureTransaction(any(), any(), anyOrNull(), anyOrNull())
+  }
+
+  @Test
+  fun `start transaction on created`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(mock(), mock())
+
+    verify(fixture.scopes).startTransaction(any(), any<TransactionOptions>())
+  }
+
+  @Test
+  fun `stop transaction on resumed does not finish ttfd if isEnableTimeToFullDisplayTracing`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    fixture.options.idleTimeout = 0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, mock())
+    val ttfd = sut.ttfdSpanMap[activity]
+    sut.ttidSpanMap.values.first().finish()
+    sut.onActivityResumed(activity)
+    sut.onActivityPostResumed(activity)
+    runFirstDraw(fixture.createView())
+
+    assertNotNull(ttfd)
+    assertFalse(ttfd.isFinished)
+  }
+
+  @Test
+  fun `reportFullyDrawn finishes the ttfd`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, mock())
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    sut.ttidSpanMap.values.first().finish()
+    fixture.options.fullyDisplayedReporter.reportFullyDrawn()
+    assertTrue(ttfdSpan!!.isFinished)
+    assertNotEquals(SpanStatus.CANCELLED, ttfdSpan.status)
+  }
+
+  @Test
+  fun `if ttfd is disabled, no listener is registered for FullyDisplayedReporter`() {
+    val ttfdReporter = mock<FullyDisplayedReporter>()
+
+    val sut = fixture.getSut()
+    fixture.options.apply {
+      tracesSampleRate = 1.0
+      isEnableTimeToFullDisplayTracing = false
+      fullyDisplayedReporter = ttfdReporter
+    }
+
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, mock())
+
+    verify(ttfdReporter, never()).registerFullyDrawnListener(any())
+  }
+
+  @Test
+  fun `When firstActivityCreated is false, start transaction with given appStartTime`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(false)
+
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(date)
+    fixture.options.dateProvider = IchnoisCoreDateProvider { date }
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // call only once
+    verify(fixture.scopes)
+      .startTransaction(
+        any(),
+        check<TransactionOptions> {
+          assertEquals(date.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+        },
+      )
+  }
+
+  @Test
+  fun `When firstActivityCreated is false and app start sampling decision is set, start transaction with isAppStart true`() {
+    AppStartMetrics.getInstance().appStartSamplingDecision = mock()
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(false)
+
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(date)
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any(),
+        check<TransactionOptions> {
+          assertEquals(date.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+          assertTrue(it.isAppStartTransaction)
+        },
+      )
+  }
+
+  @Test
+  fun `When firstActivityCreated is false and app start sampling decision is not set, start transaction with isAppStart false`() {
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(false)
+
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    val date2 = IchnoisCoreNanotimeDate(2, 2)
+    setAppStartTime(date)
+
+    val activity = mock<Activity>()
+    // The activity onCreate date will be ignored
+    fixture.options.dateProvider = IchnoisCoreDateProvider { date2 }
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any(),
+        check<TransactionOptions> {
+          assertEquals(date.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+          assertNotEquals(date2.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+          assertFalse(it.isAppStartTransaction)
+        },
+      )
+  }
+
+  @Test
+  fun `When firstActivityCreated is true and app start sampling decision is set, start transaction with isAppStart false`() {
+    AppStartMetrics.getInstance().appStartSamplingDecision = mock()
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(true)
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(date)
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(any(), check<TransactionOptions> { assertFalse(it.isAppStartTransaction) })
+  }
+
+  @Test
+  fun `When firstActivityCreated is false and no app start time is set, default to onActivityPreCreated time`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(false)
+
+    // usually set by IchnoisCorePerformanceProvider
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    val date2 = IchnoisCoreNanotimeDate(2, 2)
+
+    val activity = mock<Activity>()
+    // Activity onCreate date will be used
+    fixture.options.dateProvider = IchnoisCoreDateProvider { date2 }
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    verify(fixture.scopes)
+      .startTransaction(
+        any(),
+        check<TransactionOptions> {
+          assertEquals(date2.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+          assertNotEquals(date.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+        },
+      )
+  }
+
+  @Test
+  fun `When not foregroundImportance, do not create app start span`() {
+    val sut = fixture.getSut(importance = RunningAppProcessInfo.IMPORTANCE_BACKGROUND)
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually set by IchnoisCorePerformanceProvider
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(date)
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // call only once
+    verify(fixture.scopes)
+      .startTransaction(
+        any(),
+        check<TransactionOptions> {
+          assertNotEquals(date.nanoTimestamp(), it.startTimestamp!!.nanoTimestamp())
+        },
+      )
+  }
+
+  @Test
+  fun `Create and finish app start span immediately in case SDK init is deferred`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually set by IchnoisCorePerformanceProvider
+    val startDate = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(startDate)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    appStartMetrics.appStartType = AppStartType.WARM
+    appStartMetrics.sdkInitTimeSpan.setStoppedAt(2)
+    appStartMetrics.appStartTimeSpan.setStoppedAt(2)
+
+    val activity = mock<Activity>()
+    // An Activity already started, as SDK init is deferred
+    sut.onActivityPrePaused(activity)
+    sut.onActivityPaused(activity)
+    // And when we create a new Activity
+    sut.onActivityPreCreated(activity, null)
+    sut.onActivityCreated(activity, null)
+    sut.onActivityStopped(activity)
+    sut.onActivityDestroyed(activity)
+
+    // No app start span is created
+    val appStartSpan =
+      fixture.transaction.children.firstOrNull {
+        it.operation.startsWith("app.start.warm") || it.operation.startsWith("app.start.cold")
+      }
+    assertNull(appStartSpan)
+  }
+
+  @Test
+  fun `launcher activity emits ui load and standalone App Start sharing trace id`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    val firstFrameDate = IchnoisCoreNanotimeDate(1499, 0)
+    fixture.options.dateProvider = IchnoisCoreDateProvider { firstFrameDate }
+    setAppStartTime(IchnoisCoreNanotimeDate(1, 0))
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    assertEquals(2, fixture.capturedContexts.size)
+    val uiLoadIndex = transactionIndexForOperation(ActivityLifecycleIntegration.UI_LOAD_OP)
+    val appStartIndex =
+      transactionIndexForOperation(ActivityLifecycleIntegration.STANDALONE_APP_START_OP)
+    val uiLoadTransaction = fixture.createdTransactions[uiLoadIndex]
+    val appStartTransaction = fixture.createdTransactions[appStartIndex]
+
+    assertEquals(uiLoadTransaction.spanContext.traceId, appStartTransaction.spanContext.traceId)
+    assertEquals("auto.app.start", fixture.capturedOptions[appStartIndex].origin)
+    assertEquals("auto.ui.activity", fixture.capturedOptions[uiLoadIndex].origin)
+    assertFalse(fixture.capturedOptions[appStartIndex].isBindToScope)
+    assertFalse(
+      uiLoadTransaction.children.any {
+        it.operation == ActivityLifecycleIntegration.APP_START_COLD ||
+          it.operation == ActivityLifecycleIntegration.APP_START_WARM
+      }
+    )
+
+    sut.onActivityPostCreated(activity, fixture.bundle)
+    sut.onActivityPreStarted(activity)
+    sut.onActivityStarted(activity)
+    sut.onActivityPostStarted(activity)
+
+    assertTrue(appStartTransaction.children.any { it.operation == "activity.load" })
+
+    sut.onActivityResumed(activity)
+    runFirstDraw(fixture.createView())
+
+    val ttidSpan =
+      uiLoadTransaction.children.single { it.operation == ActivityLifecycleIntegration.TTID_OP }
+    assertTrue(ttidSpan.isFinished)
+    assertTrue(appStartTransaction.isFinished)
+    assertEquals(ttidSpan.finishDate, appStartTransaction.finishDate)
+    assertEquals(
+      ttidSpan.measurements[MeasurementValue.KEY_TIME_TO_INITIAL_DISPLAY]!!.value,
+      AppStartMetrics.getInstance().appStartTimeSpan.durationMs,
+    )
+  }
+
+  @Test
+  fun `launcher activity attaches lifecycle spans before finishing stopped standalone App Start`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    val appStartEndDate = IchnoisCoreNanotimeDate(499, 0)
+    setAppStartTime(IchnoisCoreNanotimeDate(1, 0), appStartEndDate)
+
+    val activity = mock<Activity>()
+    sut.onActivityPreCreated(activity, fixture.bundle)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val appStartIndex =
+      transactionIndexForOperation(ActivityLifecycleIntegration.STANDALONE_APP_START_OP)
+    val appStartTransaction = fixture.createdTransactions[appStartIndex]
+    assertFalse(appStartTransaction.isFinished)
+
+    sut.onActivityPostCreated(activity, fixture.bundle)
+    sut.onActivityPreStarted(activity)
+    sut.onActivityStarted(activity)
+    sut.onActivityPostStarted(activity)
+
+    val activityLoadSpans = appStartTransaction.children.filter { it.operation == "activity.load" }
+    assertEquals(2, activityLoadSpans.size)
+    assertTrue(activityLoadSpans.all { it.isFinished })
+    assertTrue(appStartTransaction.isFinished)
+    assertEquals(appStartEndDate.nanoTimestamp(), appStartTransaction.finishDate!!.nanoTimestamp())
+  }
+
+  @Test
+  fun `activity following a headless start reuses trace id and does not emit second standalone`() {
+    val storedTraceId = IchnoisCoreId()
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    AppStartMetrics.getInstance().setAppStartTraceId(storedTraceId)
+    // headless start always stores the trace header alongside the trace id; the ui.load txn
+    // continues that trace via continueTrace, sharing the trace id.
+    AppStartMetrics.getInstance().appStartIchnoisCoreTraceHeader =
+      IchnoisCoreTraceHeader(storedTraceId, SpanId(), true).value
+    sut.register(fixture.scopes, fixture.options)
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    assertEquals(1, fixture.capturedContexts.size)
+    val context = fixture.capturedContexts.single()
+    assertEquals(ActivityLifecycleIntegration.UI_LOAD_OP, context.operation)
+    assertEquals(storedTraceId, context.traceId)
+    assertNull(AppStartMetrics.getInstance().getAppStartTraceId())
+  }
+
+  @Test
+  fun `activity within a minute of the headless start continues the same trace`() {
+    val storedTraceId = IchnoisCoreId()
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    AppStartMetrics.getInstance().setAppStartTraceId(storedTraceId)
+    AppStartMetrics.getInstance().appStartIchnoisCoreTraceHeader =
+      IchnoisCoreTraceHeader(storedTraceId, SpanId(), true).value
+    // headless start ended right before the activity opens
+    AppStartMetrics.getInstance().appStartEndTime = IchnoisCoreNanotimeDate(0, 0)
+    sut.register(fixture.scopes, fixture.options)
+    setAppStartTime(date = IchnoisCoreNanotimeDate(1, 0))
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val context = fixture.capturedContexts.single()
+    assertEquals(ActivityLifecycleIntegration.UI_LOAD_OP, context.operation)
+    assertEquals(storedTraceId, context.traceId)
+  }
+
+  @Test
+  fun `activity more than a minute after the headless start starts a fresh trace`() {
+    val storedTraceId = IchnoisCoreId()
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    AppStartMetrics.getInstance().setAppStartTraceId(storedTraceId)
+    AppStartMetrics.getInstance().appStartIchnoisCoreTraceHeader =
+      IchnoisCoreTraceHeader(storedTraceId, SpanId(), true).value
+    // headless start ended at epoch, but the activity opens more than a minute later
+    AppStartMetrics.getInstance().appStartEndTime = IchnoisCoreNanotimeDate(0, 0)
+    sut.register(fixture.scopes, fixture.options)
+    setAppStartTime(date = IchnoisCoreNanotimeDate(TimeUnit.MINUTES.toMillis(2), 0))
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val context = fixture.capturedContexts.single()
+    assertEquals(ActivityLifecycleIntegration.UI_LOAD_OP, context.operation)
+    // too far apart: the ui.load gets its own fresh trace, not the stored one
+    assertNotEquals(storedTraceId, context.traceId)
+    // stored continuation state is still consumed so nothing reuses it
+    assertNull(AppStartMetrics.getInstance().getAppStartTraceId())
+  }
+
+  @Test
+  fun `onHeadlessAppStart stores ichnois-trace and baggage headers for continuation`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+
+    driveHeadlessAppStart()
+
+    val transaction = fixture.createdTransactions.single()
+    val metrics = AppStartMetrics.getInstance()
+    val ichnoisTraceHeader = metrics.appStartIchnoisCoreTraceHeader
+    val baggageHeader = metrics.appStartBaggageHeader
+    assertNotNull(ichnoisTraceHeader)
+    assertNotNull(baggageHeader)
+    // ichnois-trace carries the standalone app.start trace id so a later ui.load txn can continue it
+    assertTrue(ichnoisTraceHeader.startsWith(transaction.spanContext.traceId.toString()))
+  }
+
+  @Test
+  fun `launcher activity shares standalone App Start trace and sampleRand as a sibling`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+    setAppStartTime()
+    // the app-start sampling decision carries the sampleRand the whole trace should share
+    AppStartMetrics.getInstance()
+      .setAppStartSamplingDecision(TracesSamplingDecision(true, 1.0, 0.42))
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    assertEquals(2, fixture.capturedContexts.size)
+    val appStartIndex =
+      transactionIndexForOperation(ActivityLifecycleIntegration.STANDALONE_APP_START_OP)
+    val uiLoadIndex = transactionIndexForOperation(ActivityLifecycleIntegration.UI_LOAD_OP)
+    // app.start is created first so it roots the trace; ui.load shares it
+    assertTrue(appStartIndex < uiLoadIndex)
+
+    val appStartContext = fixture.capturedContexts[appStartIndex]
+    val uiLoadContext = fixture.capturedContexts[uiLoadIndex]
+    assertEquals(appStartContext.traceId, uiLoadContext.traceId)
+    // both share the same sampleRand
+    assertEquals(0.42, appStartContext.baggage?.sampleRand)
+    assertEquals(0.42, uiLoadContext.baggage?.sampleRand)
+    // siblings, not parent/child: ui.load has no parent span id
+    assertNull(uiLoadContext.parentSpanId)
+  }
+
+  @Test
+  fun `activity following a headless start shares stored trace and sampleRand as a sibling and clears headers`() {
+    val sut = fixture.getSut {
+      it.tracesSampleRate = 1.0
+      it.isEnableStandaloneAppStartTracing = true
+    }
+    sut.register(fixture.scopes, fixture.options)
+
+    // 1) a headless start emits the standalone app.start and stores its trace headers
+    prepareHeadlessAppStart(appStartType = AppStartType.COLD)
+    driveHeadlessAppStart()
+    val appStartTransaction = fixture.createdTransactions.single()
+
+    // 2) an activity opens and shares the stored trace instead of emitting a second standalone
+    setAppStartTime()
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    val uiLoadContext =
+      fixture.capturedContexts.last { it.operation == ActivityLifecycleIntegration.UI_LOAD_OP }
+    assertFalse(
+      fixture.capturedContexts.drop(1).any {
+        it.operation == ActivityLifecycleIntegration.STANDALONE_APP_START_OP
+      }
+    )
+    assertEquals(appStartTransaction.spanContext.traceId, uiLoadContext.traceId)
+    // siblings, not parent/child: ui.load has no parent span id
+    assertNull(uiLoadContext.parentSpanId)
+
+    // stored continuation state is consumed
+    assertNull(AppStartMetrics.getInstance().getAppStartTraceId())
+    assertNull(AppStartMetrics.getInstance().appStartIchnoisCoreTraceHeader)
+    assertNull(AppStartMetrics.getInstance().appStartBaggageHeader)
+  }
+
+  @Test
+  fun `standalone flag off launcher activity emits single ui load with nested app start cold child`() {
+    val sut = fixture.getSut { it.tracesSampleRate = 1.0 }
+    sut.register(fixture.scopes, fixture.options)
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    assertEquals(1, fixture.capturedContexts.size)
+    assertEquals(
+      ActivityLifecycleIntegration.UI_LOAD_OP,
+      fixture.capturedContexts.single().operation,
+    )
+    assertTrue(
+      fixture.createdTransactions.single().children.any {
+        it.operation == ActivityLifecycleIntegration.APP_START_COLD
+      }
+    )
+  }
+
+  @Test
+  fun `When IchnoisCorePerformanceProvider is disabled, app start time span is still created`() {
+    val sut = fixture.getSut(importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND)
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually done by IchnoisCorePerformanceProvider, if disabled it's done by
+    // IchnoisCoreAndroid.init
+    val startDate = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(startDate)
+    AppStartMetrics.getInstance().appStartType = AppStartType.WARM
+
+    // when activity is created
+    val view = fixture.createView()
+    val activity = mock<Activity>()
+    whenever(activity.findViewById<View>(any())).thenReturn(view)
+    sut.onActivityCreated(activity, fixture.bundle)
+    // then app-start end time should still be null
+    assertTrue(AppStartMetrics.getInstance().sdkInitTimeSpan.hasNotStopped())
+
+    // when activity is resumed
+    sut.onActivityResumed(activity)
+    runFirstDraw(view)
+    // end-time should be set
+    assertTrue(AppStartMetrics.getInstance().sdkInitTimeSpan.hasStopped())
+  }
+
+  @Test
+  fun `When app-start end time is already set, it should not be overwritten`() {
+    val sut = fixture.getSut(importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND)
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually done by IchnoisCorePerformanceProvider
+    val startDate = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(startDate)
+    AppStartMetrics.getInstance().appStartType = AppStartType.WARM
+    AppStartMetrics.getInstance().sdkInitTimeSpan.setStoppedAt(1234)
+
+    // when activity is created and resumed
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityResumed(activity)
+
+    // then the end time should not be overwritten
+    assertEquals(
+      DateUtils.millisToNanos(1234),
+      AppStartMetrics.getInstance().sdkInitTimeSpan.projectedStopTimestamp!!.nanoTimestamp(),
+    )
+  }
+
+  @Test
+  fun `When activity lifecycle happens multiple times, app-start end time should not be overwritten`() {
+    val sut = fixture.getSut(importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND)
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually done by IchnoisCorePerformanceProvider
+    val startDate = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(startDate)
+    AppStartMetrics.getInstance().appStartType = AppStartType.WARM
+
+    // when activity is created, started and resumed multiple times
+    val view = fixture.createView()
+    val activity = mock<Activity>()
+    whenever(activity.findViewById<View>(any())).thenReturn(view)
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityStarted(activity)
+    sut.onActivityResumed(activity)
+    runFirstDraw(view)
+
+    val firstAppStartEndTime = AppStartMetrics.getInstance().sdkInitTimeSpan.projectedStopTimestamp
+
+    sut.onActivityPaused(activity)
+    sut.onActivityStopped(activity)
+    sut.onActivityStarted(activity)
+    sut.onActivityResumed(activity)
+    runFirstDraw(view)
+
+    // then the end time should not be overwritten
+    assertEquals(
+      firstAppStartEndTime!!.nanoTimestamp(),
+      AppStartMetrics.getInstance().sdkInitTimeSpan.projectedStopTimestamp!!.nanoTimestamp(),
+    )
+  }
+
+  @Test
+  fun `When firstActivityCreated is true, start transaction but not with given appStartTime`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(true)
+
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime()
+
+    val activity = mock<Activity>()
+    // First invocation: we expect to start a transaction with the appStartTime
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityPostResumed(activity)
+    assertNotEquals(date.nanoTimestamp(), fixture.transaction.startDate.nanoTimestamp())
+  }
+
+  @Test
+  fun `When transaction is finished, it gets removed from scope`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    whenever(fixture.scopes.configureScope(any())).thenAnswer {
+      val scope = Scope(fixture.options)
+
+      scope.transaction = fixture.transaction
+
+      sut.clearScope(scope, fixture.transaction)
+
+      assertNull(scope.transaction)
+    }
+
+    sut.onActivityDestroyed(activity)
+  }
+
+  @Test
+  fun `When transaction is started and isEnableTimeToFullDisplayTracing is disabled, no ttfd span is started`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = false
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    assertNull(ttfdSpan)
+  }
+
+  @Test
+  fun `When transaction is started and isEnableTimeToFullDisplayTracing is enabled, ttfd span is started`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    assertNotNull(ttfdSpan)
+  }
+
+  @Test
+  fun `When isEnableTimeToFullDisplayTracing is true and reportFullyDrawn is not called, ttfd span is finished automatically with timeout`() {
+    val sut = fixture.getSut()
+    val deferredExecutorService = DeferredExecutorService()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    fixture.options.executorService = deferredExecutorService
+    sut.register(fixture.scopes, fixture.options)
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+
+    // Assert the ttfd span is running and a timeout autoCancel task has been scheduled
+    assertNotNull(ttfdSpan)
+    assertFalse(ttfdSpan.isFinished)
+    assertTrue(deferredExecutorService.hasScheduledRunnables())
+
+    // Run the autoClose task and assert the ttfd span is finished with deadlineExceeded
+    deferredExecutorService.runAll()
+    assertTrue(ttfdSpan.isFinished)
+    assertEquals(SpanStatus.DEADLINE_EXCEEDED, ttfdSpan.status)
+
+    sut.onActivityDestroyed(activity)
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          // ttfd timed out, so its measurement should not be set
+          val ttfdMeasurement = it.measurements[MeasurementValue.KEY_TIME_TO_FULL_DISPLAY]
+          assertNull(ttfdMeasurement)
+        },
+        any(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `When isEnableTimeToFullDisplayTracing is true and reportFullyDrawn is called, ttfd is finished on first frame if ttid is running`() {
+    val sut = fixture.getSut()
+    val view = fixture.createView()
+    val activity = mock<Activity>()
+    whenever(activity.findViewById<View>(any())).thenReturn(view)
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityResumed(activity)
+    val ttidSpan = sut.ttidSpanMap[activity]
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+
+    // Assert the ttfd span is running and a timeout autoCancel future has been scheduled
+    assertNotNull(ttidSpan)
+    assertNotNull(ttfdSpan)
+    assertFalse(ttidSpan.isFinished)
+    assertFalse(ttfdSpan.isFinished)
+
+    // ReportFullyDrawn should not finish the ttfd span, as the ttid is still running
+    fixture.options.fullyDisplayedReporter.reportFullyDrawn()
+    assertFalse(ttfdSpan.isFinished)
+
+    // But when ReportFullyDrawn should not finish the ttfd span, as the ttid is still running
+    runFirstDraw(view)
+    assertTrue(ttidSpan.isFinished)
+    assertTrue(ttfdSpan.isFinished)
+  }
+
+  @Test
+  fun `When isEnableTimeToFullDisplayTracing is true and reportFullyDrawn is called, ttfd autoClose future is cancelled`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    sut.register(fixture.scopes, fixture.options)
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    val ttidSpan = sut.ttidSpanMap[activity]
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    var autoCloseFuture = sut.getProperty<Future<*>?>("ttfdAutoCloseFuture")
+    ttidSpan?.finish()
+
+    // Assert the ttfd span is running and a timeout autoCancel future has been scheduled
+    assertNotNull(ttfdSpan)
+    assertFalse(ttfdSpan.isFinished)
+    assertNotNull(autoCloseFuture)
+
+    // ReportFullyDrawn should finish the ttfd span and cancel the future
+    fixture.options.fullyDisplayedReporter.reportFullyDrawn()
+    assertTrue(ttfdSpan.isFinished)
+    assertNotEquals(SpanStatus.DEADLINE_EXCEEDED, ttfdSpan.status)
+    assertTrue(autoCloseFuture.isCancelled)
+
+    // The current internal reference to autoClose future should be null after ReportFullyDrawn
+    autoCloseFuture = sut.getProperty<Future<*>?>("ttfdAutoCloseFuture")
+    assertNull(autoCloseFuture)
+
+    sut.onActivityDestroyed(activity)
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          // ttfd was finished successfully, so its measurement should be set
+          val ttfdMeasurement = it.measurements[MeasurementValue.KEY_TIME_TO_FULL_DISPLAY]
+          assertNotNull(ttfdMeasurement)
+          assertTrue(ttfdMeasurement.value.toLong() > 0)
+        },
+        any(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `When isEnableTimeToFullDisplayTracing is true and another activity starts, the old ttfd is finished and the old autoClose future is cancelled`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    // the timeout has to be really scheduled for cancelling it to be observable
+    fixture.options.executorService = DeferredExecutorService()
+    sut.register(fixture.scopes, fixture.options)
+    val activity = mock<Activity>()
+    val activity2 = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityPostResumed(activity)
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    val autoCloseFuture = sut.getProperty<Future<*>?>("ttfdAutoCloseFuture")
+
+    // Assert the ttfd span is running and a timeout autoCancel future has been scheduled
+    assertNotNull(ttfdSpan)
+    assertFalse(ttfdSpan.isFinished)
+    assertNotNull(autoCloseFuture)
+
+    // Starting a new Activity should finish the old ttfd span with deadlineExceeded and cancel the
+    // old future
+    sut.onActivityCreated(activity2, fixture.bundle)
+    assertTrue(ttfdSpan.isFinished)
+    assertEquals(SpanStatus.DEADLINE_EXCEEDED, ttfdSpan.status)
+    assertTrue(autoCloseFuture.isCancelled)
+
+    // Another autoClose future and ttfd span should be started after the second activity starts
+    val autoCloseFuture2 = sut.getProperty<Future<*>?>("ttfdAutoCloseFuture")
+    val ttfdSpan2 = sut.ttfdSpanMap[activity2]
+    assertNotNull(ttfdSpan2)
+    assertFalse(ttfdSpan2.isFinished)
+    assertNotNull(autoCloseFuture2)
+    assertFalse(autoCloseFuture2.isCancelled)
+    sut.onActivityDestroyed(activity)
+  }
+
+  @Test
+  fun `ttid is finished after first frame drawn`() {
+    val sut = fixture.getSut()
+    val view = fixture.createView()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = 1.0
+    whenever(activity.findViewById<View>(any())).thenReturn(view)
+
+    // Make the integration create the spans and register to the FirstDrawDoneListener
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityResumed(activity)
+
+    // The ttid span should be running
+    val ttidSpan = sut.ttidSpanMap[activity]
+    assertNotNull(ttidSpan)
+    assertFalse(ttidSpan.isFinished)
+
+    // Mock the draw of the view. The ttid span should finish now
+    runFirstDraw(view)
+    assertTrue(ttidSpan.isFinished)
+
+    sut.onActivityDestroyed(activity)
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          // ttid measurement should be set
+          val ttidMeasurement = it.measurements[MeasurementValue.KEY_TIME_TO_INITIAL_DISPLAY]
+          assertNotNull(ttidMeasurement)
+          assertTrue(ttidMeasurement.value.toLong() > 0)
+        },
+        any(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `When isEnableTimeToFullDisplayTracing is true and reportFullyDrawn is called too early, ttfd is adjusted to equal ttid`() {
+    val sut =
+      fixture.getSut() {
+        //            it.fullyDisplayedReporter = mock()
+      }
+    val view = fixture.createView()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    whenever(activity.findViewById<View>(any())).thenReturn(view)
+
+    // Make the integration create the spans and register to the FirstDrawDoneListener
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityResumed(activity)
+
+    // The ttid and ttfd spans should be running
+    val ttidSpan = sut.ttidSpanMap[activity] as Span
+    val ttfdSpan = sut.ttfdSpanMap[activity] as Span
+    assertFalse(ttidSpan.isFinished)
+    assertFalse(ttfdSpan.isFinished)
+
+    // Let's finish the ttfd span too early (before the first view is drawn)
+    fixture.options.fullyDisplayedReporter.reportFullyDrawn()
+
+    // The TTFD shouldn't be finished yet
+    assertFalse(ttfdSpan.isFinished)
+
+    // Mock the draw of the view. The ttid span should finish now and the ttfd, too
+    runFirstDraw(view)
+    assertTrue(ttidSpan.isFinished)
+    assertTrue(ttfdSpan.isFinished)
+    assertEquals(ttfdSpan.finishDate, ttidSpan.finishDate)
+
+    sut.onActivityDestroyed(activity)
+
+    // The measurements should be set to the same value for ttid and ttfd
+    val ttidDuration = TimeUnit.NANOSECONDS.toMillis(ttidSpan.finishDate!!.diff(ttidSpan.startDate))
+    val ttfdDuration = TimeUnit.NANOSECONDS.toMillis(ttfdSpan.finishDate!!.diff(ttfdSpan.startDate))
+    assertEquals(ttidDuration, ttfdDuration)
+    // TTID also has initial display measurement, but TTFD has not
+    assertEquals(
+      ttidDuration,
+      ttidSpan.measurements[MeasurementValue.KEY_TIME_TO_INITIAL_DISPLAY]!!.value,
+    )
+    assertEquals(
+      ttidDuration,
+      ttidSpan.measurements[MeasurementValue.KEY_TIME_TO_FULL_DISPLAY]!!.value,
+    )
+    assertEquals(
+      ttidDuration,
+      ttfdSpan.measurements[MeasurementValue.KEY_TIME_TO_FULL_DISPLAY]!!.value,
+    )
+
+    verify(fixture.scopes)
+      .captureTransaction(
+        check {
+          // ttid and ttfd measurements should be the same
+          val ttidMeasurement = it.measurements[MeasurementValue.KEY_TIME_TO_INITIAL_DISPLAY]
+          val ttfdMeasurement = it.measurements[MeasurementValue.KEY_TIME_TO_FULL_DISPLAY]
+          assertNotNull(ttidMeasurement)
+          assertNotNull(ttfdMeasurement)
+          assertEquals(ttidMeasurement.value, ttfdMeasurement.value)
+        },
+        any(),
+        anyOrNull(),
+        anyOrNull(),
+      )
+  }
+
+  @Test
+  fun `transaction has same start timestamp of ttid and ttfd`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // The ttid span should be running
+    val ttidSpan = sut.ttidSpanMap[activity]
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    assertNotNull(ttidSpan)
+    assertNotNull(ttfdSpan)
+
+    assertEquals(ttidSpan.startDate, fixture.transaction.startDate)
+    assertEquals(ttfdSpan.startDate, fixture.transaction.startDate)
+  }
+
+  @Test
+  fun `ttfd span is trimmed if reportFullyDisplayed is never called`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    val view = fixture.createView()
+    val deferredExecutorService = DeferredExecutorService()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+    fixture.options.executorService = deferredExecutorService
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+    sut.onActivityResumed(activity)
+
+    runFirstDraw(view)
+    val ttidSpan = sut.ttidSpanMap[activity]
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+
+    // The ttid should be finished
+    assertNotNull(ttidSpan)
+    assertTrue(ttidSpan.isFinished)
+
+    // Assert the ttfd span is still running
+    assertNotNull(ttfdSpan)
+    assertFalse(ttfdSpan.isFinished)
+
+    // Run the autoClose task 1 ms after finishing the ttid span and assert the ttfd span is
+    // finished
+    deferredExecutorService.runAll()
+    assertTrue(ttfdSpan.isFinished)
+
+    // the ttfd span should be trimmed to be equal to the ttid span, and the description should end
+    // with "-exceeded"
+    assertEquals(SpanStatus.DEADLINE_EXCEEDED, ttfdSpan.status)
+    assertEquals(ttidSpan.finishDate, ttfdSpan.finishDate)
+    assertEquals(ttfdSpan.description, "Activity full display - Deadline Exceeded")
+  }
+
+  @Test
+  fun `ttfd span is running on new activity when previous finishes`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    val activity2 = mock<Activity>()
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.isEnableTimeToFullDisplayTracing = true
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+    val ttfdSpan = sut.ttfdSpanMap[activity]
+    assertNotNull(ttfdSpan)
+    assertFalse(ttfdSpan.isFinished)
+    sut.onActivityPaused(activity)
+    sut.onActivityCreated(activity2, fixture.bundle)
+    val ttfdSpan2 = sut.ttfdSpanMap[activity2]
+    sut.onActivityResumed(activity2)
+    sut.onActivityStopped(activity)
+    sut.onActivityDestroyed(activity)
+    assertNotNull(ttfdSpan2)
+    // The old ttfd is finished and the new one is running
+    assertTrue(ttfdSpan.isFinished)
+    assertFalse(ttfdSpan2.isFinished)
+  }
+
+  @Test
+  fun `starts new trace if performance is disabled and trace ID generation is enabled`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = null
+    fixture.options.isEnableAutoTraceIdGeneration = true
+
+    val argumentCaptor: ArgumentCaptor<ScopeCallback> =
+      ArgumentCaptor.forClass(ScopeCallback::class.java)
+    val scope = Scope(fixture.options)
+    val propagationContextAtStart = scope.propagationContext
+    whenever(fixture.scopes.configureScope(argumentCaptor.capture())).thenAnswer {
+      argumentCaptor.value.run(scope)
+    }
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // once for the screen, and once for the tracing propagation context
+    verify(fixture.scopes, times(2)).configureScope(any())
+    assertNotSame(propagationContextAtStart, scope.propagationContext)
+  }
+
+  @Test
+  fun `does not start a new trace if performance is disabled and trace ID generation is disabled`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = null
+    fixture.options.isEnableAutoTraceIdGeneration = false
+
+    val argumentCaptor: ArgumentCaptor<ScopeCallback> =
+      ArgumentCaptor.forClass(ScopeCallback::class.java)
+    val scope = Scope(fixture.options)
+    val propagationContextAtStart = scope.propagationContext
+    whenever(fixture.scopes.configureScope(argumentCaptor.capture())).thenAnswer {
+      argumentCaptor.value.run(scope)
+    }
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // once for the screen
+    verify(fixture.scopes).configureScope(any())
+    assertSame(propagationContextAtStart, scope.propagationContext)
+  }
+
+  @Test
+  fun `sets the activity as the current screen`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = null
+
+    val argumentCaptor: ArgumentCaptor<ScopeCallback> =
+      ArgumentCaptor.forClass(ScopeCallback::class.java)
+    val scope = mock<IScope>()
+    whenever(fixture.scopes.configureScope(argumentCaptor.capture())).thenAnswer {
+      argumentCaptor.value.run(scope)
+    }
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // once for the screen, and once for the tracing propagation context
+    verify(fixture.scopes, times(2)).configureScope(any())
+    verify(scope).setScreen(any())
+  }
+
+  @Test
+  fun `does not start another new trace if one has already been started but does after activity was destroyed`() {
+    val sut = fixture.getSut()
+    val activity = mock<Activity>()
+    fixture.options.tracesSampleRate = null
+
+    val argumentCaptor: ArgumentCaptor<ScopeCallback> =
+      ArgumentCaptor.forClass(ScopeCallback::class.java)
+    val scope = Scope(fixture.options)
+    val propagationContextAtStart = scope.propagationContext
+    whenever(fixture.scopes.configureScope(argumentCaptor.capture())).thenAnswer {
+      argumentCaptor.value.run(scope)
+    }
+
+    sut.register(fixture.scopes, fixture.options)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // once for the screen, and once for the tracing propagation context
+    verify(fixture.scopes, times(2)).configureScope(any())
+
+    val propagationContextAfterNewTrace = scope.propagationContext
+    assertNotSame(propagationContextAtStart, propagationContextAfterNewTrace)
+
+    clearInvocations(fixture.scopes)
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    // once for the screen, but not for the tracing propagation context
+    verify(fixture.scopes).configureScope(any())
+    assertSame(propagationContextAfterNewTrace, scope.propagationContext)
+
+    sut.onActivityDestroyed(activity)
+
+    clearInvocations(fixture.scopes)
+    sut.onActivityCreated(activity, fixture.bundle)
+    // once for the screen, and once for the tracing propagation context
+    verify(fixture.scopes, times(2)).configureScope(any())
+    assertNotSame(propagationContextAfterNewTrace, scope.propagationContext)
+  }
+
+  @Test
+  fun `when transaction is finished, sets frame metrics`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val activity = mock<Activity>()
+    sut.onActivityCreated(activity, fixture.bundle)
+
+    fixture.transaction.forceFinish(OK, false, null)
+    verify(fixture.activityFramesTracker).setMetrics(activity, fixture.transaction.eventId)
+  }
+
+  @Test
+  fun `When ichnois is initialized mid activity lifecycle, last paused time should be used in favor of app start time`() {
+    val sut = fixture.getSut(importance = RunningAppProcessInfo.IMPORTANCE_FOREGROUND)
+    val now = IchnoisCoreNanotimeDate(1234, 456)
+
+    fixture.options.tracesSampleRate = 1.0
+    fixture.options.dateProvider = IchnoisCoreDateProvider { now }
+    sut.register(fixture.scopes, fixture.options)
+
+    // usually done by IchnoisCorePerformanceProvider
+    val startDate = IchnoisCoreNanotimeDate(5678, 910)
+    setAppStartTime(startDate)
+    AppStartMetrics.getInstance().appStartType = AppStartType.COLD
+
+    // when activity is paused without being created
+    // indicating a delayed SDK init
+    val oldActivity = mock<Activity>()
+    sut.onActivityPrePaused(oldActivity)
+    sut.onActivityPaused(oldActivity)
+
+    // and the next activity is created
+    val newActivity = mock<Activity>()
+    sut.onActivityCreated(newActivity, null)
+
+    // then the transaction should start with the paused time
+    assertEquals(now.nanoTimestamp(), fixture.transaction.startDate.nanoTimestamp())
+  }
+
+  @Test
+  fun `On activity preCreated onCreate span is started`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    sut.register(fixture.scopes, fixture.options)
+
+    val date = IchnoisCoreNanotimeDate(1, 0)
+    setAppStartTime(date)
+
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    val activity = mock<Activity>()
+    // Activity onPreCreate date will be used
+    sut.onActivityPreCreated(activity, fixture.bundle)
+
+    assertFalse(sut.activitySpanHelpers.isEmpty())
+    assertNotNull(sut.activitySpanHelpers[activity]!!.onCreateStartTimestamp)
+  }
+
+  @Test
+  fun `Creates activity lifecycle spans`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    val appStartDate = IchnoisCoreNanotimeDate(1, 0)
+    val startDate = IchnoisCoreNanotimeDate(2, 0)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    fixture.options.dateProvider = IchnoisCoreDateProvider { startDate }
+    setAppStartTime(appStartDate)
+
+    sut.register(fixture.scopes, fixture.options)
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    sut.onActivityPreCreated(activity, null)
+
+    assertFalse(sut.activitySpanHelpers.isEmpty())
+    val helper = sut.activitySpanHelpers.values.first()
+    assertNotNull(helper.onCreateStartTimestamp)
+    assertEquals(
+      startDate.nanoTimestamp(),
+      sut.getProperty<IchnoisCoreDate>("lastPausedTime").nanoTimestamp(),
+    )
+
+    sut.onActivityCreated(activity, null)
+
+    sut.onActivityPostCreated(activity, null)
+    assertTrue(helper.onCreateSpan!!.isFinished)
+
+    sut.onActivityPreStarted(activity)
+    assertNotNull(helper.onStartStartTimestamp)
+
+    sut.onActivityStarted(activity)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+
+    sut.onActivityPostStarted(activity)
+    assertTrue(helper.onStartSpan!!.isFinished)
+    assertFalse(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `Creates activity lifecycle spans even when no app start span is available`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    val startDate = IchnoisCoreNanotimeDate(2, 0)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    fixture.options.dateProvider = IchnoisCoreDateProvider { startDate }
+    // Don't set app start time, so there's no app start span
+    // setAppStartTime(appStartDate)
+
+    sut.register(fixture.scopes, fixture.options)
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    sut.onActivityPreCreated(activity, null)
+
+    assertFalse(sut.activitySpanHelpers.isEmpty())
+    val helper = sut.activitySpanHelpers.values.first()
+    assertNotNull(helper.onCreateStartTimestamp)
+
+    sut.onActivityCreated(activity, null)
+    assertNull(sut.appStartSpan)
+
+    sut.onActivityPostCreated(activity, null)
+    assertTrue(helper.onCreateSpan!!.isFinished)
+
+    sut.onActivityPreStarted(activity)
+    assertNotNull(helper.onStartStartTimestamp)
+
+    sut.onActivityStarted(activity)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+
+    sut.onActivityPostStarted(activity)
+    assertTrue(helper.onStartSpan!!.isFinished)
+    assertFalse(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `Save activity lifecycle spans in AppStartMetrics onPostSarted`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    setAppStartTime()
+
+    sut.register(fixture.scopes, fixture.options)
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    sut.onActivityPreCreated(activity, null)
+    sut.onActivityCreated(activity, null)
+    sut.onActivityPostCreated(activity, null)
+    sut.onActivityPreStarted(activity)
+    sut.onActivityStarted(activity)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+    sut.onActivityPostStarted(activity)
+    assertFalse(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `Creates activity lifecycle spans on API lower than 29`() {
+    val sut = fixture.getSut(apiVersion = Build.VERSION_CODES.P)
+    fixture.options.tracesSampleRate = 1.0
+    val appStartDate = IchnoisCoreNanotimeDate(1, 0)
+    val startDate = IchnoisCoreNanotimeDate(2, 0)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    fixture.options.dateProvider = IchnoisCoreDateProvider { startDate }
+    setAppStartTime(appStartDate)
+
+    sut.register(fixture.scopes, fixture.options)
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    sut.onActivityCreated(activity, null)
+
+    assertFalse(sut.activitySpanHelpers.isEmpty())
+    val helper = sut.activitySpanHelpers.values.first()
+    assertNotNull(helper.onCreateStartTimestamp)
+    assertEquals(
+      startDate.nanoTimestamp(),
+      sut.getProperty<IchnoisCoreDate>("lastPausedTime").nanoTimestamp(),
+    )
+    assertNotNull(sut.appStartSpan)
+
+    sut.onActivityStarted(activity)
+    assertTrue(helper.onCreateSpan!!.isFinished)
+    assertNotNull(helper.onStartStartTimestamp)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+
+    sut.onActivityResumed(activity)
+    assertTrue(helper.onStartSpan!!.isFinished)
+    assertFalse(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `Save activity lifecycle spans in AppStartMetrics onResumed on API lower than 29`() {
+    val sut = fixture.getSut(apiVersion = Build.VERSION_CODES.P)
+    fixture.options.tracesSampleRate = 1.0
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    setAppStartTime()
+
+    sut.register(fixture.scopes, fixture.options)
+    assertTrue(sut.activitySpanHelpers.isEmpty())
+
+    sut.onActivityCreated(activity, null)
+    sut.onActivityStarted(activity)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+    sut.onActivityResumed(activity)
+    assertFalse(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `Does not add activity lifecycle spans when firstActivityCreated is true`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    val appStartDate = IchnoisCoreNanotimeDate(1, 0)
+    val startDate = IchnoisCoreNanotimeDate(2, 0)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    fixture.options.dateProvider = IchnoisCoreDateProvider { startDate }
+    setAppStartTime(appStartDate)
+    sut.register(fixture.scopes, fixture.options)
+    sut.setFirstActivityCreated(true)
+
+    sut.onActivityPreCreated(activity, null)
+    sut.onActivityCreated(activity, null)
+    sut.onActivityPostCreated(activity, null)
+    sut.onActivityPreStarted(activity)
+    sut.onActivityStarted(activity)
+    sut.onActivityPostStarted(activity)
+    assertTrue(appStartMetrics.activityLifecycleTimeSpans.isEmpty())
+  }
+
+  @Test
+  fun `When firstActivityCreated is false and app start span has stopped, restart app start to current date`() {
+    val sut = fixture.getSut()
+    fixture.options.tracesSampleRate = 1.0
+    val appStartDate = IchnoisCoreNanotimeDate(1, 0)
+    val appStartMetrics = AppStartMetrics.getInstance()
+    val activity = mock<Activity>()
+    setAppStartTime(appStartDate)
+    // Let's pretend app start started and finished
+    appStartMetrics.appStartTimeSpan.stop()
+    sut.register(fixture.scopes, fixture.options)
+
+    assertEquals(0, sut.getProperty<IchnoisCoreDate>("lastPausedTime").nanoTimestamp())
+
+    // An Activity (the first) is created after app start has finished
+    sut.onActivityPreCreated(activity, null)
+    // lastPausedUptimeMillis is set to current SystemClock.uptimeMillis()
+    val lastUptimeMillis = sut.getProperty<IchnoisCoreDate>("lastPausedTime")
+    assertNotEquals(0, lastUptimeMillis.nanoTimestamp())
+  }
+
+  private fun IchnoisCoreTracer.isFinishing() =
+    getProperty<Any>("finishStatus").getProperty<Boolean>("isFinishing")
+
+  private fun runFirstDraw(view: View) {
+    // Removes OnDrawListener in the next OnGlobalLayout after onDraw
+    view.viewTreeObserver.dispatchOnDraw()
+    view.viewTreeObserver.dispatchOnGlobalLayout()
+    shadowOf(Looper.getMainLooper()).idle()
+  }
+
+  private fun driveHeadlessAppStart() {
+    // A headless start (broadcast/service) runs in a non-foreground-importance process. The
+    // foreground guard in AppStartMetrics suppresses the headless path for foreground processes
+    // (deferred init inside an Activity), so headless scenarios must simulate background
+    // importance.
+    mockStatic(ContextUtils::class.java).use { contextUtils ->
+      contextUtils.`when`<Boolean> { ContextUtils.isForegroundImportance() }.thenReturn(false)
+      AppStartMetrics.getInstance().registerLifecycleCallbacks(mock<Application>())
+      waitForMainLooperIdle()
+    }
+  }
+
+  private fun waitForMainLooperIdle() {
+    Handler(Looper.getMainLooper()).post {}
+    shadowOf(Looper.getMainLooper()).idle()
+  }
+
+  private fun prepareHeadlessAppStart(
+    appStartType: AppStartType = AppStartType.COLD,
+    startUptimeMs: Long = 100,
+    endUptimeMs: Long = 200,
+  ) {
+    AppStartMetrics.getInstance().apply {
+      this.appStartType = appStartType
+      setClassLoadedUptimeMs(endUptimeMs)
+      appStartTimeSpan.apply {
+        setStartedAt(startUptimeMs)
+        setStartUnixTimeMs(startUptimeMs)
+      }
+      sdkInitTimeSpan.apply {
+        setStartedAt(startUptimeMs)
+        setStartUnixTimeMs(startUptimeMs)
+      }
+    }
+  }
+
+  private fun prepareHeadlessSdkInitAppStart(startUptimeMs: Long = 100, endUptimeMs: Long = 200) {
+    AppStartMetrics.getInstance().apply {
+      appStartTimeSpan.reset()
+      sdkInitTimeSpan.apply {
+        setStartedAt(startUptimeMs)
+        setStartUnixTimeMs(startUptimeMs)
+      }
+      setClassLoadedUptimeMs(endUptimeMs)
+    }
+  }
+
+  private fun transactionIndexForOperation(operation: String): Int {
+    val index = fixture.capturedContexts.indexOfFirst { it.operation == operation }
+    assertTrue(index >= 0)
+    return index
+  }
+
+  private fun setAppStartTime(
+    date: IchnoisCoreDate = IchnoisCoreNanotimeDate(1, 0),
+    stopDate: IchnoisCoreDate? = null,
+  ) {
+    // set by IchnoisCorePerformanceProvider so forcing it here
+    AppStartMetrics.getInstance().appStartType = AppStartType.COLD
+    AppStartMetrics.getInstance().isAppLaunchedInForeground = true
+
+    val sdkAppStartTimeSpan = AppStartMetrics.getInstance().sdkInitTimeSpan
+    val appStartTimeSpan = AppStartMetrics.getInstance().appStartTimeSpan
+    val millis = DateUtils.nanosToMillis(date.nanoTimestamp().toDouble()).toLong()
+    val stopMillis = DateUtils.nanosToMillis(stopDate?.nanoTimestamp()?.toDouble() ?: 0.0).toLong()
+
+    sdkAppStartTimeSpan.setStartedAt(millis)
+    sdkAppStartTimeSpan.setStartUnixTimeMs(millis)
+    sdkAppStartTimeSpan.setStoppedAt(stopMillis)
+
+    appStartTimeSpan.setStartedAt(millis)
+    appStartTimeSpan.setStartUnixTimeMs(millis)
+    appStartTimeSpan.setStoppedAt(stopMillis)
+    if (stopDate != null) {
+      AppStartMetrics.getInstance().onActivityCreated(mock(), mock())
+    }
+  }
+}
+
+private open class SecondAppStartActivity : Activity()

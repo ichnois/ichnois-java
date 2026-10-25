@@ -1,0 +1,206 @@
+package io.ichnois.android.core
+
+import android.content.Context
+import android.content.Intent
+import android.content.res.Configuration
+import android.os.BatteryManager
+import android.os.Build
+import android.os.LocaleList
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.ichnois.android.core.internal.util.CpuInfoUtils
+import java.util.Locale
+import java.util.TimeZone
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+
+@RunWith(AndroidJUnit4::class)
+class DeviceInfoUtilTest {
+  private lateinit var context: Context
+
+  @Suppress("deprecation")
+  @BeforeTest
+  fun `set up`() {
+    context = ApplicationProvider.getApplicationContext()
+    context.sendStickyBroadcast(
+      Intent(Intent.ACTION_BATTERY_CHANGED)
+        .putExtra(BatteryManager.EXTRA_LEVEL, 75)
+        .putExtra(BatteryManager.EXTRA_PLUGGED, 0)
+    )
+  }
+
+  @Test
+  fun `same options reuse device info util`() {
+    val options = IchnoisCoreAndroidOptions()
+
+    val first = DeviceInfoUtil.getInstance(context, options)
+    val second = DeviceInfoUtil.getInstance(context, options)
+
+    assertSame(first, second)
+  }
+
+  @Test
+  fun `different options use isolated device info utils`() {
+    val enabledOptions =
+      IchnoisCoreAndroidOptions().apply {
+        dataCollection.setUserInfo(true)
+        isCollectAdditionalContext = true
+        isEnableRootCheck = true
+      }
+    val disabledOptions =
+      IchnoisCoreAndroidOptions().apply {
+        dataCollection.setUserInfo(false)
+        isCollectAdditionalContext = false
+        isEnableRootCheck = false
+      }
+
+    val enabled = DeviceInfoUtil.getInstance(context, enabledOptions)
+    val disabled = DeviceInfoUtil.getInstance(context, disabledOptions)
+    val enabledDevice = enabled.collectDeviceInformation(true, false)
+    val disabledDevice = disabled.collectDeviceInformation(true, false)
+
+    assertNotSame(enabled, disabled)
+    assertNotNull(enabledDevice.id)
+    assertNotNull(enabledDevice.storageSize)
+    assertNotNull(enabled.operatingSystem.isRooted)
+    assertNotNull(disabledDevice.id)
+    assertNull(disabledDevice.storageSize)
+    assertNull(disabled.operatingSystem.isRooted)
+  }
+
+  @Test
+  fun `provides os, memory and sideloaded info`() {
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, IchnoisCoreAndroidOptions())
+
+    val os = deviceInfoUtil.operatingSystem
+    val sideLoadedInfo = deviceInfoUtil.sideLoadedInfo
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(false, false)
+
+    assertNotNull(os.kernelVersion)
+    assertNotNull(os.isRooted)
+
+    assertNotNull(sideLoadedInfo)
+    assertNotNull(sideLoadedInfo.isSideLoaded)
+
+    assertNotNull(deviceInfo.isSimulator)
+    assertNotNull(deviceInfo.memorySize)
+  }
+
+  @Test
+  fun `sets device id when user info is disabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { dataCollection.setUserInfo(false) }
+    val deviceInfo =
+      DeviceInfoUtil.getInstance(context, options).collectDeviceInformation(false, false)
+
+    assertNotNull(deviceInfo.id)
+  }
+
+  @Test
+  fun `sets device id when user info is enabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { dataCollection.setUserInfo(true) }
+    val deviceInfo =
+      DeviceInfoUtil.getInstance(context, options).collectDeviceInformation(false, false)
+
+    assertNotNull(deviceInfo.id)
+  }
+
+  @Test
+  fun `sets default timezone`() {
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, IchnoisCoreAndroidOptions())
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(false, false)
+
+    assertEquals(TimeZone.getDefault(), deviceInfo.timezone)
+  }
+
+  @Test
+  @Config(sdk = [Build.VERSION_CODES.TIRAMISU])
+  fun `preserves timezone from locale unicode extension`() {
+    val defaultTimeZone = TimeZone.getDefault()
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+      val configuration = Configuration(context.resources.configuration)
+      configuration.setLocales(LocaleList(Locale.forLanguageTag("en-US-u-tz-usnyc")))
+      val localizedContext = context.createConfigurationContext(configuration)
+      val deviceInfoUtil = DeviceInfoUtil(localizedContext, IchnoisCoreAndroidOptions())
+      val deviceInfo = deviceInfoUtil.collectDeviceInformation(false, false)
+
+      assertEquals("America/New_York", deviceInfo.timezone?.id)
+    } finally {
+      TimeZone.setDefault(defaultTimeZone)
+    }
+  }
+
+  @Test
+  fun `does include cpu data`() {
+    CpuInfoUtils.getInstance().setCpuMaxFrequencies(listOf(1024))
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, IchnoisCoreAndroidOptions())
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(false, false)
+
+    assertEquals(1, deviceInfo.processorCount)
+    assertEquals(1024.0, deviceInfo.processorFrequency)
+  }
+
+  @Test
+  fun `does include device io data when enabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isCollectAdditionalContext = true }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(true, false)
+
+    // all values are 0 when running via robolectric
+    assertNotNull(deviceInfo.memorySize)
+    assertNotNull(deviceInfo.storageSize)
+    assertNotNull(deviceInfo.freeStorage)
+  }
+
+  @Test
+  fun `does not include device io data when disabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isCollectAdditionalContext = true }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(false, false)
+
+    assertNull(deviceInfo.storageSize)
+    assertNull(deviceInfo.freeStorage)
+  }
+
+  @Test
+  fun `does include dynamic data when enabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isCollectAdditionalContext = true }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(true, true)
+
+    // all values are 0 when running via robolectric
+    assertNotNull(deviceInfo.freeMemory)
+    assertNotNull(deviceInfo.isLowMemory)
+  }
+
+  @Test
+  fun `does not include dynamic data when disabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isCollectAdditionalContext = true }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    val deviceInfo = deviceInfoUtil.collectDeviceInformation(true, false)
+
+    assertNull(deviceInfo.freeMemory)
+    assertNull(deviceInfo.isLowMemory)
+  }
+
+  @Test
+  fun `does perform root check if root checker is enabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isEnableRootCheck = true }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    assertNotNull(deviceInfoUtil.operatingSystem.isRooted)
+  }
+
+  @Test
+  fun `does not perform root check if root checker is disabled`() {
+    val options = IchnoisCoreAndroidOptions().apply { isEnableRootCheck = false }
+    val deviceInfoUtil = DeviceInfoUtil.getInstance(context, options)
+    assertNull(deviceInfoUtil.operatingSystem.isRooted)
+  }
+}

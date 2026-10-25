@@ -1,0 +1,286 @@
+package io.ichnois.util;
+
+import io.ichnois.Baggage;
+import io.ichnois.BaggageHeader;
+import io.ichnois.FilterString;
+import io.ichnois.IScope;
+import io.ichnois.IScopes;
+import io.ichnois.ISpan;
+import io.ichnois.NoOpLogger;
+import io.ichnois.PropagationContext;
+import io.ichnois.IchnoisCoreOptions;
+import io.ichnois.IchnoisCoreTraceHeader;
+import io.ichnois.SpanContext;
+import io.ichnois.TracesSamplingDecision;
+import io.ichnois.W3CTraceparentHeader;
+import java.util.List;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+public final class TracingUtils {
+
+  public static void startNewTrace(final @NotNull IScopes scopes) {
+    scopes.configureScope(
+        scope -> {
+          scope.withPropagationContext(
+              propagationContext -> {
+                scope.setPropagationContext(new PropagationContext());
+              });
+        });
+  }
+
+  public static void setTrace(
+      final @NotNull IScopes scopes, final @NotNull PropagationContext propagationContext) {
+    scopes.configureScope(
+        scope -> {
+          scope.withPropagationContext(
+              oldPropagationContext -> {
+                scope.setPropagationContext(propagationContext);
+              });
+        });
+  }
+
+  public static @Nullable TracingHeaders traceIfAllowed(
+      final @NotNull IScopes scopes,
+      final @NotNull String requestUrl,
+      @Nullable List<String> thirdPartyBaggageHeaders,
+      final @Nullable ISpan span) {
+    final @NotNull IchnoisCoreOptions ichnoisOptions = scopes.getOptions();
+    if (ichnoisOptions.isTraceSampling() && shouldAttachTracingHeaders(requestUrl, ichnoisOptions)) {
+      return trace(scopes, thirdPartyBaggageHeaders, span);
+    }
+
+    return null;
+  }
+
+  public static @Nullable TracingHeaders trace(
+      final @NotNull IScopes scopes,
+      @Nullable List<String> thirdPartyBaggageHeaders,
+      final @Nullable ISpan span) {
+    final @NotNull IchnoisCoreOptions ichnoisOptions = scopes.getOptions();
+
+    if (span != null && !span.isNoOp()) {
+      final @NotNull IchnoisCoreTraceHeader ichnoisTraceHeader = span.toIchnoisCoreTrace();
+      final @Nullable BaggageHeader baggageHeader = span.toBaggageHeader(thirdPartyBaggageHeaders);
+      @Nullable W3CTraceparentHeader w3cTraceparentHeader = null;
+
+      if (ichnoisOptions.isPropagateTraceparent()) {
+        final @NotNull SpanContext spanContext = span.getSpanContext();
+        w3cTraceparentHeader =
+            new W3CTraceparentHeader(
+                spanContext.getTraceId(), spanContext.getSpanId(), ichnoisTraceHeader.isSampled());
+      }
+
+      return new TracingHeaders(ichnoisTraceHeader, baggageHeader, w3cTraceparentHeader);
+    } else {
+      final @NotNull PropagationContextHolder returnValue = new PropagationContextHolder();
+      scopes.configureScope(
+          (scope) -> {
+            returnValue.propagationContext = maybeUpdateBaggage(scope, ichnoisOptions);
+          });
+
+      if (returnValue.propagationContext != null) {
+        final @NotNull PropagationContext propagationContext = returnValue.propagationContext;
+        final @NotNull Baggage baggage = propagationContext.getBaggage();
+        final @NotNull BaggageHeader baggageHeader =
+            BaggageHeader.fromBaggageAndOutgoingHeader(baggage, thirdPartyBaggageHeaders);
+
+        final @NotNull IchnoisCoreTraceHeader ichnoisTraceHeader =
+            new IchnoisCoreTraceHeader(
+                propagationContext.getTraceId(),
+                propagationContext.getSpanId(),
+                propagationContext.isSampled());
+
+        @Nullable W3CTraceparentHeader w3cTraceparentHeader = null;
+        if (ichnoisOptions.isPropagateTraceparent()) {
+          w3cTraceparentHeader =
+              new W3CTraceparentHeader(
+                  propagationContext.getTraceId(),
+                  propagationContext.getSpanId(),
+                  propagationContext.isSampled());
+        }
+
+        return new TracingHeaders(ichnoisTraceHeader, baggageHeader, w3cTraceparentHeader);
+      }
+
+      return null;
+    }
+  }
+
+  public static @NotNull PropagationContext maybeUpdateBaggage(
+      final @NotNull IScope scope, final @NotNull IchnoisCoreOptions ichnoisOptions) {
+    return scope.withPropagationContext(
+        propagationContext -> {
+          @NotNull Baggage baggage = propagationContext.getBaggage();
+          if (baggage.isMutable()) {
+            baggage.setValuesFromScope(scope, ichnoisOptions);
+            baggage.freeze();
+          }
+        });
+  }
+
+  private static boolean shouldAttachTracingHeaders(
+      final @NotNull String requestUrl, final @NotNull IchnoisCoreOptions ichnoisOptions) {
+    return PropagationTargetsUtils.contain(ichnoisOptions.getTracePropagationTargets(), requestUrl);
+  }
+
+  private static final class PropagationContextHolder {
+    private @Nullable PropagationContext propagationContext = null;
+  }
+
+  public static final class TracingHeaders {
+    private final @NotNull IchnoisCoreTraceHeader ichnoisTraceHeader;
+    private final @Nullable BaggageHeader baggageHeader;
+    private final @Nullable W3CTraceparentHeader w3cTraceparentHeader;
+
+    public TracingHeaders(
+        final @NotNull IchnoisCoreTraceHeader ichnoisTraceHeader,
+        final @Nullable BaggageHeader baggageHeader) {
+      this.ichnoisTraceHeader = ichnoisTraceHeader;
+      this.baggageHeader = baggageHeader;
+      this.w3cTraceparentHeader = null;
+    }
+
+    public TracingHeaders(
+        final @NotNull IchnoisCoreTraceHeader ichnoisTraceHeader,
+        final @Nullable BaggageHeader baggageHeader,
+        final @Nullable W3CTraceparentHeader w3cTraceparentHeader) {
+      this.ichnoisTraceHeader = ichnoisTraceHeader;
+      this.baggageHeader = baggageHeader;
+      this.w3cTraceparentHeader = w3cTraceparentHeader;
+    }
+
+    public @NotNull IchnoisCoreTraceHeader getIchnoisCoreTraceHeader() {
+      return ichnoisTraceHeader;
+    }
+
+    public @Nullable BaggageHeader getBaggageHeader() {
+      return baggageHeader;
+    }
+
+    public @Nullable W3CTraceparentHeader getW3cTraceparentHeader() {
+      return w3cTraceparentHeader;
+    }
+  }
+
+  /** Checks if a transaction is to be ignored. */
+  @ApiStatus.Internal
+  public static boolean isIgnored(
+      final @Nullable List<FilterString> ignoredTransactions,
+      final @Nullable String transactionName) {
+    if (transactionName == null) {
+      return false;
+    }
+    if (ignoredTransactions == null || ignoredTransactions.isEmpty()) {
+      return false;
+    }
+
+    for (final FilterString ignoredTransaction : ignoredTransactions) {
+      if (ignoredTransaction.getFilterString().equalsIgnoreCase(transactionName)) {
+        return true;
+      }
+    }
+
+    for (final FilterString ignoredTransaction : ignoredTransactions) {
+
+      try {
+        if (ignoredTransaction.matches(transactionName)) {
+          return true;
+        }
+      } catch (Throwable t) {
+        // ignore invalid regex
+      }
+    }
+
+    return false;
+  }
+
+  @ApiStatus.Internal
+  public static boolean shouldContinueTrace(
+      final @NotNull IchnoisCoreOptions options, final @Nullable Baggage baggage) {
+    final @Nullable String sdkOrgId = options.getEffectiveOrgId();
+    final @Nullable String rawBaggageOrgId = baggage != null ? baggage.getOrgId() : null;
+    final @Nullable String baggageOrgId =
+        (rawBaggageOrgId != null && !rawBaggageOrgId.trim().isEmpty())
+            ? rawBaggageOrgId.trim()
+            : null;
+
+    // Mismatched org IDs always reject regardless of strict mode
+    if (sdkOrgId != null && baggageOrgId != null && !sdkOrgId.equals(baggageOrgId)) {
+      return false;
+    }
+
+    // In strict mode, both must be present and match (unless both are missing)
+    if (options.isStrictTraceContinuation()) {
+      if (sdkOrgId == null && baggageOrgId == null) {
+        return true;
+      }
+      return sdkOrgId != null && sdkOrgId.equals(baggageOrgId);
+    }
+
+    return true;
+  }
+
+  /**
+   * Ensures a non null baggage instance is present by creating a new Baggage instance if null is
+   * passed in.
+   *
+   * <p>Also ensures there is a sampleRand value present on the baggage if it is still mutable. If
+   * the baggage should be frozen, it also takes care of freezing it.
+   *
+   * @param incomingBaggage a nullable baggage instance, if null a new one will be created
+   * @param decision a TracesSamplingDecision for potentially backfilling sampleRand to match that
+   *     decision
+   * @return previous baggage instance or a new one
+   */
+  @ApiStatus.Internal
+  public static @NotNull Baggage ensureBaggage(
+      final @Nullable Baggage incomingBaggage, final @Nullable TracesSamplingDecision decision) {
+    final @Nullable Boolean decisionSampled = decision == null ? null : decision.getSampled();
+    final @Nullable Double decisionSampleRate = decision == null ? null : decision.getSampleRate();
+    final @Nullable Double decisionSampleRand = decision == null ? null : decision.getSampleRand();
+
+    return ensureBaggage(incomingBaggage, decisionSampled, decisionSampleRate, decisionSampleRand);
+  }
+
+  /**
+   * Ensures a non null baggage instance is present by creating a new Baggage instance if null is
+   * passed in.
+   *
+   * <p>Also ensures there is a sampleRand value present on the baggage if it is still mutable. If
+   * the baggage should be frozen, it also takes care of freezing it.
+   *
+   * @param incomingBaggage a nullable baggage instance, if null a new one will be created
+   * @param decisionSampled sampled decision for potential backfilling
+   * @param decisionSampleRate sampleRate for potential backfilling
+   * @param decisionSampleRand sampleRand to be used if none in baggage
+   * @return previous baggage instance or a new one
+   */
+  @ApiStatus.Internal
+  public static @NotNull Baggage ensureBaggage(
+      final @Nullable Baggage incomingBaggage,
+      final @Nullable Boolean decisionSampled,
+      final @Nullable Double decisionSampleRate,
+      final @Nullable Double decisionSampleRand) {
+    final @NotNull Baggage baggage =
+        incomingBaggage == null ? new Baggage(NoOpLogger.getInstance()) : incomingBaggage;
+
+    if (baggage.getSampleRand() == null) {
+      final @Nullable Double baggageSampleRate = baggage.getSampleRate();
+      final @Nullable Double sampleRateMaybe =
+          baggageSampleRate == null ? decisionSampleRate : baggageSampleRate;
+      final @NotNull Double sampleRand =
+          SampleRateUtils.backfilledSampleRand(
+              decisionSampleRand, sampleRateMaybe, decisionSampled);
+      baggage.setSampleRand(sampleRand);
+    }
+    if (baggage.isMutable()) {
+      if (baggage.isShouldFreeze()) {
+        baggage.freeze();
+      }
+    }
+
+    return baggage;
+  }
+}

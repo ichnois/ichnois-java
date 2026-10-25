@@ -1,0 +1,82 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+plugins {
+  application
+  alias(libs.plugins.spring.dependency.management)
+  alias(libs.plugins.kotlin.jvm)
+  alias(libs.plugins.kotlin.spring)
+  id("war")
+  alias(libs.plugins.gretty)
+  id("io.ichnois.systemtest")
+}
+
+application { mainClass.set("io.ichnois.samples.spring.jakarta.Main") }
+
+// Ensure WAR is up to date before run task
+tasks.named("run") { dependsOn(tasks.named("war")) }
+
+group = "io.ichnois.sample.spring-jakarta"
+
+version = "0.0.1-SNAPSHOT"
+
+// Apollo 4.x requires coroutines 1.9.0+, override Spring Boot's managed version
+extra["kotlin-coroutines.version"] = "1.9.0"
+
+dependencyManagement {
+  imports {
+    mavenBom("org.springframework.boot:spring-boot-dependencies:${libs.versions.springboot3.get()}")
+    mavenBom(libs.kotlin.bom.get().toString())
+    mavenBom(libs.jackson.bom.get().toString())
+  }
+}
+
+dependencies {
+  implementation(Config.Libs.springWeb)
+  implementation(Config.Libs.springAop)
+  implementation(Config.Libs.aspectj)
+  implementation(Config.Libs.springSecurityWeb)
+  implementation(Config.Libs.springSecurityConfig)
+  implementation(Config.Libs.kotlinReflect)
+  implementation(kotlin(Config.kotlinStdLib))
+  implementation(projects.ichnoisSpringJakarta)
+  implementation(projects.ichnoisLogback)
+  implementation(projects.ichnoisAsyncProfiler)
+  implementation(libs.jackson.databind)
+  implementation(libs.logback.classic)
+  implementation(libs.servlet.jakarta.api)
+  implementation(libs.slf4j2.api)
+
+  implementation(libs.tomcat.catalina.jakarta)
+  implementation(libs.tomcat.embed.jasper.jakarta)
+
+  testImplementation(projects.ichnoisSystemTestSupport)
+  testImplementation(libs.kotlin.test.junit)
+  testImplementation(libs.springboot3.starter.test) {
+    exclude(group = "org.junit.vintage", module = "junit-vintage-engine")
+  }
+}
+
+tasks.withType<KotlinCompile>().configureEach {
+  kotlin {
+    compilerOptions.freeCompilerArgs = listOf("-Xjsr305=strict")
+  }
+}
+
+tasks.register<Test>("systemTest").configure {
+  group = "verification"
+  description = "Runs the System tests"
+
+  val test = project.extensions.getByType<SourceSetContainer>()["test"]
+  testClassesDirs = test.output.classesDirs
+  classpath = test.runtimeClasspath
+
+  maxParallelForks = 1
+
+  filter { includeTestsMatching("io.ichnois.systemtest*") }
+}
+
+tasks.named("test").configure {
+  require(this is Test)
+
+  filter { excludeTestsMatching("io.ichnois.systemtest.*") }
+}

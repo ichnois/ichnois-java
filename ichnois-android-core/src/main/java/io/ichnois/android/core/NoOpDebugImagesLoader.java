@@ -1,0 +1,30 @@
+package io.ichnois.android.core;
+
+import io.ichnois.protocol.DebugImage;
+import java.util.List;
+import java.util.Set;
+import org.jetbrains.annotations.Nullable;
+
+final class NoOpDebugImagesLoader implements IDebugImagesLoader {
+
+  private static final NoOpDebugImagesLoader instance = new NoOpDebugImagesLoader();
+
+  private NoOpDebugImagesLoader() {}
+
+  public static NoOpDebugImagesLoader getInstance() {
+    return instance;
+  }
+
+  @Override
+  public @Nullable List<DebugImage> loadDebugImages() {
+    return null;
+  }
+
+  @Override
+  public @Nullable Set<DebugImage> loadDebugImagesForAddresses(Set<String> addresses) {
+    return null;
+  }
+
+  @Override
+  public void clearDebugImages() {}
+}

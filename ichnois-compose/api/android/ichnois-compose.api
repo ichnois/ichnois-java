@@ -1,0 +1,52 @@
+public final class io/ichnois/compose/BuildConfig {
+	public static final field BUILD_TYPE Ljava/lang/String;
+	public static final field DEBUG Z
+	public static final field LIBRARY_PACKAGE_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+	public fun <init> ()V
+}
+
+public final class io/ichnois/compose/LocalIchnoisCoreSpanKt {
+	public static final fun getLocalIchnoisCoreSpan ()Landroidx/compose/runtime/ProvidableCompositionLocal;
+}
+
+public final class io/ichnois/compose/IchnoisCoreComposeHelperKt {
+	public static final fun boundsInWindow (Landroidx/compose/ui/layout/LayoutCoordinates;Landroidx/compose/ui/layout/LayoutCoordinates;)Landroidx/compose/ui/geometry/Rect;
+}
+
+public final class io/ichnois/compose/IchnoisCoreComposeTracingKt {
+	public static final fun IchnoisCoreTraced (Ljava/lang/String;Landroidx/compose/ui/Modifier;ZLkotlin/jvm/functions/Function3;Landroidx/compose/runtime/Composer;II)V
+}
+
+public final class io/ichnois/compose/IchnoisCoreModifier {
+	public static final field $stable I
+	public static final field INSTANCE Lio/ichnois/compose/IchnoisCoreModifier;
+	public static final field TAG Ljava/lang/String;
+	public static final fun ichnoisTag (Landroidx/compose/ui/Modifier;Ljava/lang/String;)Landroidx/compose/ui/Modifier;
+}
+
+public final class io/ichnois/compose/IchnoisCoreNavigationIntegrationKt {
+	public static final fun withIchnoisCoreObservableEffect (Landroidx/navigation/NavHostController;Lio/ichnois/android/navigation/IchnoisCoreNavigationListener;Landroidx/compose/runtime/Composer;I)Landroidx/navigation/NavHostController;
+	public static final fun withIchnoisCoreObservableEffect (Landroidx/navigation/NavHostController;ZZLandroidx/compose/runtime/Composer;II)Landroidx/navigation/NavHostController;
+}
+
+public final class io/ichnois/compose/IchnoisCoreUserFeedbackButtonKt {
+	public static final fun IchnoisCoreUserFeedbackButton (Landroidx/compose/ui/Modifier;Ljava/lang/String;Lio/ichnois/IchnoisCoreFeedbackOptions$OptionsConfigurator;Landroidx/compose/runtime/Composer;II)V
+}
+
+public final class io/ichnois/compose/gestures/ComposeGestureTargetLocator : io/ichnois/internal/gestures/GestureTargetLocator {
+	public static final field $stable I
+	public static final field Companion Lio/ichnois/compose/gestures/ComposeGestureTargetLocator$Companion;
+	public fun <init> (Lio/ichnois/ILogger;)V
+	public fun locate (Ljava/lang/Object;FFLio/ichnois/internal/gestures/UiElement$Type;)Lio/ichnois/internal/gestures/UiElement;
+}
+
+public final class io/ichnois/compose/gestures/ComposeGestureTargetLocator$Companion {
+}
+
+public final class io/ichnois/compose/viewhierarchy/ComposeViewHierarchyExporter : io/ichnois/internal/viewhierarchy/ViewHierarchyExporter {
+	public static final field $stable I
+	public fun <init> (Lio/ichnois/ILogger;)V
+	public fun export (Lio/ichnois/protocol/ViewHierarchyNode;Ljava/lang/Object;)Z
+}
+

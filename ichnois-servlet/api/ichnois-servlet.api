@@ -1,0 +1,18 @@
+public final class io/ichnois/servlet/BuildConfig {
+	public static final field ICHNOIS_SERVLET_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
+public class io/ichnois/servlet/IchnoisCoreServletContainerInitializer : javax/servlet/ServletContainerInitializer {
+	public fun <init> ()V
+	public fun onStartup (Ljava/util/Set;Ljavax/servlet/ServletContext;)V
+}
+
+public class io/ichnois/servlet/IchnoisCoreServletRequestListener : javax/servlet/ServletRequestListener {
+	public static final field ICHNOIS_SCOPE_LIFECYCLE_TOKEN_KEY Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (Lio/ichnois/IScopes;)V
+	public fun requestDestroyed (Ljavax/servlet/ServletRequestEvent;)V
+	public fun requestInitialized (Ljavax/servlet/ServletRequestEvent;)V
+}
+
