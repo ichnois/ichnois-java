@@ -36,7 +36,7 @@ otelSemanticConventions = "1.42.0"
 otelSemanticConventionsAlpha = "1.42.0-alpha"
 retrofit = "2.9.0"
 room2 = "2.8.4"
-room3 = "3.0.0-rc01"
+room3 = "3.1.0-alpha03"
 sagp = "6.13.0"
 # Compile-time only, for the AGP types the build-logic convention plugins use. The AGP that
 # actually runs the build comes from the root buildscript (Config.AGP, overridable via VERSION_AGP).
