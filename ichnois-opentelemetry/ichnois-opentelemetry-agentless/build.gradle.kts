@@ -32,7 +32,7 @@ tasks.jar {
       "IchnoisCore-Opentelemetry-SDK-Name" to Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENTLESS_SDK_NAME,
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENTLESS_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-opentelemetry-agentless",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-opentelemetry-agentless",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

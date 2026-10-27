@@ -18,9 +18,9 @@ With Gradle's native dependency management, import the BOM as a platform and omi
 
 ```kotlin
 dependencies {
-  implementation(platform("io.ichnois:ichnois-opentelemetry-bom:<ichnois-version>"))
+  implementation(platform("io.github.ichnois:ichnois-opentelemetry-bom:<ichnois-version>"))
 
-  implementation("io.ichnois:ichnois-opentelemetry-agentless")
+  implementation("io.github.ichnois:ichnois-opentelemetry-agentless")
   implementation("io.opentelemetry:opentelemetry-sdk-extension-autoconfigure")
 }
 ```
@@ -33,7 +33,7 @@ When using Gradle with the Spring dependency management plugin, the last importe
 dependencyManagement {
   imports {
     mavenBom("org.springframework.boot:spring-boot-dependencies:<spring-boot-version>")
-    mavenBom("io.ichnois:ichnois-opentelemetry-bom:<ichnois-version>")
+    mavenBom("io.github.ichnois:ichnois-opentelemetry-bom:<ichnois-version>")
   }
 }
 ```
@@ -50,7 +50,7 @@ When using `spring-boot-starter-parent`, declare `ichnois-opentelemetry-bom` in 
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.ichnois</groupId>
+      <groupId>io.github.ichnois</groupId>
       <artifactId>ichnois-opentelemetry-bom</artifactId>
       <version>${ichnois.version}</version>
       <type>pom</type>
@@ -66,7 +66,7 @@ When importing `spring-boot-dependencies` manually in the same POM, import `ichn
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.ichnois</groupId>
+      <groupId>io.github.ichnois</groupId>
       <artifactId>ichnois-opentelemetry-bom</artifactId>
       <version>${ichnois.version}</version>
       <type>pom</type>

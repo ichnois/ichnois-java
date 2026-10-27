@@ -21,7 +21,7 @@ public final class IchnoisCoreInstrumentation
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-graphql", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-graphql", BuildConfig.VERSION_NAME);
   }
 
   /**

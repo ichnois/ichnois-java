@@ -28,7 +28,7 @@ internal class IchnoisCoreLifecycleObserver(
   private companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-compose", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-compose", BuildConfig.VERSION_NAME)
     }
   }
 

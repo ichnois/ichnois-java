@@ -32,13 +32,13 @@ class IchnoisCoreAndroidOptionsTest {
 
     assertTrue(
       sdkVersion.packageSet.any {
-        it.name == "maven:io.ichnois:ichnois-android-core" && it.version == BuildConfig.VERSION_NAME
+        it.name == "maven:io.github.ichnois:ichnois-android-core" && it.version == BuildConfig.VERSION_NAME
       }
     )
 
     assertTrue(
       sdkVersion.packageSet.any {
-        it.name == "maven:io.ichnois:ichnois" && it.version == BuildConfig.VERSION_NAME
+        it.name == "maven:io.github.ichnois:ichnois" && it.version == BuildConfig.VERSION_NAME
       }
     )
   }

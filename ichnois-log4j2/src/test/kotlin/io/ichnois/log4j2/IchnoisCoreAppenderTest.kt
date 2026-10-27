@@ -439,7 +439,7 @@ class IchnoisCoreAppenderTest {
             assertEquals(BuildConfig.VERSION_NAME, it.version)
             assertTrue(
               it.packageSet.any { pkg ->
-                "maven:io.ichnois:ichnois-log4j2" == pkg.name &&
+                "maven:io.github.ichnois:ichnois-log4j2" == pkg.name &&
                   BuildConfig.VERSION_NAME == pkg.version
               }
             )

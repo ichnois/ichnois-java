@@ -48,7 +48,7 @@ tasks.jar {
     attributes(
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_SPRING_BOOT_4_STARTER_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-spring-boot-4-starter",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-spring-boot-4-starter",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

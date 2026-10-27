@@ -195,7 +195,7 @@ tasks {
         "ichnois-${project.version}-otel-${libs.versions.otelInstrumentation.get()}",
       )
       attributes.put("IchnoisCore-SDK-Name", Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENT_SDK_NAME)
-      attributes.put("IchnoisCore-SDK-Package-Name", "maven:io.ichnois:ichnois-opentelemetry-agent")
+      attributes.put("IchnoisCore-SDK-Package-Name", "maven:io.github.ichnois:ichnois-opentelemetry-agent")
       attributes.put(
         "IchnoisCore-Opentelemetry-SDK-Name",
         Config.IchnoisCore.ICHNOIS_OPENTELEMETRY_AGENT_SDK_NAME,

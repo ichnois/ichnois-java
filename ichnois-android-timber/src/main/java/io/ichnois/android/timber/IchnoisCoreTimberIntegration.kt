@@ -24,7 +24,7 @@ public class IchnoisCoreTimberIntegration(
   private companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-timber", VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-android-timber", VERSION_NAME)
     }
   }
 

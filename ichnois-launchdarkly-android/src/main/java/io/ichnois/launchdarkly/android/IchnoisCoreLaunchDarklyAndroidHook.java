@@ -20,7 +20,7 @@ public final class IchnoisCoreLaunchDarklyAndroidHook extends Hook {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-launchdarkly-android", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-launchdarkly-android", BuildConfig.VERSION_NAME);
   }
 
   public IchnoisCoreLaunchDarklyAndroidHook() {

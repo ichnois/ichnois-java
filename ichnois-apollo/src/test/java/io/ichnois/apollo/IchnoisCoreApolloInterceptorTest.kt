@@ -328,7 +328,7 @@ class IchnoisCoreApolloInterceptorTest {
     assert(fixture.scopes.options.sdkVersion!!.integrationSet.contains("Apollo"))
     val packageInfo =
       fixture.scopes.options.sdkVersion!!.packageSet.firstOrNull { pkg ->
-        pkg.name == "maven:io.ichnois:ichnois-apollo"
+        pkg.name == "maven:io.github.ichnois:ichnois-apollo"
       }
     assertNotNull(packageInfo)
     assert(packageInfo.version == BuildConfig.VERSION_NAME)

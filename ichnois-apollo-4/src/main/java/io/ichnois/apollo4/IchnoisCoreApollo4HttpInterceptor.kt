@@ -470,7 +470,7 @@ constructor(
 
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-apollo-4", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-apollo-4", BuildConfig.VERSION_NAME)
     }
   }
 }

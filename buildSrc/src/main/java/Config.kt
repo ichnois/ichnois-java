@@ -88,7 +88,7 @@ object Config {
         val ICHNOIS_KOTLIN_EXTENSIONS_SDK_NAME = "$ICHNOIS_JAVA_SDK_NAME.kotlin-extensions"
         val ICHNOIS_ASYNC_PROFILER_SDK_NAME = "$ICHNOIS_JAVA_SDK_NAME.async-profiler"
         val ICHNOIS_KTOR_CLIENT_SDK_NAME = "$ICHNOIS_JAVA_SDK_NAME.ktor-client"
-        val group = "io.ichnois"
+        val group = "io.github.ichnois"
         val description = "SDK for ichnois.io"
         val versionNameProp = "versionName"
     }

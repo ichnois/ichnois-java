@@ -88,7 +88,7 @@ tasks.jar {
     attributes(
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_SPRING_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-spring",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-spring",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

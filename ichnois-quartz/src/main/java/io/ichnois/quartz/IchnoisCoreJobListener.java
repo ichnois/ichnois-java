@@ -25,7 +25,7 @@ public final class IchnoisCoreJobListener implements JobListener {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-quartz", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-quartz", BuildConfig.VERSION_NAME);
   }
 
   public static final String ICHNOIS_CHECK_IN_ID_KEY = "ichnois-checkin-id";

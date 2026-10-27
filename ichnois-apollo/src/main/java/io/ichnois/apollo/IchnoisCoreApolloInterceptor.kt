@@ -40,7 +40,7 @@ class IchnoisCoreApolloInterceptor(
   private companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-apollo", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-apollo", BuildConfig.VERSION_NAME)
     }
   }
 

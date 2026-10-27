@@ -21,7 +21,7 @@ public final class IchnoisCoreOpenFeatureHook implements BooleanHook {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-openfeature", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-openfeature", BuildConfig.VERSION_NAME);
   }
 
   public IchnoisCoreOpenFeatureHook() {

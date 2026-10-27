@@ -22,7 +22,7 @@ public final class IchnoisCoreLaunchDarklyServerHook extends Hook {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-launchdarkly-server", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-launchdarkly-server", BuildConfig.VERSION_NAME);
   }
 
   public IchnoisCoreLaunchDarklyServerHook() {

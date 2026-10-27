@@ -109,7 +109,7 @@ class IchnoisCoreTimberIntegrationTest {
 
     assertTrue(
       fixture.options.sdkVersion!!.packageSet.any {
-        it.name == "maven:io.ichnois:ichnois-android-timber" && it.version == BuildConfig.VERSION_NAME
+        it.name == "maven:io.github.ichnois:ichnois-android-timber" && it.version == BuildConfig.VERSION_NAME
       }
     )
   }

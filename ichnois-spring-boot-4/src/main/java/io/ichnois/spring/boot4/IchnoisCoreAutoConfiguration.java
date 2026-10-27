@@ -91,7 +91,7 @@ public class IchnoisCoreAutoConfiguration {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-spring-boot-4-starter", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-spring-boot-4-starter", BuildConfig.VERSION_NAME);
   }
 
   /** Registers general purpose IchnoisCore related beans. */

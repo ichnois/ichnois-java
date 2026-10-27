@@ -66,7 +66,7 @@ tasks.jar {
     attributes(
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_GRAPHQL22_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-graphql-22",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-graphql-22",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

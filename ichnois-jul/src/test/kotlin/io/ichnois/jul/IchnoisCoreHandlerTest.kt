@@ -408,7 +408,7 @@ class IchnoisCoreHandlerTest {
             assertEquals(BuildConfig.VERSION_NAME, it.version)
             assertTrue(
               it.packageSet.any { pkg ->
-                "maven:io.ichnois:ichnois-jul" == pkg.name && BuildConfig.VERSION_NAME == pkg.version
+                "maven:io.github.ichnois:ichnois-jul" == pkg.name && BuildConfig.VERSION_NAME == pkg.version
               }
             )
             assertTrue(it.integrationSet.contains("Jul"))

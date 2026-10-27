@@ -60,7 +60,7 @@ tasks.jar {
     attributes(
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_LOG4J2_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-log4j2",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-log4j2",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

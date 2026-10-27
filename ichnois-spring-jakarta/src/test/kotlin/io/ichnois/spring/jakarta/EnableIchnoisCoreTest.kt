@@ -51,7 +51,7 @@ class EnableIchnoisCoreTest {
       assertThat(options.sdkVersion!!.name).isEqualTo("ichnois.java.spring.jakarta")
       assertThat(options.sdkVersion!!.version).isEqualTo(BuildConfig.VERSION_NAME)
       assertThat(options.sdkVersion!!.packageSet.map { pkg -> pkg.name })
-        .contains("maven:io.ichnois:ichnois-spring-jakarta")
+        .contains("maven:io.github.ichnois:ichnois-spring-jakarta")
       assertThat(options.sdkVersion!!.integrationSet).contains("Spring6")
     }
   }

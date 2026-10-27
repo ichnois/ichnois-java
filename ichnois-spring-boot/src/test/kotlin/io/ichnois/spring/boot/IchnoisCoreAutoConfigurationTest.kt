@@ -407,7 +407,7 @@ class IchnoisCoreAutoConfigurationTest {
               assertThat(sdk.version).isEqualTo(BuildConfig.VERSION_NAME)
               assertThat(sdk.name).isEqualTo(BuildConfig.ICHNOIS_SPRING_BOOT_SDK_NAME)
               assertThat(sdk.packageSet).anyMatch { pkg ->
-                pkg.name == "maven:io.ichnois:ichnois-spring-boot-starter" &&
+                pkg.name == "maven:io.github.ichnois:ichnois-spring-boot-starter" &&
                   pkg.version == BuildConfig.VERSION_NAME
               }
               assertTrue(sdk.integrationSet.contains("SpringBoot"))

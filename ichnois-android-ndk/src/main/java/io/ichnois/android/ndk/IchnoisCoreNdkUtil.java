@@ -11,7 +11,7 @@ final class IchnoisCoreNdkUtil {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-ndk", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-android-ndk", BuildConfig.VERSION_NAME);
   }
 
   private IchnoisCoreNdkUtil() {}
@@ -25,6 +25,6 @@ final class IchnoisCoreNdkUtil {
     if (sdkVersion == null) {
       return;
     }
-    sdkVersion.addPackage("maven:io.ichnois:ichnois-android-ndk", BuildConfig.VERSION_NAME);
+    sdkVersion.addPackage("maven:io.github.ichnois:ichnois-android-ndk", BuildConfig.VERSION_NAME);
   }
 }

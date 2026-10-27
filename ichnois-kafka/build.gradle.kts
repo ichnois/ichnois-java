@@ -53,7 +53,7 @@ tasks.jar {
     attributes(
       "IchnoisCore-Version-Name" to project.version,
       "IchnoisCore-SDK-Name" to Config.IchnoisCore.ICHNOIS_KAFKA_SDK_NAME,
-      "IchnoisCore-SDK-Package-Name" to "maven:io.ichnois:ichnois-kafka",
+      "IchnoisCore-SDK-Package-Name" to "maven:io.github.ichnois:ichnois-kafka",
       "Implementation-Vendor" to "IchnoisCore",
       "Implementation-Title" to project.name,
       "Implementation-Version" to project.version,

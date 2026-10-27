@@ -21,7 +21,7 @@ public class FragmentLifecycleIntegration(
   private companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-fragment", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-android-fragment", BuildConfig.VERSION_NAME)
     }
   }
 

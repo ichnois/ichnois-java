@@ -382,7 +382,7 @@ class IchnoisCoreInstrumentationTest {
       assert(fixture.scopes.options.sdkVersion!!.integrationSet.contains("GraphQL-v22"))
       val packageInfo =
         fixture.scopes.options.sdkVersion!!.packageSet.firstOrNull { pkg ->
-          pkg.name == "maven:io.ichnois:ichnois-graphql-22"
+          pkg.name == "maven:io.github.ichnois:ichnois-graphql-22"
         }
       assertNotNull(packageInfo)
       assert(packageInfo.version == BuildConfig.VERSION_NAME)

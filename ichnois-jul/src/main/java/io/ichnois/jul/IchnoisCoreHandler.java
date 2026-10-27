@@ -62,7 +62,7 @@ public class IchnoisCoreHandler extends Handler {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-jul", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-jul", BuildConfig.VERSION_NAME);
   }
 
   /** Creates an instance of IchnoisCoreHandler. */

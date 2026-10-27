@@ -9,7 +9,7 @@ The Ichnois Java/Kotlin SDK captures application exceptions, messages, logs, bre
 
 ## Quick start
 
-Add the `io.ichnois` SDK dependency from this repository's `ichnois` module, then initialize it with your own DSN:
+Add the `io.github.ichnois:ichnois` SDK dependency from Maven Central, then initialize it with your own DSN:
 
 ```java
 import io.ichnois.Ichnois;

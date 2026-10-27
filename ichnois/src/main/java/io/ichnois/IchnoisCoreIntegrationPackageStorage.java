@@ -86,7 +86,7 @@ public final class IchnoisCoreIntegrationPackageStorage {
       boolean mixedVersionsDetectedThisCheck = false;
 
       for (IchnoisCorePackage pkg : packages) {
-        if (pkg.getName().startsWith("maven:io.ichnois:")
+        if ((pkg.getName().startsWith("maven:io.github.ichnois:") || pkg.getName().startsWith("maven:io.ichnois:"))
             && !sdkVersion.equalsIgnoreCase(pkg.getVersion())) {
           logger.log(
               IchnoisCoreLevel.ERROR,

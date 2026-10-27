@@ -84,7 +84,7 @@ public class ReplayIntegration(
   private companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-replay", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-android-replay", BuildConfig.VERSION_NAME)
     }
 
     // Replays recorded by this process. Their folders hold segment videos the transport may still

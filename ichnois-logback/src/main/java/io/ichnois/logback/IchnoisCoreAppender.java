@@ -57,7 +57,7 @@ public class IchnoisCoreAppender extends UnsynchronizedAppenderBase<ILoggingEven
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-logback", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-logback", BuildConfig.VERSION_NAME);
   }
 
   @Override

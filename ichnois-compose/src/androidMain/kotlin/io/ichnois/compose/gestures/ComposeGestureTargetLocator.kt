@@ -25,7 +25,7 @@ public class ComposeGestureTargetLocator(private val logger: ILogger) : GestureT
 
   init {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-      .addPackage("maven:io.ichnois:ichnois-compose", BuildConfig.VERSION_NAME)
+      .addPackage("maven:io.github.ichnois:ichnois-compose", BuildConfig.VERSION_NAME)
   }
 
   override fun locate(root: Any?, x: Float, y: Float, targetType: UiElement.Type): UiElement? {

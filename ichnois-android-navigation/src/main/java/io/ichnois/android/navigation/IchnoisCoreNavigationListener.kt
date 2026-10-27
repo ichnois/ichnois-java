@@ -212,7 +212,7 @@ constructor(
 
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-navigation", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-android-navigation", BuildConfig.VERSION_NAME)
     }
   }
 }

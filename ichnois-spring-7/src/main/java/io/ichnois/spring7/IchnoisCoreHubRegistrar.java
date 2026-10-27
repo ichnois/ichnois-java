@@ -22,7 +22,7 @@ public class IchnoisCoreHubRegistrar implements ImportBeanDefinitionRegistrar {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-spring-7", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-spring-7", BuildConfig.VERSION_NAME);
   }
 
   @Override

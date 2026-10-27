@@ -78,7 +78,7 @@ internal class BackStackObserver<T : Any>(
   internal companion object {
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-android-navigation3", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-android-navigation3", BuildConfig.VERSION_NAME)
     }
   }
 

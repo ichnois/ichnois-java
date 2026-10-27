@@ -3928,7 +3928,7 @@ public class IchnoisCoreOptions implements RateLimiterConfig {
 
   private void addPackageInfo() {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME);
   }
 
   @ApiStatus.Internal

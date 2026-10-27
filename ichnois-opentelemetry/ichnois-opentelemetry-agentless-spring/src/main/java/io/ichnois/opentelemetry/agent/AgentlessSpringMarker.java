@@ -7,6 +7,6 @@ public final class AgentlessSpringMarker {
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
         .addPackage(
-            "maven:io.ichnois:ichnois-opentelemetry-agentless-spring", BuildConfig.VERSION_NAME);
+            "maven:io.github.ichnois:ichnois-opentelemetry-agentless-spring", BuildConfig.VERSION_NAME);
   }
 }

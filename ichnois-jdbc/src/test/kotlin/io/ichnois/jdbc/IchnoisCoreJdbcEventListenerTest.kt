@@ -132,7 +132,7 @@ class IchnoisCoreJdbcEventListenerTest {
     assert(fixture.scopes.options.sdkVersion!!.integrationSet.contains("JDBC"))
     val packageInfo =
       fixture.scopes.options.sdkVersion!!.packageSet.firstOrNull { pkg ->
-        pkg.name == "maven:io.ichnois:ichnois-jdbc"
+        pkg.name == "maven:io.github.ichnois:ichnois-jdbc"
       }
     assertNotNull(packageInfo)
     assert(packageInfo.version == BuildConfig.VERSION_NAME)

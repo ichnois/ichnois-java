@@ -85,7 +85,7 @@ public val IchnoisCoreKtorClientPlugin: ClientPlugin<IchnoisCoreKtorClientPlugin
   createClientPlugin(ICHNOIS_KTOR_CLIENT_PLUGIN_KEY, ::IchnoisCoreKtorClientPluginConfig) {
     // Init
     IchnoisCoreIntegrationPackageStorage.getInstance()
-      .addPackage("maven:io.ichnois:ichnois-ktor-client", BuildConfig.VERSION_NAME)
+      .addPackage("maven:io.github.ichnois:ichnois-ktor-client", BuildConfig.VERSION_NAME)
     addIntegrationToSdkVersion("KtorClient")
 
     // Options

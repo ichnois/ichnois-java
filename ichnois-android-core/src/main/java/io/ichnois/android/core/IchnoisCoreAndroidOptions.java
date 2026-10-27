@@ -342,7 +342,7 @@ public final class IchnoisCoreAndroidOptions extends IchnoisCoreOptions {
     final String version = BuildConfig.VERSION_NAME;
     sdkVersion = SdkVersion.updateSdkVersion(sdkVersion, name, version);
 
-    sdkVersion.addPackage("maven:io.ichnois:ichnois-android-core", version);
+    sdkVersion.addPackage("maven:io.github.ichnois:ichnois-android-core", version);
 
     return sdkVersion;
   }

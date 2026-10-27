@@ -6,7 +6,7 @@ Please consult the documentation on how to install and use this integration in t
 
 ## Usage
 
-Add `io.ichnois:ichnois-apollo-5` and install the integration while building the Apollo client:
+Add `io.github.ichnois:ichnois-apollo-5` and install the integration while building the Apollo client:
 
 ```kotlin
 val apolloClient =

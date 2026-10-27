@@ -45,7 +45,7 @@ public final class IchnoisCoreFeignClient implements Client {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-openfeign", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-openfeign", BuildConfig.VERSION_NAME);
   }
 
   public IchnoisCoreFeignClient(

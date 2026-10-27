@@ -16,8 +16,8 @@ class IchnoisCoreIntegrationPackageStorageTest {
     val storage = IchnoisCoreIntegrationPackageStorage.getInstance()
     storage.clearStorage()
 
-    storage.addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME)
-    storage.addPackage("maven:io.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
 
     assertFalse(storage.checkForMixedVersions(SystemOutLogger()))
   }
@@ -27,8 +27,8 @@ class IchnoisCoreIntegrationPackageStorageTest {
     val storage = IchnoisCoreIntegrationPackageStorage.getInstance()
     storage.clearStorage()
 
-    storage.addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME)
-    storage.addPackage("maven:io.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
 
     assertFalse(storage.checkForMixedVersions(SystemOutLogger()))
     assertFalse(storage.checkForMixedVersions(SystemOutLogger()))
@@ -39,12 +39,12 @@ class IchnoisCoreIntegrationPackageStorageTest {
     val storage = IchnoisCoreIntegrationPackageStorage.getInstance()
     storage.clearStorage()
 
-    storage.addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME)
-    storage.addPackage("maven:io.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
 
     assertFalse(storage.checkForMixedVersions(SystemOutLogger()))
 
-    storage.addPackage("maven:io.ichnois:ichnois-spring", "8.0.0")
+    storage.addPackage("maven:io.github.ichnois:ichnois-spring", "8.0.0")
     assertTrue(storage.checkForMixedVersions(SystemOutLogger()))
   }
 
@@ -53,8 +53,8 @@ class IchnoisCoreIntegrationPackageStorageTest {
     val storage = IchnoisCoreIntegrationPackageStorage.getInstance()
     storage.clearStorage()
 
-    storage.addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME)
-    storage.addPackage("maven:io.ichnois:ichnois-logback", "8.0.0")
+    storage.addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois-logback", "8.0.0")
 
     assertTrue(storage.checkForMixedVersions(SystemOutLogger()))
   }
@@ -64,8 +64,8 @@ class IchnoisCoreIntegrationPackageStorageTest {
     val storage = IchnoisCoreIntegrationPackageStorage.getInstance()
     storage.clearStorage()
 
-    storage.addPackage("maven:io.ichnois:ichnois", BuildConfig.VERSION_NAME)
-    storage.addPackage("maven:io.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois", BuildConfig.VERSION_NAME)
+    storage.addPackage("maven:io.github.ichnois:ichnois-logback", BuildConfig.VERSION_NAME)
     storage.addPackage("maven:io.ichnois.other:ichnois-other", "1.0.0")
     storage.addPackage("maven:io.opentelemetry.javaagent:opentelemetry-javaagent", "2.0.0")
 

@@ -67,7 +67,7 @@ public open class IchnoisCoreOkHttpInterceptor(
 
     init {
       IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-okhttp", BuildConfig.VERSION_NAME)
+        .addPackage("maven:io.github.ichnois:ichnois-okhttp", BuildConfig.VERSION_NAME)
     }
   }
 

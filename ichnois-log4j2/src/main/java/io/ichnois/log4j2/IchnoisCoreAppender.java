@@ -61,7 +61,7 @@ public class IchnoisCoreAppender extends AbstractAppender {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-log4j2", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-log4j2", BuildConfig.VERSION_NAME);
   }
 
   /**

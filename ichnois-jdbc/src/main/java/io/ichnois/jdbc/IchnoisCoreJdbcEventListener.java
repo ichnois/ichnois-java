@@ -33,7 +33,7 @@ public class IchnoisCoreJdbcEventListener extends SimpleJdbcEventListener {
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-jdbc", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-jdbc", BuildConfig.VERSION_NAME);
   }
 
   public IchnoisCoreJdbcEventListener(final @NotNull IScopes scopes) {

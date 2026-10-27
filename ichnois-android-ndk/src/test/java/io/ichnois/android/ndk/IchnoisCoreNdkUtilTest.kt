@@ -12,7 +12,7 @@ class IchnoisCoreNdkUtilTest {
     IchnoisCoreNdkUtil.addPackage(options.sdkVersion)
     assertTrue(
       options.sdkVersion!!.packageSet.any {
-        it.name == "maven:io.ichnois:ichnois-android-ndk"
+        it.name == "maven:io.github.ichnois:ichnois-android-ndk"
         it.version == BuildConfig.VERSION_NAME
       }
     )

@@ -18,7 +18,7 @@ public class IchnoisCoreServletContainerInitializer implements ServletContainerI
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-servlet-jakarta", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-servlet-jakarta", BuildConfig.VERSION_NAME);
   }
 
   @Override

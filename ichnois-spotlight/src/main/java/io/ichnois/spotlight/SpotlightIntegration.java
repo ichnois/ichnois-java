@@ -34,7 +34,7 @@ public final class SpotlightIntegration
 
   static {
     IchnoisCoreIntegrationPackageStorage.getInstance()
-        .addPackage("maven:io.ichnois:ichnois-spotlight", BuildConfig.VERSION_NAME);
+        .addPackage("maven:io.github.ichnois:ichnois-spotlight", BuildConfig.VERSION_NAME);
   }
 
   private @Nullable IchnoisCoreOptions options;
