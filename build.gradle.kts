@@ -1,6 +1,7 @@
 import com.vanniktech.maven.publish.JavaLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.MavenPublishBaseExtension
+import com.vanniktech.maven.publish.SonatypeHost
 import groovy.util.Node
 import io.gitlab.arturbosch.detekt.extensions.DetektExtension
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
@@ -175,6 +176,11 @@ subprojects {
         afterEvaluate {
             configure<MavenPublishBaseExtension> {
                 assignAarTypes()
+                publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+                val hasSigningKey = project.hasProperty("signingInMemoryKey") || project.hasProperty("signing.keyId")
+                if (hasSigningKey) {
+                    signAllPublications()
+                }
             }
 
             // this is needed for ichnois-unity to consume our artifacts locally as proper maven publication
