@@ -50,4 +50,4 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --no-daemon
+          ./gradlew publish --no-configuration-cache --no-daemon
