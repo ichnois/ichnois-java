@@ -2,8 +2,8 @@ package io.ichnois.android.ndk;
 
 import io.ichnois.android.core.NdkHandlerStrategy;
 import io.ichnois.android.core.IchnoisCoreAndroidOptions;
-import io.ichnois.ndk.NativeModuleListLoader;
-import io.ichnois.ndk.NdkOptions;
+import io.sentry.ndk.NativeModuleListLoader;
+import io.sentry.ndk.NdkOptions;
 import io.ichnois.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -23,7 +23,7 @@ public final class IchnoisCoreNdk {
             () -> {
               try {
                 //noinspection UnstableApiUsage
-                io.ichnois.ndk.IchnoisCoreNdk.loadNativeLibraries();
+                io.sentry.ndk.SentryNdk.loadNativeLibraries();
               } catch (Throwable t) {
                 // ignored
                 // if loadLibrary() fails, the later init() will throw an exception anyway
@@ -59,11 +59,11 @@ public final class IchnoisCoreNdk {
         final int handlerStrategy = options.getNdkHandlerStrategy();
         if (handlerStrategy == NdkHandlerStrategy.ICHNOIS_HANDLER_STRATEGY_DEFAULT.getValue()) {
           ndkOptions.setNdkHandlerStrategy(
-              io.ichnois.ndk.NdkHandlerStrategy.ICHNOIS_HANDLER_STRATEGY_DEFAULT);
+              io.sentry.ndk.NdkHandlerStrategy.SENTRY_HANDLER_STRATEGY_DEFAULT);
         } else if (handlerStrategy
             == NdkHandlerStrategy.ICHNOIS_HANDLER_STRATEGY_CHAIN_AT_START.getValue()) {
           ndkOptions.setNdkHandlerStrategy(
-              io.ichnois.ndk.NdkHandlerStrategy.ICHNOIS_HANDLER_STRATEGY_CHAIN_AT_START);
+              io.sentry.ndk.NdkHandlerStrategy.SENTRY_HANDLER_STRATEGY_CHAIN_AT_START);
         }
 
         final @Nullable Double tracesSampleRate = options.getTracesSampleRate();
@@ -77,7 +77,7 @@ public final class IchnoisCoreNdk {
         ndkOptions.setAppHangTimeoutMillis(options.getNdkAppHangTimeoutIntervalMillis());
 
         //noinspection UnstableApiUsage
-        io.ichnois.ndk.IchnoisCoreNdk.init(ndkOptions);
+        io.sentry.ndk.SentryNdk.init(ndkOptions);
 
         // only add scope sync observer if the scope sync is enabled.
         if (options.isEnableScopeSync()) {
@@ -99,7 +99,7 @@ public final class IchnoisCoreNdk {
     try {
       if (loadLibraryLatch.await(2000, TimeUnit.MILLISECONDS)) {
         //noinspection UnstableApiUsage
-        io.ichnois.ndk.IchnoisCoreNdk.close();
+        io.sentry.ndk.SentryNdk.close();
       } else {
         throw new IllegalStateException("Timeout waiting for IchnoisCore NDK library to load");
       }

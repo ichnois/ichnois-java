@@ -5,7 +5,7 @@ import io.ichnois.IchnoisCoreLevel;
 import io.ichnois.IchnoisCoreOptions;
 import io.ichnois.android.core.IDebugImagesLoader;
 import io.ichnois.android.core.IchnoisCoreAndroidOptions;
-import io.ichnois.ndk.NativeModuleListLoader;
+import io.sentry.ndk.NativeModuleListLoader;
 import io.ichnois.protocol.DebugImage;
 import io.ichnois.util.AutoClosableReentrantLock;
 import io.ichnois.util.Objects;
@@ -51,10 +51,10 @@ public final class DebugImagesLoader implements IDebugImagesLoader {
     try (final @NotNull IIchnoisCoreLifecycleToken ignored = debugImagesLock.acquire()) {
       if (debugImages == null) {
         try {
-          final io.ichnois.ndk.DebugImage[] debugImagesArr = moduleListLoader.loadModuleList();
+          final io.sentry.ndk.DebugImage[] debugImagesArr = moduleListLoader.loadModuleList();
           if (debugImagesArr != null) {
             debugImages = new ArrayList<>(debugImagesArr.length);
-            for (io.ichnois.ndk.DebugImage d : debugImagesArr) {
+            for (io.sentry.ndk.DebugImage d : debugImagesArr) {
               final DebugImage debugImage = new DebugImage();
               debugImage.setCodeFile(d.getCodeFile());
               debugImage.setDebugFile(d.getDebugFile());

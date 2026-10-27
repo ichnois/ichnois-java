@@ -1,7 +1,8 @@
 package io.ichnois.android.ndk
 
 import io.ichnois.android.core.IchnoisCoreAndroidOptions
-import io.ichnois.ndk.NdkOptions
+import io.sentry.ndk.NdkOptions
+import io.sentry.ndk.SentryNdk
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -24,9 +25,9 @@ class IchnoisCoreNdkTest {
         },
       closure: () -> Unit,
     ) {
-      Mockito.mockStatic(io.ichnois.ndk.IchnoisCoreNdk::class.java).use { utils ->
+      Mockito.mockStatic(SentryNdk::class.java).use { utils ->
         utils
-          .`when`<Any> { io.ichnois.ndk.IchnoisCoreNdk.init(any<NdkOptions>()) }
+          .`when`<Any> { SentryNdk.init(any<NdkOptions>()) }
           .doAnswer { capturedOptions = it.arguments[0] as NdkOptions }
         IchnoisCoreNdk.init(options)
         closure.invoke()

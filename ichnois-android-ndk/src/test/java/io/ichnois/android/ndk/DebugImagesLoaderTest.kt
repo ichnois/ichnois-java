@@ -1,7 +1,7 @@
 package io.ichnois.android.ndk
 
 import io.ichnois.android.core.IchnoisCoreAndroidOptions
-import io.ichnois.ndk.NativeModuleListLoader
+import io.sentry.ndk.NativeModuleListLoader
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -40,7 +40,7 @@ class DebugImagesLoaderTest {
     whenever(fixture.nativeLoader.loadModuleList()).thenReturn(arrayOf())
     assertNotNull(sut.loadDebugImages())
 
-    whenever(fixture.nativeLoader.loadModuleList()).thenReturn(arrayOf(io.ichnois.ndk.DebugImage()))
+    whenever(fixture.nativeLoader.loadModuleList()).thenReturn(arrayOf(io.sentry.ndk.DebugImage()))
     assertTrue(sut.loadDebugImages()!!.isEmpty())
   }
 

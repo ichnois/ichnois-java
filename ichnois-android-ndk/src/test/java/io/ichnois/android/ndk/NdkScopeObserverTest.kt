@@ -6,7 +6,7 @@ import io.ichnois.DateUtils
 import io.ichnois.JsonSerializer
 import io.ichnois.IchnoisCoreLevel
 import io.ichnois.IchnoisCoreOptions
-import io.ichnois.ndk.INativeScope
+import io.sentry.ndk.INativeScope
 import io.ichnois.protocol.User
 import io.ichnois.test.DeferredExecutorService
 import io.ichnois.test.ImmediateExecutorService
