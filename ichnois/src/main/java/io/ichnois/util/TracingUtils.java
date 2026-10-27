@@ -151,6 +151,10 @@ public final class TracingUtils {
       this.w3cTraceparentHeader = w3cTraceparentHeader;
     }
 
+    public @NotNull IchnoisCoreTraceHeader getIchnoisTraceHeader() {
+      return ichnoisTraceHeader;
+    }
+
     public @NotNull IchnoisCoreTraceHeader getIchnoisCoreTraceHeader() {
       return ichnoisTraceHeader;
     }

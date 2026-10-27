@@ -8237,6 +8237,7 @@ public final class io/ichnois/util/TracingUtils$TracingHeaders {
 	public fun <init> (Lio/ichnois/IchnoisCoreTraceHeader;Lio/ichnois/BaggageHeader;Lio/ichnois/W3CTraceparentHeader;)V
 	public fun getBaggageHeader ()Lio/ichnois/BaggageHeader;
 	public fun getIchnoisCoreTraceHeader ()Lio/ichnois/IchnoisCoreTraceHeader;
+	public fun getIchnoisTraceHeader ()Lio/ichnois/IchnoisCoreTraceHeader;
 	public fun getW3cTraceparentHeader ()Lio/ichnois/W3CTraceparentHeader;
 }
 
