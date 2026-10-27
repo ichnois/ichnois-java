@@ -26,8 +26,8 @@ dependencies {
   implementation(kotlin(Config.kotlinStdLib, KotlinCompilerVersion.VERSION))
   implementation(projects.ichnoisSpringBootStarter)
   implementation(projects.ichnoisGraphql)
-  implementation(platform("com.netflix.graphql.dgs:graphql-dgs-platform-dependencies:4.9.2"))
-  implementation("com.netflix.graphql.dgs:graphql-dgs-subscriptions-websockets-autoconfigure:4.9.2")
+  implementation(platform("com.netflix.graphql.dgs:graphql-dgs-platform-dependencies:12.1.0"))
+  implementation("com.netflix.graphql.dgs:graphql-dgs-subscriptions-websockets-autoconfigure:12.1.0")
   implementation("com.netflix.graphql.dgs:graphql-dgs-spring-boot-starter")
   testImplementation(libs.springboot.starter.test) {
     exclude(group = "org.junit.vintage", module = "junit-vintage-engine")
