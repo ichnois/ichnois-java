@@ -177,7 +177,9 @@ subprojects {
             configure<MavenPublishBaseExtension> {
                 assignAarTypes()
                 publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
-                val hasSigningKey = project.hasProperty("signingInMemoryKey") || project.hasProperty("signing.keyId")
+                val inMemoryKey = project.findProperty("signingInMemoryKey")?.toString()?.trim()
+                val keyId = project.findProperty("signing.keyId")?.toString()?.trim()
+                val hasSigningKey = (!inMemoryKey.isNullOrEmpty()) || (!keyId.isNullOrEmpty())
                 if (hasSigningKey) {
                     signAllPublications()
                 }
