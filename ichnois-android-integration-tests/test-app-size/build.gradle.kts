@@ -50,7 +50,7 @@ dependencies {
   implementation(projects.ichnoisAndroidFragment)
 }
 
-ichnois {
+sentry {
   org.set("ichnois-sdks")
   projectName.set("ichnois-android")
   authToken.set(System.getenv("ICHNOIS_AUTH_TOKEN"))
