@@ -53,11 +53,21 @@ jobs:
           chmod +x gradlew
           if [ -n "$SIGNING_KEY" ]; then
             export ORG_GRADLE_PROJECT_signingInMemoryKey="$SIGNING_KEY"
+            if [ -z "$SIGNING_KEY_ID" ]; then
+              RAW_ID=$(printf '%s\n' "$SIGNING_KEY" | gpg --show-keys --keyid-format short 2>/dev/null | grep -E '^(sec|pub)' | head -n1 | awk '{print $2}' | cut -d/ -f2)
+              if [ -z "$RAW_ID" ]; then
+                RAW_ID=$(printf '%s\n' "$SIGNING_KEY" | gpg --list-packets 2>/dev/null | grep -m1 -i 'keyid' | awk '{print $NF}' | tr -d '0x:')
+              fi
+              SIGNING_KEY_ID="$RAW_ID"
+            fi
+            if [ -n "$SIGNING_KEY_ID" ]; then
+              CLEAN_KEY_ID=$(echo "$SIGNING_KEY_ID" | tr -d '0x' | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+              SHORT_KEY_ID="${CLEAN_KEY_ID: -8}"
+              export ORG_GRADLE_PROJECT_signingInMemoryKeyId="$SHORT_KEY_ID"
+              echo "Configured GPG Short Key ID: $SHORT_KEY_ID"
+            fi
           fi
           if [ -n "$SIGNING_PASSWORD" ]; then
             export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$SIGNING_PASSWORD"
-          fi
-          if [ -n "$SIGNING_KEY_ID" ]; then
-            export ORG_GRADLE_PROJECT_signingInMemoryKeyId="$SIGNING_KEY_ID"
           fi
           ./gradlew publishToMavenCentral --no-configuration-cache --no-daemon
